@@ -1,0 +1,30 @@
+# Build output
+/bin/
+/dist/
+/ovnfs
+/ovnfs.exe
+*.exe
+*.test
+*.out
+*.prof
+*.pprof
+coverage.*
+
+# Go workspace / vendoring
+go.work
+go.work.sum
+/vendor/
+
+# Local state and logs
+*.log
+*.pid
+*.sock
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

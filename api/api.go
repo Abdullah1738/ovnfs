@@ -1,0 +1,334 @@
+// Package api defines the admin operations shared by the daemon and the CLI.
+//
+// Every CLI verb is exactly one operation with the same name (a subverb joins
+// with a dot: `ovnfs mesh join T` sends `mesh.join`), and its flags map 1:1
+// onto the argument struct below: `ovnfs fork app --name b` sends `fork` with
+// ForkArgs{Checkout: "app", Name: "b"} and prints a ForkReply.
+package api
+
+import "time"
+
+// Ops lists every operation the daemon serves, in CLI help order.
+var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "drop", "explain", "plan", "attach", "pull", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
+
+// Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
+type Checkout struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`             // folder to cd into
+	Source  string    `json:"source"`           // folder the checkout was opened from
+	Base    string    `json:"base"`             // frozen capture the checkout sits on
+	Parent  string    `json:"parent,omitempty"` // snapshot the checkout was created from
+	Git     bool      `json:"git"`              // a working .git exists inside the checkout
+	Dirty   bool      `json:"dirty"`            // changes since the last snapshot
+	Created time.Time `json:"created"`
+}
+
+// Snapshot is an immutable state of a checkout; Tree is its content id once hashed.
+type Snapshot struct {
+	ID       string    `json:"id"`
+	Checkout string    `json:"checkout"`
+	Parent   string    `json:"parent,omitempty"`
+	Label    string    `json:"label,omitempty"`
+	Created  time.Time `json:"created"`
+	Tree     string    `json:"tree,omitempty"`
+}
+
+// Rule is one `<class> <predicate>` line and where it came from.
+type Rule struct {
+	Class  string `json:"class"`
+	Text   string `json:"text"`
+	Origin string `json:"origin"` // "builtin:3", ".o2/ovnfs.yml:6", "flag"
+}
+
+// Status describes the running daemon.
+type Status struct {
+	Version   int     `json:"version"`
+	PID       int     `json:"pid"`
+	Uptime    float64 `json:"uptime_s"`
+	Proto     string  `json:"proto"`
+	Port      int     `json:"port"`
+	Mount     string  `json:"mount"`
+	State     string  `json:"state"`
+	Socket    string  `json:"socket"` // admin socket clients dial for these operations
+	Checkouts int     `json:"checkouts"`
+	Snapshots int     `json:"snapshots"`
+	Bases     int     `json:"bases"`
+	Layers    int     `json:"layers"`
+	Memory    Usage   `json:"memory"`     // checkouts' written files held in memory before they spill to disk
+	BlobCache Usage   `json:"blob_cache"` // content-addressed blobs served from memory
+}
+
+// Usage is resident bytes against a limit; a zero Limit means the tier is off.
+type Usage struct {
+	Used  int64 `json:"used"`
+	Limit int64 `json:"limit"`
+}
+
+// LsReply lists live checkouts and retained snapshots.
+type LsReply struct {
+	Checkouts []Checkout `json:"checkouts"`
+	Snapshots []Snapshot `json:"snapshots"`
+}
+
+// NewArgs opens a checkout from a folder (any folder, repo or not) or from a snapshot.
+type NewArgs struct {
+	Dir      string   `json:"dir,omitempty"`      // absolute; exactly one of Dir and Snapshot
+	Snapshot string   `json:"snapshot,omitempty"` // snapshot id
+	Rev      string   `json:"rev,omitempty"`      // commit or local branch; incompatible with Snapshot
+	Take     []string `json:"take,omitempty"`     // "SRC:PATH" overrides of the starting tree; SRC is "." (folder), "" (index) or a revision
+	Name     string   `json:"name,omitempty"`     // default: derived from the folder name
+	Rules    []string `json:"rules,omitempty"`    // extra rule lines, highest precedence
+}
+
+// Capture summarizes how a source folder was classified when a checkout was opened.
+type Capture struct {
+	Root        string   `json:"root"`         // source root (a repo's top level when inside one)
+	Files       int      `json:"files"`        // source-class files in the snapshot
+	Bytes       int64    `json:"bytes"`        // their total size
+	Hashed      int      `json:"hashed"`       // files read and hashed (stat-cache misses)
+	HashedBytes int64    `json:"hashed_bytes"` // bytes read for hashing
+	Cache       int      `json:"cache"`        // cache-class roots
+	Local       int      `json:"local"`        // local-class roots
+	Hidden      int      `json:"hidden"`       // hidden-class roots
+	Repos       []string `json:"repos"`        // git repo roots found ("" is the source root)
+	Seconds     float64  `json:"seconds"`
+}
+
+// NewReply returns the created checkout.
+type NewReply struct {
+	Checkout Checkout `json:"checkout"`
+	Capture  *Capture `json:"capture,omitempty"` // nil when opened from a snapshot
+	Warnings []string `json:"warnings"`
+}
+
+// ForkArgs snapshots a checkout and opens a second checkout on that snapshot.
+type ForkArgs struct {
+	Checkout string `json:"checkout"`
+	Name     string `json:"name,omitempty"` // default: <checkout>-<n>
+	Label    string `json:"label,omitempty"`
+}
+
+// ForkReply returns the parent's new snapshot and the child checkout.
+type ForkReply struct {
+	Snapshot Snapshot `json:"snapshot"`
+	Checkout Checkout `json:"checkout"`
+}
+
+// SnapArgs freezes a checkout's changes into a snapshot.
+type SnapArgs struct {
+	Checkout string `json:"checkout"`
+	Label    string `json:"label,omitempty"`
+	Wait     bool   `json:"wait,omitempty"` // block until the tree id is known
+}
+
+// SnapReply returns the snapshot (Tree is empty unless Wait was set).
+type SnapReply struct {
+	Snapshot Snapshot `json:"snapshot"`
+}
+
+// DiffArgs compares a checkout's current state with a snapshot (default: its base).
+type DiffArgs struct {
+	Checkout string `json:"checkout"`
+	From     string `json:"from,omitempty"` // snapshot id; default: the checkout's base capture
+	Patch    bool   `json:"patch,omitempty"`
+}
+
+// Change is one source-class path that differs; Status is A, M, D or T (type change).
+type Change struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+}
+
+// DiffReply lists changed source paths; Patch is a unified diff when requested.
+type DiffReply struct {
+	From    string   `json:"from"` // snapshot id or "base"
+	Changes []Change `json:"changes"`
+	Patch   string   `json:"patch,omitempty"`
+}
+
+// ApplyArgs merges a checkout's source changes back into the folder it came from.
+type ApplyArgs struct {
+	Checkout string `json:"checkout"`
+	DryRun   bool   `json:"dry_run,omitempty"`
+	Branch   string `json:"branch,omitempty"` // instead: fetch the checkout's commits into the source repo as this branch
+}
+
+// Conflict is a path apply or pull could not settle: left untouched, or with
+// Markers holding git-style conflict markers for the user to resolve; the next
+// apply or pull reports it again until they are gone.
+type Conflict struct {
+	Path    string `json:"path"`
+	Reason  string `json:"reason"`
+	Markers bool   `json:"markers,omitempty"`
+}
+
+// ApplyReply reports what apply wrote (or would write, for a dry run).
+type ApplyReply struct {
+	Snapshot  Snapshot   `json:"snapshot"` // the snapshot that was applied
+	Source    string     `json:"source"`
+	Applied   []Change   `json:"applied"`
+	Merged    []string   `json:"merged"`    // paths changed on both sides and merged cleanly
+	Conflicts []Conflict `json:"conflicts"` // written only with conflict markers
+	Branch    string     `json:"branch,omitempty"`
+	Commit    string     `json:"commit,omitempty"`
+}
+
+// RmArgs removes a checkout; its snapshots stay until dropped.
+type RmArgs struct {
+	Checkout string `json:"checkout"`
+}
+
+// DropArgs releases a snapshot.
+type DropArgs struct {
+	Snapshot string `json:"snapshot"`
+}
+
+// ExplainArgs asks which class a path gets and which rule decided it.
+// Exactly one of Dir and Checkout is set; Path is relative to it.
+type ExplainArgs struct {
+	Dir      string   `json:"dir,omitempty"`
+	Checkout string   `json:"checkout,omitempty"`
+	Path     string   `json:"path"`
+	Rules    []string `json:"rules,omitempty"`
+}
+
+// ExplainReply names the deciding rule; At is the ancestor that decided when it is not Path.
+type ExplainReply struct {
+	Path   string `json:"path"`
+	Class  string `json:"class"`
+	Rule   Rule   `json:"rule"`
+	At     string `json:"at"`
+	Exists bool   `json:"exists"`
+}
+
+// AttachArgs makes a checkout (or a folder, captured now) appear on another machine.
+// Names, sizes and modes are there at once; content moves on first read and
+// stays cached there. The link runs over the mesh when To names a member, else
+// over ssh, and reconnects until this daemon stops.
+type AttachArgs struct {
+	Checkout  string `json:"checkout,omitempty"` // exactly one of Checkout and Dir
+	Dir       string `json:"dir,omitempty"`
+	To        string `json:"to"`                   // mesh member (name or node id prefix) or ssh destination, e.g. "devbox" or "me@host"
+	Name      string `json:"name,omitempty"`       // checkout name on the remote machine
+	RemoteBin string `json:"remote_bin,omitempty"` // ovnfs on the remote machine over ssh; default "ovnfs"
+}
+
+// AttachReply says where the checkout appeared.
+type AttachReply struct {
+	Checkout       string   `json:"checkout"` // the checkout on this machine that was offered
+	Snapshot       Snapshot `json:"snapshot"`
+	Host           string   `json:"host"`
+	RemoteCheckout string   `json:"remote_checkout"`
+	RemotePath     string   `json:"remote_path"`
+}
+
+// PullArgs merges an attached remote checkout's source changes into its local checkout.
+type PullArgs struct {
+	Checkout string `json:"checkout"`
+	From     string `json:"from,omitempty"` // host passed to attach; optional with one attachment
+	DryRun   bool   `json:"dry_run,omitempty"`
+}
+
+// PullReply reports changes merged into the local checkout and its conflicts.
+type PullReply = ApplyReply
+
+// Mesh is this machine's mesh: the machines that reach each other by node key,
+// directly or through the relay. An empty Mesh id means it is in none.
+type Mesh struct {
+	Mesh    string       `json:"mesh"`
+	Node    string       `json:"node"`            // this machine's node id (64 hex, its Ed25519 key)
+	Relay   string       `json:"relay,omitempty"` // relay URL in use; "" = none
+	RelayUp bool         `json:"relay_up"`        // the relay link is up
+	Members []MeshMember `json:"members"`
+}
+
+// MeshMember is one machine of the mesh.
+type MeshMember struct {
+	Node string   `json:"node"` // node id, 64 hex
+	Name string   `json:"name"`
+	Ways []string `json:"ways,omitempty"` // where it last said it listens, e.g. "udp:10.0.0.5:8377", "relay"
+	Self bool     `json:"self,omitempty"`
+}
+
+// MeshSetupArgs starts a mesh on this machine if it is in none, and invites one more.
+type MeshSetupArgs struct {
+	Relay string `json:"relay,omitempty"` // for a new mesh: relay URL, "off" for none; default production
+}
+
+// MeshInvite is a single-use join token for one more machine.
+type MeshInvite struct {
+	Mesh    Mesh      `json:"mesh"`
+	Token   string    `json:"token"` // o2://join?…, for `ovnfs mesh join` on the other machine
+	Expires time.Time `json:"expires"`
+}
+
+// MeshJoinArgs joins the mesh a token invites to.
+type MeshJoinArgs struct {
+	Token string `json:"token"`
+}
+
+// MeshRmArgs removes another machine from the mesh.
+type MeshRmArgs struct {
+	Member string `json:"member"` // name or node id prefix
+}
+
+// ShareArgs serves one checkout over remote-fs on a Unix socket, for a VM's `home`
+// device or a peer. Sharing again replaces the previous share of the checkout.
+type ShareArgs struct {
+	Checkout string `json:"checkout"`
+	Writable bool   `json:"writable,omitempty"`
+}
+
+// ShareReply names the socket; it lives until the checkout is removed or the daemon stops.
+type ShareReply struct {
+	Socket   string `json:"socket"`
+	Writable bool   `json:"writable"`
+}
+
+// PlanArgs computes what a launch elsewhere would transfer, rebuild and leave behind.
+// Exactly one of Dir and Checkout is set.
+type PlanArgs struct {
+	Dir      string   `json:"dir,omitempty"`
+	Checkout string   `json:"checkout,omitempty"`
+	On       string   `json:"on"` // "cloud" or "peer"
+	Rules    []string `json:"rules,omitempty"`
+}
+
+// PlanRepo is one git repo found under the source and how far it is pushed.
+type PlanRepo struct {
+	Path     string `json:"path"` // relative to the source root; "" is the root
+	Origin   string `json:"origin,omitempty"`
+	Head     string `json:"head,omitempty"`
+	Upstream string `json:"upstream,omitempty"` // remote-tracking ref used as the fetch base
+	Pushed   bool   `json:"pushed"`             // HEAD is contained in Upstream
+}
+
+// PlanSet counts paths of one kind; Paths lists at most 20 of them.
+type PlanSet struct {
+	Files int      `json:"files"`
+	Bytes int64    `json:"bytes"`
+	Paths []string `json:"paths,omitempty"`
+}
+
+// PlanCache is one cache root and how it is recreated elsewhere.
+type PlanCache struct {
+	Root    string   `json:"root"`
+	Rebuild string   `json:"rebuild,omitempty"` // empty: starts empty
+	Key     []string `json:"key,omitempty"`
+	KeyHash string   `json:"key_hash,omitempty"`
+}
+
+// PlanReply splits a source by channel: origin, this machine, rebuilt, or staying here.
+type PlanReply struct {
+	Root     string      `json:"root"`
+	On       string      `json:"on"`
+	Lock     string      `json:"lock"` // hash of the resolved manifest
+	Repos    []PlanRepo  `json:"repos"`
+	Source   PlanSet     `json:"source"` // every source-class file
+	Origin   PlanSet     `json:"origin"` // fetched from a git origin by id
+	Here     PlanSet     `json:"here"`   // sent from this machine
+	Cache    []PlanCache `json:"cache"`
+	Local    PlanSet     `json:"local"`
+	Hidden   PlanSet     `json:"hidden"`
+	Warnings []string    `json:"warnings"`
+}

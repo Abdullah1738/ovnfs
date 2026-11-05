@@ -1,0 +1,187 @@
+package overlay
+
+import (
+	"fmt"
+	"io/fs"
+	"maps"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+// Bottom is the read-only filesystem beneath an overlay's immutable layers.
+type Bottom interface {
+	Lstat(p string) (os.FileInfo, error)
+	ReadDir(p string) ([]os.FileInfo, error)
+	Open(p string) (Content, error)
+	Readlink(p string) (string, error)
+	CopyTo(p, dst string) error
+}
+
+// Kind identifies a frozen layer entry, including deletion markers.
+type Kind uint8
+
+// Layer entry kinds distinguish data from deletion markers.
+const (
+	KindFile Kind = iota + 1
+	KindDir
+	KindSymlink
+	KindWhiteout
+)
+
+// Entry describes one indexed path; whiteouts have no file information.
+type Entry struct {
+	Kind   Kind
+	Opaque bool
+	Info   os.FileInfo
+}
+
+// Layer is a frozen directory indexed once and safe for concurrent readers.
+type Layer struct {
+	dir      string
+	entries  map[string]Entry
+	children map[string]map[string]Entry
+}
+
+// IndexLayer indexes a frozen upper after its staging work directory is removed.
+func IndexLayer(dir string) (*Layer, error) { return indexLayer(dir, false) }
+
+// IndexUpper indexes a live upper for a read-only pass (diff, plan); the result is a
+// point-in-time view that later writes to the upper do not update.
+func IndexUpper(dir string) (*Layer, error) { return indexLayer(dir, true) }
+
+// indexLayer also supports a live upper whose staging directory is private.
+func indexLayer(dir string, live bool) (*Layer, error) {
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	l := &Layer{dir: root, entries: make(map[string]Entry), children: make(map[string]map[string]Entry)}
+	err = filepath.Walk(root, func(real string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, real)
+		if err != nil {
+			return err
+		}
+		p := Clean(rel)
+		if p == "" {
+			if !info.IsDir() {
+				return &fs.PathError{Op: "index", Path: root, Err: fs.ErrInvalid}
+			}
+			if info, err = withMode(real, info); err != nil {
+				return err
+			}
+			l.set(p, entry(info))
+			return nil
+		}
+		n := info.Name()
+		switch {
+		case n == workName:
+			if !live || parent(p) != "" {
+				return fmt.Errorf("overlay: staging directory remains in layer: %s", real)
+			}
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return fmt.Errorf("overlay: staging path is not a directory: %s", real)
+		case n == opaqueName:
+			e := l.entries[parent(p)]
+			e.Opaque = true
+			l.set(parent(p), e)
+		case strings.HasPrefix(n, metaPrefix):
+		case strings.HasPrefix(n, whPrefix):
+			q := path.Join(parent(p), strings.TrimPrefix(n, whPrefix))
+			if _, ok := l.entries[q]; !ok {
+				l.set(q, Entry{Kind: KindWhiteout})
+			}
+		default:
+			if info, err = withMode(real, info); err != nil {
+				return err
+			}
+			l.set(p, entry(info))
+			return nil
+		}
+		if info.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return l, err
+}
+
+// Dir returns the host directory backing the immutable layer.
+func (l *Layer) Dir() string { return l.dir }
+
+// Get looks up a canonical overlay path without touching the filesystem.
+func (l *Layer) Get(p string) (Entry, bool) { e, ok := l.entries[Clean(p)]; return e, ok }
+
+// Children returns an independent map of direct entries, including whiteouts.
+func (l *Layer) Children(p string) map[string]Entry { return maps.Clone(l.children[Clean(p)]) }
+
+// Walk visits entries in deterministic pre-order, including the root directory.
+func (l *Layer) Walk(fn func(p string, e Entry) error) error {
+	var visit func(string) error
+	visit = func(p string) error {
+		if err := fn(p, l.entries[p]); err != nil {
+			return err
+		}
+		for _, n := range slices.Sorted(maps.Keys(l.children[p])) {
+			if err := visit(path.Join(p, n)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return visit("")
+}
+
+// entry translates host metadata into an indexed data entry.
+func entry(info os.FileInfo) Entry {
+	kind := KindFile
+	if info.IsDir() {
+		kind = KindDir
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		kind = KindSymlink
+	}
+	return Entry{Kind: kind, Info: info}
+}
+
+// set updates a mutable upper's path and direct-child indexes together.
+func (l *Layer) set(p string, e Entry) {
+	l.entries[p] = e
+	if p != "" {
+		d := parent(p)
+		if l.children[d] == nil {
+			l.children[d] = make(map[string]Entry)
+		}
+		l.children[d][path.Base(p)] = e
+	}
+}
+
+// drop removes a mutable upper subtree from both indexes.
+func (l *Layer) drop(p string) {
+	for n := range l.children[p] {
+		l.drop(path.Join(p, n))
+	}
+	delete(l.children, p)
+	delete(l.entries, p)
+	if p != "" {
+		delete(l.children[parent(p)], path.Base(p))
+	}
+}
+
+// barrier reports whether this layer prevents lookup in all deeper layers.
+func (l *Layer) barrier(p string) bool {
+	for q := parent(p); ; q = parent(q) {
+		if e, ok := l.entries[q]; ok && (e.Kind != KindDir || e.Opaque) {
+			return true
+		}
+		if q == "" {
+			return false
+		}
+	}
+}

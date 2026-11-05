@@ -1,0 +1,172 @@
+# Configuration
+
+## Where the daemon lives
+
+| | state | mount |
+| --- | --- | --- |
+| macOS, Linux | `~/.local/state/ovnfs` (or `$XDG_STATE_HOME/ovnfs`) | `~/checkouts` |
+| Windows | `%LOCALAPPDATA%\ovnfs` | drive `O:` |
+
+On Linux, distribution FUSE confinement only allows mounts below `$HOME`,
+`/mnt`, `/media` and `/tmp`; on Windows the mount must be a free drive letter.
+`state` and `mount` in `~/.o2/ovnfs.yml` replace the defaults,
+`OVNFS_STATE`/`OVNFS_MOUNT` replace those, and `--state`/`--mount` win over
+all. Keep state on the volume holding your repositories: `new` warns when they
+differ, since files are then copied instead of cloned.
+
+`serve -memory SIZE` (`OVNFS_MEMORY`, default `1G`) and `serve -blob-cache
+SIZE` (`OVNFS_BLOB_CACHE`, default `512M`) size the memory tiers described in
+[internals](internals.md#memory-tiers); `start` passes the environment on.
+
+## Classes
+
+Opening a folder classifies every path into one of four classes:
+
+| class | in the checkout | in a snapshot | on another machine |
+| --- | --- | --- | --- |
+| `source` | as captured at open | hashed: the snapshot's identity | sent by content id |
+| `cache` | the folder, live and read-only | not hashed | an empty directory, rebuilt there |
+| `local` | the folder, live and read-only | not hashed | absent |
+| `hidden` | absent | — | absent |
+
+Nothing is copied to make this view. A source file is the folder's own file
+while its size, mtime and inode still match the capture, and its captured
+content (from the store or the repository's objects) once they do not; a file
+the user adds later stays out. Cache and local paths are simply the folder as
+it is now. Writes in the checkout copy up into its own upper, so the folder is
+never written.
+
+## Rules
+
+Only `source` bytes ever leave the machine. Rules are lines of
+`<class> <predicate>`; the first match wins, and a directory that gets a
+non-source class is decided as one unit. The built-ins come last:
+
+```
+hidden   .DS_Store | ._* | Thumbs.db | desktop.ini
+local    secret
+cache    cachedir | dir & (node_modules | .venv | __pycache__ | .next | .nuxt | .turbo | .gradle | .pytest_cache | .mypy_cache | .ruff_cache | .tox)
+cache    ignored & dir
+local    ignored
+local    size > 100MB
+source   *
+```
+
+Above them, in order of precedence: `--rule` lines, the folder's
+`.o2/ovnfs.yml`, then `~/.o2/ovnfs.yml`.
+
+`ovnfs explain [DIR|CHECKOUT] PATH` names the deciding rule and its file and
+line. `ovnfs plan [DIR|CHECKOUT]` shows what a launch elsewhere would take from
+a git origin by content id, send from this machine, rebuild, and leave behind,
+and warns when a secret-looking path is `source`. The resolved rules are frozen
+with each checkout (`lock.json` in its base).
+
+### Predicates
+
+| predicate | holds for |
+| --- | --- |
+| `*.log`, `Makefile` | a glob without `/`: the base name, at any depth |
+| `/build`, `docs/*.md` | a glob with a leading or inner `/`: the path from the source root |
+| `out/` | a trailing `/`: directories only |
+| `**` | zero or more path components; one or more at the end of a glob |
+| `tracked`, `untracked`, `ignored` | in a git index; neither tracked nor ignored; excluded by gitignore rules |
+| `dir`, `cachedir` | a directory; a directory holding `CACHEDIR.TAG` |
+| `secret` | credential names: `.env`, `.env.*` (not `.example`, `.sample`, `.template`, `.dist`), `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `credentials`, `credentials.json`, `credentials.toml`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`, `*.key`, `*.p12`, `*.pfx`; directories `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker` |
+| `size > 100MB` | a file (never a directory) compared with `>`, `>=`, `<` or `<=` against an integer in `B`, `KB`, `MB`, `GB`, `TB` (powers of 1000) or `KiB`, `MiB`, `GiB`, `TiB`, any case |
+
+Globs use `*`, `?` and `[…]` (`[!…]` negates). `!` binds tightest, then `&`,
+then `|`; parentheses group. A glob matches a path itself: what lies below a
+directory follows from the directory, since a non-source directory decides its
+whole subtree.
+
+## Git
+
+Git is a fact source, never a requirement. `.gitignore` files apply in any
+folder, as with `rg --no-require-git`; inside a repository git's own rules
+apply (`info/exclude`, `core.excludesFile`), per repository for nested ones.
+Tracked files whose stat data matches the index take their ids from it without
+being read, and a per-folder stat cache does the same for everything else, so
+reopening a large folder hashes only what changed.
+
+Files git converts between blob and working tree are read instead, since the
+blob is not their content: filter drivers such as LFS, `ident`,
+`working-tree-encoding`, and end-of-line conversion (`text`, `eol`,
+`core.autocrlf`) unless the blob's size equals the file's. One
+`git check-attr` (and, for end-of-line candidates, one
+`git cat-file --batch-check`) per repository decides this while the walk runs.
+The first capture of an LFS repository therefore stores its LFS content, and on
+Windows with Git's default `core.autocrlf=true` the first capture hashes every
+text file.
+
+## Configuration file
+
+`.o2/ovnfs.yml` at the source root (the repository's top level when the folder
+is inside one, else the folder itself) configures that folder's checkouts.
+`~/.o2/ovnfs.yml` in the daemon user's home has the same schema, applies to
+every folder and ranks below it; it alone may also set the daemon's folders.
+Both are optional. They are read when a checkout opens (`new`, `run`,
+`attach DIR`) and frozen into its lock, so an edit affects only checkouts
+opened afterwards; `explain` and `plan` read a folder's files as they are now
+and a checkout's from its lock.
+
+```yaml
+rules: |
+  source  .env.local          # carry one ignored file
+  local   data/**             # keep the dataset here
+  hidden  *.log & !tracked
+cache:
+  node_modules: { rebuild: bun install --frozen-lockfile, key: [bun.lock] }
+  web/.next: { rebuild: bun run build, key: [package.json] }
+env:
+  image: linux-dev
+  setup: [bun install]
+```
+
+| key | type | meaning |
+| --- | --- | --- |
+| `rules` | block of rule lines | classification rules, checked before the user file's and the built-ins |
+| `cache.ROOT.rebuild` | string | command that recreates cache root ROOT on another machine |
+| `cache.ROOT.key` | list of paths | files whose content identifies ROOT's contents |
+| `env.image` | string | environment the checkout should run in |
+| `env.setup` | list of strings | commands that prepare that environment |
+| `state` | path | `~/.o2/ovnfs.yml` only: where the daemon keeps its state |
+| `mount` | path | `~/.o2/ovnfs.yml` only: where checkouts appear |
+
+`rules` is a block scalar (`rules: |`) with one `<class> <predicate>` per line.
+Blank lines and lines starting with `#` are skipped; `#` after whitespace
+starts a comment, so `a#b` stays a glob. `explain` names a rule by file and
+line (`.o2/ovnfs.yml:3`).
+
+`state` and `mount` take an absolute path or one starting with `~/`, and are
+read by every `ovnfs` command before it reaches the daemon, so changing them
+points the commands at another daemon; `ovnfs stop` the old one first. For
+example, to keep everything on a data volume:
+
+```yaml
+state: /mnt/data/.ovnfs
+mount: /mnt/data/checkouts
+```
+
+### Cache and env
+
+A `cache` key names a cache root: a path from the source root (`web/.next`),
+or a bare name (`node_modules`) for every root with that base name; an exact
+path wins. An entry does not make anything a cache path, the rules do; it says
+how a cache root comes back on another machine. `plan` lists each cache root
+with `rebuild: CMD` or `starts empty`, plus a hash of its `key` files, which
+are relative to the root's parent directory (`web/package.json` above) and must
+stay inside the source; a missing key file is hashed as missing. ovnfs does not
+run `rebuild` itself: cache roots arrive elsewhere as empty directories.
+
+`env` is recorded in the lock, and so changes the lock hash `plan` prints, but
+ovnfs does not act on it.
+
+### Precedence and errors
+
+Rules concatenate (`--rule`, folder file, user file, built-ins) and the first
+match wins. A folder `cache` entry replaces the user entry with the same key;
+`env.image` and `env.setup` each replace the user's when set. A folder whose
+source root is the home directory reads `~/.o2/ovnfs.yml` once, as its own
+file. Parsing is strict: unknown keys, a list for `rules`, wrong types and
+invalid predicates fail `new`, `explain` and `plan` with `FILE:LINE: message`,
+e.g. `.o2/ovnfs.yml:3: unknown key "env.imge"`.

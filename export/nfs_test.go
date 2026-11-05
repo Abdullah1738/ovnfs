@@ -1,0 +1,48 @@
+//go:build !windows
+
+package export
+
+import (
+	"testing"
+)
+
+// TestNFSIDsTrackRenameAndRetirement checks that the ids NFS handles carry
+// follow renames and go stale on removal and checkout retirement.
+func TestNFSIDsTrackRenameAndRetirement(t *testing.T) {
+	e := &Export{fs: newMetadataTestFS(t)}
+	b := e.NFS()
+	if err := b.MkdirAll("co/a", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := b.Create("co/a/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	id := b.FileID("co/a/file")
+	if err := b.Rename("co/a", "co/b"); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := b.Path(id); !ok || p != "co/b/file" {
+		t.Fatalf("renamed id resolves to %q, live %v", p, ok)
+	}
+	if err := b.Chmod("co/b/file", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Remove("co/b/file"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.Path(id); ok {
+		t.Fatal("removed id still resolves")
+	}
+	dir := b.FileID("co/b")
+	e.Retire("co")
+	if _, ok := b.Path(dir); ok {
+		t.Fatal("retired directory id still resolves")
+	}
+	if root, ok := b.Path(b.FileID("")); !ok || root != "" {
+		t.Fatalf("root resolves to %q, live %v", root, ok)
+	}
+}

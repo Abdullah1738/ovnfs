@@ -1,0 +1,142 @@
+package main
+
+import (
+	"flag"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+)
+
+// TestParseInterspersed checks that flags are found anywhere among positionals and "--" ends flag parsing.
+func TestParseInterspersed(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		pos      []string
+		checkout string
+		rules    []string
+		json     bool
+		err      bool
+	}{
+		{name: "flags after positional", args: []string{"app", "--name", "b"}, pos: []string{"app"}, checkout: "b"},
+		{name: "flags before positional", args: []string{"-name=b", "app"}, pos: []string{"app"}, checkout: "b"},
+		{name: "flags between positionals", args: []string{"app", "--json", "snap1", "--rule", "cache x", "--rule", "local y"}, pos: []string{"app", "snap1"}, json: true, rules: []string{"cache x", "local y"}},
+		{name: "double dash ends flags", args: []string{"app", "--", "--name", "x"}, pos: []string{"app", "--name", "x"}},
+		{name: "lone dash is positional", args: []string{"-", "--json"}, pos: []string{"-"}, json: true},
+		{name: "no args", args: nil, pos: nil},
+		{name: "unknown flag", args: []string{"app", "--nope"}, err: true},
+		{name: "missing value", args: []string{"app", "--name"}, err: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &cli{}
+			fs := c.flags("test")
+			var checkout string
+			var rules stringList
+			fs.StringVar(&checkout, "name", "", "")
+			fs.Var(&rules, "rule", "")
+			pos, err := parseInterspersed(fs, tt.args)
+			if tt.err {
+				if err == nil {
+					t.Fatalf("parse %q: want error, got positionals %q", tt.args, pos)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse %q: %v", tt.args, err)
+			}
+			if !slices.Equal(pos, tt.pos) || checkout != tt.checkout || !slices.Equal(rules, tt.rules) || c.json != tt.json {
+				t.Fatalf("parse %q = pos %q name %q rules %q json %v; want %q %q %q %v", tt.args, pos, checkout, rules, c.json, tt.pos, tt.checkout, tt.rules, tt.json)
+			}
+		})
+	}
+}
+
+// TestParseInterspersedHelp keeps -h distinguishable so verbs can print their usage.
+func TestParseInterspersedHelp(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if _, err := parseInterspersed(fs, []string{"app", "-h"}); err != flag.ErrHelp {
+		t.Fatalf("got %v, want flag.ErrHelp", err)
+	}
+}
+
+// TestResolveTarget checks DIR-versus-CHECKOUT detection and that dirs come back absolute.
+func TestResolveTarget(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmp, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "notes"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tmp)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(filepath.Dir(cwd), "abs", "where")
+	tests := []struct {
+		arg      string
+		dir      string
+		checkout string
+	}{
+		{arg: "", dir: cwd},
+		{arg: ".", dir: cwd},
+		{arg: "..", dir: filepath.Dir(cwd)},
+		{arg: "app", dir: filepath.Join(cwd, "app")},  // existing directory wins over a checkout name
+		{arg: "web/", dir: filepath.Join(cwd, "web")}, // a slash means a path even when missing
+		{arg: abs, dir: abs},
+		{arg: "notes", checkout: "notes"}, // a regular file is not a directory
+		{arg: "web", checkout: "web"},     // missing, no slash: a checkout
+	}
+	for _, tt := range tests {
+		dir, checkout, err := resolveTarget(tt.arg)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", tt.arg, err)
+		}
+		if dir != tt.dir || checkout != tt.checkout {
+			t.Errorf("resolveTarget(%q) = dir %q checkout %q; want dir %q checkout %q", tt.arg, dir, checkout, tt.dir, tt.checkout)
+		}
+	}
+}
+
+// TestResolveDirs checks the precedence of the daemon's folders: flag, then
+// environment, then ~/.o2/ovnfs.yml, then the defaults.
+func TestResolveDirs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("OVNFS_STATE", "")
+	t.Setenv("OVNFS_MOUNT", "")
+	resolve := func(flagState string) cli {
+		t.Helper()
+		c := cli{state: flagState}
+		if err := c.resolveDirs(); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if c := resolve(""); c.state != defaultState || c.mount != defaultMount {
+		t.Errorf("no config = %q %q", c.state, c.mount)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".o2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	confMount := filepath.Join(t.TempDir(), "conf-mount")
+	if err := os.WriteFile(filepath.Join(home, ".o2", "ovnfs.yml"), []byte("state: ~/conf-state\nmount: "+confMount+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := resolve(""); c.state != filepath.Join(home, "conf-state") || c.mount != confMount {
+		t.Errorf("config = %q %q", c.state, c.mount)
+	}
+	t.Setenv("OVNFS_STATE", "/env/state")
+	if c := resolve(""); c.state != "/env/state" || c.mount != confMount {
+		t.Errorf("env over config = %q %q", c.state, c.mount)
+	}
+	if c := resolve("/flag/state"); c.state != "/flag/state" {
+		t.Errorf("flag over env = %q", c.state)
+	}
+}
