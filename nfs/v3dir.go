@@ -33,6 +33,12 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 	if st != stOK {
 		return st
 	}
+	// The type is checked rather than left to the listing's error: Windows
+	// fails it with ENOTDIR, which is ERROR_PATH_NOT_FOUND there, so ENOENT.
+	da, err := s.stat(id, p)
+	if err == nil && da.typ != typeDir {
+		return stNotDir
+	}
 	l, st := s.list(id, p, cookie, verf)
 	if st != stOK {
 		return st
@@ -41,7 +47,6 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 	if !ok {
 		return stBadCookie
 	}
-	da, err := s.stat(id, p)
 	if err != nil {
 		res.bool(false)
 	} else {

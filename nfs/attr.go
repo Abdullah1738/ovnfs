@@ -66,6 +66,20 @@ func (s *Server) stat(id uint64, p string) (attrs, error) {
 	return attrsOf(id, info), nil
 }
 
+// readlink returns the target of the symlink at p; INVAL when p is not a
+// symlink, which hosts report with differing errors (EINVAL on Unix,
+// ERROR_NOT_A_REPARSE_POINT on Windows).
+func (s *Server) readlink(p string) (string, status) {
+	target, err := s.FS.Readlink(p)
+	if err != nil {
+		if info, lerr := s.FS.Lstat(p); lerr == nil && info.Mode()&os.ModeSymlink == 0 {
+			return "", stInval
+		}
+		return "", statusOf(err)
+	}
+	return target, stOK
+}
+
 // typeOf classifies a Go file mode.
 func typeOf(m os.FileMode) fileType {
 	switch {

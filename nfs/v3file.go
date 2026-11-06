@@ -140,12 +140,9 @@ func (s *Server) readlink3(d *decoder, res *encoder) status {
 	if st != stOK {
 		return st
 	}
-	target, err := s.FS.Readlink(p)
-	if err != nil {
-		if info, lerr := s.FS.Lstat(p); lerr == nil && info.Mode()&os.ModeSymlink == 0 {
-			return stInval
-		}
-		return statusOf(err)
+	target, st := s.readlink(p)
+	if st != stOK {
+		return st
 	}
 	s.postOp3(res, id, p)
 	res.str(target)

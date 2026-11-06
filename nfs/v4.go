@@ -550,9 +550,9 @@ func (x *v4compound) readlink() status {
 	if st != stOK {
 		return st
 	}
-	target, err := x.s.FS.Readlink(cur.path)
-	if err != nil {
-		return statusOf(err)
+	target, st := x.s.readlink(cur.path)
+	if st != stOK {
+		return st
 	}
 	x.e.str(target)
 	return stOK

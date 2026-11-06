@@ -52,7 +52,7 @@ func statusOf(err error) status {
 		return stOK
 	case errors.Is(err, syscall.EXDEV):
 		return stXDev
-	case errors.Is(err, syscall.ENOTEMPTY):
+	case notEmpty(err):
 		return stNotEmpty
 	case errors.Is(err, os.ErrExist):
 		return stExist
@@ -80,7 +80,7 @@ func statusOf(err error) status {
 		return stFBig
 	case errors.Is(err, syscall.EINVAL):
 		return stInval
-	case errors.Is(err, syscall.ENOTSUP), errors.Is(err, syscall.EOPNOTSUPP):
+	case errors.Is(err, errors.ErrUnsupported):
 		return stNotSupp
 	case errors.Is(err, syscall.ESTALE):
 		return stStale
