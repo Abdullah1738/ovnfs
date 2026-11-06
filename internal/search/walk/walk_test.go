@@ -210,7 +210,9 @@ func TestFullDetail(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if e.Mtime != st.ModTime().UnixNano() {
+		// NTFS refreshes a directory's entry in its parent's listing lazily, so
+		// a listed directory mtime may trail the directory's own, as in dir.
+		if e.Mtime != st.ModTime().UnixNano() && !(runtime.GOOS == "windows" && st.IsDir()) {
 			t.Errorf("%s: mtime %d, want %d", e.Path, e.Mtime, st.ModTime().UnixNano())
 		}
 	}
