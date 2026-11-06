@@ -468,7 +468,7 @@ func head(b []byte) []byte { return b[:min(len(b), 8000)] }
 // the same lines, and everything else is a conflict left untouched. A path whose markers
 // the user resolved merges later changes against the version it was marked with
 // (see checkoutMeta.MergeBases). With Branch it instead copies the checkout's commits.
-func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (api.ApplyReply, error) {
+func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.ApplyReply, err error) {
 	h, err := r.lookupCheckout(args.Checkout)
 	if err != nil {
 		return api.ApplyReply{}, err
@@ -477,7 +477,7 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (api.ApplyRepl
 		return api.ApplyReply{}, failure("invalid", "checkout %s is attached from %s; its folder is not on this machine", h.meta.Name, remote.Source)
 	}
 	root := h.base.view.Meta().Dir
-	reply := api.ApplyReply{Source: root, Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}}
+	reply = api.ApplyReply{Source: root, Applied: []api.Change{}, Merged: []string{}, Conflicts: []api.Conflict{}}
 	if args.Branch != "" {
 		repo := h.base.view.Domains().Repo("")
 		if !h.meta.Git || repo == nil {
@@ -505,7 +505,17 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (api.ApplyRepl
 	if err != nil {
 		return api.ApplyReply{}, err
 	}
-	reply.Snapshot = snap.Snapshot
+	if args.DryRun {
+		// A dry run writes nothing: release the snapshot it read the checkout from,
+		// or it would hold the checkout's layers on disk after rm.
+		defer func() {
+			if dropErr := r.Drop(context.WithoutCancel(ctx), api.DropArgs{Snapshot: snap.Snapshot.ID}); dropErr != nil && err == nil {
+				reply, err = api.ApplyReply{}, dropErr
+			}
+		}()
+	} else {
+		reply.Snapshot = snap.Snapshot
+	}
 	st := h.base.view.Store()
 	from, err := st.Flatten(h.base.view.Meta().Tree)
 	if err != nil {
