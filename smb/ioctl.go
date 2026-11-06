@@ -243,7 +243,9 @@ func ioctlReadReparse(r *request, o *open) ([]byte, uint32) {
 	return b, statusSuccess
 }
 
-// ioctlWriteReparse converts an empty placeholder into a Windows or NFS-style symlink.
+// ioctlWriteReparse converts an empty placeholder into a Windows or NFS-style
+// symlink: CreateSymbolicLink and junction tools link an empty file or
+// directory they just created. A junction becomes a symlink to its target.
 func ioctlWriteReparse(r *request, o *open, in []byte) uint32 {
 	if len(in) < 8 || int(binary.LittleEndian.Uint16(in[4:])) != len(in)-8 {
 		return statusInvalidParameter
@@ -251,9 +253,10 @@ func ioctlWriteReparse(r *request, o *open, in []byte) uint32 {
 	if o.access&(accessWriteData|0x100) == 0 {
 		return statusAccessDenied
 	}
+	tag := binary.LittleEndian.Uint32(in)
 	var target string
-	switch binary.LittleEndian.Uint32(in) {
-	case ntinfo.ReparseTagSymlink:
+	switch tag {
+	case ntinfo.ReparseTagSymlink, ntinfo.ReparseTagMountPoint:
 		var err error
 		if target, err = ntinfo.ParseSymlinkReparse(in); err != nil {
 			return statusInvalidParameter
@@ -274,28 +277,51 @@ func ioctlWriteReparse(r *request, o *open, in []byte) uint32 {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.isDir || o.pipe != nil || o.file == nil {
+	if o.pipe != nil || o.file == nil && !o.isDir {
 		return statusInvalidDeviceRequest
 	}
-	info, err := r.c.srv.FS.Lstat(o.path)
+	if tag == ntinfo.ReparseTagMountPoint && !o.isDir {
+		return statusNotADirectory
+	}
+	fs := r.c.srv.FS
+	info, err := fs.Lstat(o.path)
 	if err != nil {
 		return ntinfo.Status(err)
 	}
-	if !info.Mode().IsRegular() || info.Size() != 0 {
+	if o.isDir {
+		entries, err := fs.ReadDir(o.path)
+		if err != nil {
+			return ntinfo.Status(err)
+		}
+		if len(entries) != 0 {
+			return statusDirectoryNotEmpty
+		}
+	} else if !info.Mode().IsRegular() || info.Size() != 0 {
 		return statusInvalidParameter
 	}
-	if err := o.file.Close(); err != nil {
+	// restore puts the placeholder back when the link cannot replace it.
+	restore := func() {
+		if o.isDir {
+			_ = fs.MkdirAll(o.path, info.Mode().Perm())
+		} else {
+			o.file, _ = fs.OpenFile(o.path, os.O_CREATE|os.O_RDWR, info.Mode().Perm())
+		}
+	}
+	if o.file != nil {
+		if err := o.file.Close(); err != nil {
+			return ntinfo.Status(err)
+		}
+		o.file = nil
+	}
+	if err := fs.Remove(o.path); err != nil {
+		restore()
 		return ntinfo.Status(err)
 	}
-	o.file = nil
-	if err := r.c.srv.FS.Remove(o.path); err != nil {
-		o.file, _ = r.c.srv.FS.OpenFile(o.path, os.O_RDWR, 0)
+	if err := fs.Symlink(target, o.path); err != nil {
+		restore()
 		return ntinfo.Status(err)
 	}
-	if err := r.c.srv.FS.Symlink(target, o.path); err != nil {
-		o.file, _ = r.c.srv.FS.OpenFile(o.path, os.O_CREATE|os.O_RDWR, info.Mode().Perm())
-		return ntinfo.Status(err)
-	}
+	o.isDir = false
 	r.c.srv.st.notify.changed(o.path, notifyModified)
 	return statusSuccess
 }

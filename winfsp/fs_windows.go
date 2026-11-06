@@ -3,6 +3,7 @@
 package winfsp
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"io/fs"
@@ -657,8 +658,8 @@ func (x *fileSystem) GetReparsePoint(_ *gowinfsp.FileSystemRef, _ uintptr, name 
 	return x.reparse(exportPath(name), buf)
 }
 
-// SetReparsePoint turns the empty file CreateSymbolicLink just created into
-// a symlink, as the SMB server does; directory symlinks are unsupported.
+// SetReparsePoint turns the empty file or directory that CreateSymbolicLink
+// or a junction tool just created into a symlink, as the SMB server does.
 func (x *fileSystem) SetReparsePoint(_ *gowinfsp.FileSystemRef, fc uintptr, name string, buf []byte) error {
 	target, err := ntinfo.ParseSymlinkReparse(buf)
 	switch {
@@ -678,25 +679,44 @@ func (x *fileSystem) SetReparsePoint(_ *gowinfsp.FileSystemRef, fc uintptr, name
 	if err != nil {
 		return status(err)
 	}
-	if info.IsDir() || h.file == nil {
+	switch {
+	case info.IsDir():
+		entries, err := x.nodes.ReadDir(p)
+		if err != nil {
+			return status(err)
+		}
+		if len(entries) != 0 {
+			return windows.STATUS_DIRECTORY_NOT_EMPTY
+		}
+	case binary.LittleEndian.Uint32(buf) == ntinfo.ReparseTagMountPoint:
+		return windows.STATUS_NOT_A_DIRECTORY
+	case h.file == nil:
 		return windows.STATUS_INVALID_DEVICE_REQUEST
-	}
-	if !info.Mode().IsRegular() || info.Size() != 0 {
+	case !info.Mode().IsRegular() || info.Size() != 0:
 		return windows.STATUS_INVALID_PARAMETER
 	}
-	if err := h.file.Close(); err != nil {
-		return status(err)
+	// restore puts the placeholder back when the link cannot replace it.
+	restore := func() {
+		if info.IsDir() {
+			_ = x.nodes.MkdirAll(p, info.Mode().Perm())
+		} else {
+			h.file, _ = x.nodes.OpenFile(p, os.O_CREATE|os.O_RDWR, info.Mode().Perm())
+			h.write = h.file != nil
+		}
+		h.ino = x.nodes.ID(p)
 	}
-	h.file, h.write = nil, false
+	if h.file != nil {
+		if err := h.file.Close(); err != nil {
+			return status(err)
+		}
+		h.file, h.write = nil, false
+	}
 	if err := x.nodes.Remove(p); err != nil {
-		h.file, _ = x.nodes.OpenFile(p, os.O_RDWR, 0)
-		h.write = h.file != nil
+		restore()
 		return status(err)
 	}
 	if err := x.nodes.Symlink(target, p); err != nil {
-		h.file, _ = x.nodes.OpenFile(p, os.O_CREATE|os.O_RDWR, info.Mode().Perm())
-		h.write = h.file != nil
-		h.ino = x.nodes.ID(p)
+		restore()
 		return status(err)
 	}
 	h.ino = x.nodes.ID(p)

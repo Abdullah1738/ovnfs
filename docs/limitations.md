@@ -34,5 +34,4 @@
   files, but do not cover directories or files only inspected with `stat`.
 - WinFsp mounts get no recalls or change notifications for changes made
   behind them (`pull`, reattach, folder edits): they show once the one-second
-  metadata cache expires, and directory watchers miss them. Neither WinFsp
-  nor SMB creates directory symlinks.
+  metadata cache expires, and directory watchers miss them.

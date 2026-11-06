@@ -316,8 +316,7 @@ func TestCheckoutReadWrite(t *testing.T) {
 	}
 }
 
-// TestSymlinks creates, reads, and traverses symlinks; directory symlinks
-// cannot be created from Windows, but traverse when the export has them.
+// TestSymlinks creates, reads, and traverses file and directory symlinks.
 func TestSymlinks(t *testing.T) {
 	f := newFixture(t, map[string]string{"file": "lower", "dir/in": "deep"})
 	if err := os.Symlink("file", f.path("alpha/link")); err != nil {
@@ -333,11 +332,11 @@ func TestSymlinks(t *testing.T) {
 		t.Fatalf("export readlink = %q, %v", target, err)
 	}
 	f.read(t, "alpha/link", "lower")
-	if err := os.Symlink("dir", f.path("alpha/dirlink")); err == nil {
-		t.Fatal("created a directory symlink")
-	}
-	if err := f.export.Nodes().Symlink("dir", "alpha/dirlink"); err != nil {
+	if err := os.Symlink("dir", f.path("alpha/dirlink")); err != nil {
 		t.Fatal(err)
+	}
+	if target, err := f.export.Nodes().Readlink("alpha/dirlink"); err != nil || target != "dir" {
+		t.Fatalf("export readlink = %q, %v", target, err)
 	}
 	f.read(t, "alpha/dirlink/in", "deep")
 	if err := os.Remove(f.path("alpha/link")); err != nil {

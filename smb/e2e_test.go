@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stencil-hq/ovnfs/internal/dirbottom"
+	"github.com/stencil-hq/ovnfs/ntinfo"
 	"github.com/stencil-hq/ovnfs/overlay"
 )
 
@@ -815,4 +816,61 @@ func TestSMBAttributeOnlyOpensTakeNoPartInSharing(t *testing.T) {
 	c.expectStatus(r, wireSuccess)
 	c.expectStatus(c.close(attrs), wireSuccess)
 	c.expectStatus(c.close(data), wireSuccess)
+}
+
+// junctionReparse encodes an IO_REPARSE_TAG_MOUNT_POINT buffer for target.
+func junctionReparse(target string) []byte {
+	sub := wireUTF16(`\??\` + target)
+	prn := wireUTF16(target)
+	b := make([]byte, 16, 16+len(sub)+len(prn)+4)
+	binary.LittleEndian.PutUint32(b, ntinfo.ReparseTagMountPoint)
+	binary.LittleEndian.PutUint16(b[4:], uint16(8+len(sub)+len(prn)+4))
+	binary.LittleEndian.PutUint16(b[10:], uint16(len(sub)))
+	binary.LittleEndian.PutUint16(b[12:], uint16(len(sub)+2))
+	binary.LittleEndian.PutUint16(b[14:], uint16(len(prn)))
+	b = append(append(append(b, sub...), 0, 0), prn...)
+	return append(b, 0, 0)
+}
+
+// TestSMBDirectoryLinks turns the empty directory CreateSymbolicLink (with
+// SYMBOLIC_LINK_FLAG_DIRECTORY) or a junction tool creates into a symlink, as
+// bun install and mklink /D do, and refuses what NTFS refuses.
+func TestSMBDirectoryLinks(t *testing.T) {
+	fixture := startSMB(t, nil, func(lower, upper string) { putDiskFile(t, lower, "packages/utils/child", "child data") })
+	c := guestClient(t, fixture)
+	link := func(name string, reparse []byte, want uint32) {
+		t.Helper()
+		id := mustOpen(t, c, name, 2, 0x200001)
+		_, r := c.ioctl(id, 0x000900a4, reparse, 0)
+		c.expectStatus(r, want)
+		c.expectStatus(c.close(id), wireSuccess)
+	}
+	symlink, err := ntinfo.SymlinkReparse("packages/utils")
+	if err != nil {
+		t.Fatal(err)
+	}
+	link("dlink", symlink, wireSuccess)
+	if got, err := os.Readlink(filepath.Join(fixture.upper, "dlink")); err != nil || filepath.ToSlash(got) != "packages/utils" {
+		t.Fatalf("directory symlink = %q, %v", got, err)
+	}
+	id := mustOpen(t, c, "dlink/child", 1, 0x40)
+	readEquals(t, c, id, "child data")
+	c.expectStatus(c.close(id), wireSuccess)
+
+	abs := filepath.Join(fixture.lower, "packages", "utils")
+	link("jlink", junctionReparse(abs), wireSuccess)
+	if got, err := os.Readlink(filepath.Join(fixture.upper, "jlink")); err != nil || got != abs {
+		t.Fatalf("junction stored as %q, %v; want a symlink to %q", got, err, abs)
+	}
+
+	full := mustOpen(t, c, "full", 2, 0x200001)
+	c.expectStatus(c.close(mustOpen(t, c, "full/x", 2, 0x40)), wireSuccess)
+	_, r := c.ioctl(full, 0x000900a4, symlink, 0)
+	c.expectStatus(r, statusDirectoryNotEmpty)
+	c.expectStatus(c.close(full), wireSuccess)
+
+	file := mustOpen(t, c, "file", 2, 0x200040)
+	_, r = c.ioctl(file, 0x000900a4, junctionReparse(abs), 0)
+	c.expectStatus(r, statusNotADirectory)
+	c.expectStatus(c.close(file), wireSuccess)
 }

@@ -86,16 +86,17 @@ SMB and no port. It is the Windows default where WinFsp is installed and
 
 Files look as they do to Windows SMB clients: case-sensitive names,
 `FILE_ATTRIBUTE_READONLY` as the owner write bit, node ids as file indexes,
-file symlinks (directory symlinks cannot be created). Open files can be deleted
-and renamed over, as on Unix. The driver caches metadata for one second and
-never caches data.
+symlinks as described below. Open files can be deleted and renamed over, as on
+Unix. The driver caches metadata for one second and never caches data.
 
 ### Links
 
 Both frontends report a symlink whose target is a directory with
 `FILE_ATTRIBUTE_DIRECTORY`, as NTFS directory symlinks are: Windows tools enter
 only links marked so. Opened as itself, such a link counts as a directory, so
-`rmdir` removes it.
+`rmdir` removes it. `CreateSymbolicLink`, `mklink /D` and junction tools
+create directory links on the drive; a junction is stored as a symlink to its
+target. `mklink /J` refuses network drives before asking the daemon.
 
 ### Unix modes and Defender
 

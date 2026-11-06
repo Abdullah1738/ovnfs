@@ -95,3 +95,33 @@ func TestSymlinkReparse(t *testing.T) {
 		t.Errorf("other tag: %v", err)
 	}
 }
+
+// mountPointReparse builds the IO_REPARSE_TAG_MOUNT_POINT buffer mklink /J and
+// libuv send: substitute name, then print name, each NUL-terminated.
+func mountPointReparse(substitute, print string) []byte {
+	var names []uint16
+	sub := utf16.Encode([]rune(substitute))
+	prn := utf16.Encode([]rune(print))
+	names = append(append(append(append(names, sub...), 0), prn...), 0)
+	b := make([]byte, 16, 16+2*len(names))
+	binary.LittleEndian.PutUint32(b, ReparseTagMountPoint)
+	binary.LittleEndian.PutUint16(b[4:], uint16(8+2*len(names)))
+	binary.LittleEndian.PutUint16(b[10:], uint16(2*len(sub)))
+	binary.LittleEndian.PutUint16(b[12:], uint16(2*len(sub)+2))
+	binary.LittleEndian.PutUint16(b[14:], uint16(2*len(prn)))
+	for _, u := range names {
+		b = binary.LittleEndian.AppendUint16(b, u)
+	}
+	return b
+}
+
+// TestParseJunction stores a junction as a symlink to its absolute target;
+// junction targets are absolute by definition.
+func TestParseJunction(t *testing.T) {
+	if got, err := ParseSymlinkReparse(mountPointReparse(`\??\C:\repo\packages\utils`, `C:\repo\packages\utils`)); err != nil || got != "C:/repo/packages/utils" {
+		t.Errorf("junction = %q, %v", got, err)
+	}
+	if _, err := ParseSymlinkReparse(mountPointReparse(`packages\utils`, `packages\utils`)); !errors.Is(err, fs.ErrInvalid) {
+		t.Errorf("relative junction: %v", err)
+	}
+}
