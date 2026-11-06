@@ -110,7 +110,10 @@ func (v bottom) Open(p string) (overlay.Content, error) {
 	return b.blobFile(p, b.sources[p].oid)
 }
 
-// Readlink returns a symlink's target from the folder or the captured blob.
+// Readlink returns a symlink's target from the folder or the captured blob. A
+// live link whose absolute target lies inside the folder becomes relative to
+// the link, so in a checkout it names the checkout's copy instead of the
+// folder: Bun on Windows, for one, links workspace packages by absolute path.
 func (v bottom) Readlink(p string) (string, error) {
 	b := v.b
 	p = cleanPath(p)
@@ -122,12 +125,33 @@ func (v bottom) Readlink(p string) (string, error) {
 		return "", &fs.PathError{Op: "readlink", Path: p, Err: syscall.EINVAL}
 	}
 	if host != "" {
-		// Windows stores and reports targets with backslashes; views use slashes.
 		target, err := os.Readlink(host)
-		return filepath.ToSlash(target), err
+		if err != nil {
+			return "", err
+		}
+		if _, live := b.derivedRoot(p); live {
+			target = b.relocate(host, target)
+		}
+		// Windows stores and reports targets with backslashes; views use slashes.
+		return filepath.ToSlash(target), nil
 	}
 	data, err := b.Blob(p, b.sources[p].oid)
 	return string(data), err
+}
+
+// relocate returns target relative to the link at host when it is an absolute
+// path inside the folder, else unchanged.
+func (b *Base) relocate(host, target string) string {
+	if !filepath.IsAbs(target) {
+		return target
+	}
+	if in, err := filepath.Rel(b.meta.Dir, target); err != nil || in == ".." || strings.HasPrefix(in, ".."+string(filepath.Separator)) {
+		return target
+	}
+	if rel, err := filepath.Rel(filepath.Dir(host), target); err == nil {
+		return rel
+	}
+	return target
 }
 
 // CopyTo materializes p (a whole directory tree, for renames) at the new path dst for copy-up.

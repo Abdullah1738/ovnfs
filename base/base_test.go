@@ -195,6 +195,39 @@ func TestLiveRootsFollowTheFolder(t *testing.T) {
 	}
 }
 
+// TestLiveLinksIntoTheFolderAreRelative serves a live link's absolute target
+// inside the folder relative to the link, so a checkout's link names the
+// checkout's copy; targets outside the folder and relative ones stay as stored.
+func TestLiveLinksIntoTheFolderAreRelative(t *testing.T) {
+	repo, dir := repository(t)
+	writeTestFile(t, filepath.Join(dir, "node_modules", "pkg", "index.js"), "v1")
+	b, _ := createTestBase(t, repo, nil)
+	outside := t.TempDir()
+	for link, target := range map[string]string{
+		"node_modules/@x/src":  filepath.Join(b.Meta().Dir, "src"),
+		"node_modules/root":    b.Meta().Dir,
+		"node_modules/escape":  outside,
+		"node_modules/sibling": "pkg",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, link)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, filepath.FromSlash(link))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, want := range map[string]string{
+		"node_modules/@x/src":  "../../src",
+		"node_modules/root":    "..",
+		"node_modules/escape":  filepath.ToSlash(outside),
+		"node_modules/sibling": "pkg",
+	} {
+		if got, err := b.Bottom().Readlink(link); err != nil || got != want {
+			t.Errorf("readlink %s = %q, %v; want %q", link, got, err, want)
+		}
+	}
+}
+
 // TestForkTimeUsesUTC verifies creation and restart normalize timestamps without changing instants.
 func TestForkTimeUsesUTC(t *testing.T) {
 	repo, _ := repository(t)

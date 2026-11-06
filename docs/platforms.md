@@ -120,3 +120,8 @@ second, the frontends' attribute lifetime, and live directory listings take
 their entries' metadata from the listing itself. A checkout's own files are
 described from its in-memory index, which every change made through ovnfs
 refreshes; only a file open for writing is looked up on the host.
+
+A live symlink whose absolute target lies inside the folder reads as the same
+path relative to the link, so in a checkout it names the checkout's copy:
+Bun on Windows links workspace packages in `node_modules` by absolute path.
+Absolute targets outside the folder stay as stored.
