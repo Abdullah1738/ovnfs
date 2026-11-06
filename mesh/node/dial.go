@@ -10,8 +10,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/stencil-hq/ovnfs/mesh"
 	"github.com/quic-go/quic-go"
+	"github.com/stencil-hq/ovnfs/mesh"
 )
 
 const (

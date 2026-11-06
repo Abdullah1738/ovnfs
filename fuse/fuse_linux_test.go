@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
+	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/checkout"
 	"github.com/stencil-hq/ovnfs/export"
 	"github.com/stencil-hq/ovnfs/overlay"
-	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	"golang.org/x/sys/unix"
 )
 

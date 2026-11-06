@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/go-git/go-billy/v5"
+	"github.com/stencil-hq/ovnfs/overlay"
 )
 
 // recall tells the protocol layer that clients' cached copies of the named

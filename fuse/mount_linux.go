@@ -3,8 +3,8 @@ package fuse
 import (
 	"fmt"
 
-	"github.com/stencil-hq/ovnfs/export"
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/stencil-hq/ovnfs/export"
 )
 
 // Server is an active FUSE mount of the export root.

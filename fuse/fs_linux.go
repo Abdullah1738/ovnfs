@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/stencil-hq/ovnfs/export"
-	"github.com/stencil-hq/ovnfs/internal/unixstat"
 	"github.com/go-git/go-billy/v5"
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/stencil-hq/ovnfs/export"
+	"github.com/stencil-hq/ovnfs/internal/unixstat"
 	"golang.org/x/sys/unix"
 )
 

@@ -12,9 +12,9 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/go-git/go-billy/v5"
 	"github.com/stencil-hq/ovnfs/export"
 	"github.com/stencil-hq/ovnfs/ntinfo"
-	"github.com/go-git/go-billy/v5"
 	gowinfsp "github.com/winfsp/go-winfsp"
 	"golang.org/x/sys/windows"
 )

@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/stencil-hq/ovnfs/checkout"
-	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/helper/chroot"
+	"github.com/stencil-hq/ovnfs/checkout"
+	"github.com/stencil-hq/ovnfs/overlay"
 )
 
 // Router dispatches export-relative paths to the registry's current checkout view.

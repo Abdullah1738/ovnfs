@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/stencil-hq/ovnfs/mesh"
 	"github.com/stencil-hq/ovnfs/mesh/relay"
-	"github.com/quic-go/quic-go"
 )
 
 // Pre-authentication limits, as stencil-net's gate and limiter set them.

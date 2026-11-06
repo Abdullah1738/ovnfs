@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/go-git/go-billy/v5"
+	"github.com/stencil-hq/ovnfs/overlay"
 )
 
 // nodeFS gives both protocols stable node ids and keeps their paths in step

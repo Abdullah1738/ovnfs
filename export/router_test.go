@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-billy/v5"
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/checkout"
 	"github.com/stencil-hq/ovnfs/export"
 	"github.com/stencil-hq/ovnfs/overlay"
-	"github.com/go-git/go-billy/v5"
 )
 
 // routerFixture constructs the actual registry and captured base used by router tests.

@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/stencil-hq/ovnfs/smb/auth"
 	"github.com/go-git/go-billy/v5"
+	"github.com/stencil-hq/ovnfs/smb/auth"
 )
 
 // conn owns transport serialization and all resources bound to a TCP connection.

@@ -7,8 +7,8 @@ import (
 	"path"
 	"sync"
 
-	"github.com/stencil-hq/ovnfs/checkout"
 	"github.com/go-git/go-billy/v5"
+	"github.com/stencil-hq/ovnfs/checkout"
 )
 
 // routerFile serializes file calls and redirects stale descriptors into the current upper.

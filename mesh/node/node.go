@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/stencil-hq/ovnfs/mesh"
 	"github.com/stencil-hq/ovnfs/mesh/relay"
-	"github.com/quic-go/quic-go"
 )
 
 const (

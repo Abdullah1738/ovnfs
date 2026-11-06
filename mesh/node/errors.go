@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stencil-hq/ovnfs/mesh"
 	"github.com/quic-go/quic-go"
+	"github.com/stencil-hq/ovnfs/mesh"
 )
 
 // ErrNoWays reports a node the peer book knows no way to.

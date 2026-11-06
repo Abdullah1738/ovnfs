@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/stencil-hq/ovnfs/internal/unixstat"
 	"github.com/go-git/go-billy/v5"
+	"github.com/stencil-hq/ovnfs/internal/unixstat"
 )
 
 // fattr3 appends a as an fattr3.

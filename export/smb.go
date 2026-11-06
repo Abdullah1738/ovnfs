@@ -4,9 +4,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/go-git/go-billy/v5"
 	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/smb"
-	"github.com/go-git/go-billy/v5"
 )
 
 // protocolFS is the export as a network protocol server sees it: node

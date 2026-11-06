@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/stencil-hq/ovnfs/mesh"
 	"github.com/quic-go/quic-go"
+	"github.com/stencil-hq/ovnfs/mesh"
 )
 
 // PeerInfo is who a connection is with and how it reaches them.
