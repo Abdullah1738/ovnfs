@@ -437,7 +437,7 @@ func TestV3SetattrGuard(t *testing.T) {
 	}
 	d.fixed(16)
 	post, ok := postOpOf(t, d)
-	if !ok || post.mode != 0o400 || post.size != 4 || len(d.buf) != 0 {
+	if !ok || post.mode != uint32(hostPerm(0o400, false)) || post.size != 4 || len(d.buf) != 0 {
 		t.Fatalf("SETATTR post-op: %+v", post)
 	}
 }
@@ -455,14 +455,14 @@ func TestV3SetattrTimes(t *testing.T) {
 		e.u32(1) // atime: server time
 		e.u32(2) // mtime: client time
 		e.u32(1_000_000)
-		e.u32(5)
+		e.u32(500) // NTFS keeps 100ns units
 		e.u32(0)
 	})
 	if st != stOK {
 		t.Fatalf("SETATTR: %d", st)
 	}
 	info, err := os.Stat(fs.host("f"))
-	if err != nil || !info.ModTime().Equal(time.Unix(1_000_000, 5)) {
+	if err != nil || !info.ModTime().Equal(time.Unix(1_000_000, 500)) {
 		t.Fatalf("mtime %v, %v", info.ModTime(), err)
 	}
 	if stat, _ := c.call(progNFS, 3, v3SetAttr, func(e *encoder) {
@@ -518,7 +518,7 @@ func TestV3CreateModes(t *testing.T) {
 	if st != stOK || id != fs.FileID("new") {
 		t.Fatalf("GUARDED create: %d id %d", st, id)
 	}
-	if info, err := os.Stat(fs.host("new")); err != nil || info.Mode().Perm() != 0o640 {
+	if info, err := os.Stat(fs.host("new")); err != nil || info.Mode().Perm() != hostPerm(0o640, false) {
 		t.Fatalf("created file: %v %v", info, err)
 	}
 	fs.write(t, "new", "keep")
@@ -531,7 +531,7 @@ func TestV3CreateModes(t *testing.T) {
 	if got, _ := os.ReadFile(fs.host("new")); string(got) != "keep" {
 		t.Fatalf("UNCHECKED create truncated the file: %q", got)
 	}
-	if info, err := os.Stat(fs.host("new")); err != nil || info.Mode().Perm() != 0o640 {
+	if info, err := os.Stat(fs.host("new")); err != nil || info.Mode().Perm() != hostPerm(0o640, false) {
 		t.Fatalf("UNCHECKED create of an existing file changed its mode: %v %v", info, err)
 	}
 	if err := os.Symlink("new", fs.host("link")); err != nil {
@@ -651,7 +651,7 @@ func TestV3MkdirSymlinkReadlink(t *testing.T) {
 	if id, _ := d.fh(maxFH3); id != fs.FileID("d") {
 		t.Fatalf("MKDIR handle %d", id)
 	}
-	if info, err := os.Stat(fs.host("d")); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+	if info, err := os.Stat(fs.host("d")); err != nil || !info.IsDir() || info.Mode().Perm() != hostPerm(0o700, true) {
 		t.Fatalf("MKDIR made %v %v", info, err)
 	}
 	if st, _ := c.v3call(v3Mkdir, func(e *encoder) { dirop(e, 1, "d"); noSattr(e) }); st != stExist {

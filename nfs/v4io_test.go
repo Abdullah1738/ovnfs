@@ -2,6 +2,7 @@ package nfs
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -124,8 +125,11 @@ func TestV4SetAttr(t *testing.T) {
 	}
 	_, addr := v4serve(t, fs, nil)
 	c := v4dial(t, addr)
-	mtime := time.Unix(1_600_000_000, 42)
+	mtime := time.Unix(1_600_000_000, 4_200) // NTFS keeps 100ns units
 	uid, gid := uint32(os.Getuid()), uint32(os.Getgid())
+	if runtime.GOOS == "windows" {
+		uid, gid = 0, 0 // os.Getuid is -1, and a Windows host file has no owner
+	}
 	all := v4Attrs(bitmap4(attr4Size, attr4Mode, attr4Owner, attr4OwnerGroup, attr4TimeModifySet), func(e *encoder) {
 		e.u64(2)
 		e.u32(0o4600)
@@ -141,7 +145,9 @@ func TestV4SetAttr(t *testing.T) {
 	}
 	r.end()
 	info, err := os.Stat(fs.host("f"))
-	if err != nil || info.Size() != 2 || info.Mode()&os.ModePerm != 0o600 || info.Mode()&os.ModeSetuid == 0 || !info.ModTime().Equal(mtime) {
+	// Windows keeps no setuid bit.
+	if err != nil || info.Size() != 2 || info.Mode()&os.ModePerm != hostPerm(0o600, false) ||
+		info.Mode()&os.ModeSetuid == 0 && runtime.GOOS != "windows" || !info.ModTime().Equal(mtime) {
 		t.Fatalf("after SETATTR: %v, %v", info, err)
 	}
 
@@ -342,7 +348,8 @@ func TestV4ChangeMovesOnModeAndLinks(t *testing.T) {
 	}
 	pin()
 	before := srv.changeAt4("f")
-	if err := os.Chmod(fs.host("f"), 0o600); err != nil {
+	// Read-only, as a Windows host keeps no other mode.
+	if err := os.Chmod(fs.host("f"), 0o444); err != nil {
 		t.Fatal(err)
 	}
 	pin()
@@ -354,7 +361,8 @@ func TestV4ChangeMovesOnModeAndLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	pin()
-	if srv.changeAt4("f") == afterChmod {
+	// Go reports no link count of a Windows host file.
+	if srv.changeAt4("f") == afterChmod && runtime.GOOS != "windows" {
 		t.Fatal("change did not move on a new hard link")
 	}
 	if srv.changeAt4("missing") != 0 {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -163,8 +164,52 @@ func startServer(t testing.TB, s *Server) string {
 	t.Cleanup(func() {
 		l.Close()
 		<-done
+		closeKept(s)
 	})
 	return l.Addr().String()
+}
+
+// closeKept closes the files s keeps open for writes (keptFiles, v4Kept),
+// as the server's process exiting would: Windows cannot remove the test's
+// directory while a file in it is open.
+func closeKept(s *Server) {
+	k := &s.v3.kept
+	k.mu.Lock()
+	var files []billy.File
+	for f := k.evictLocked(); f != nil; f = k.evictLocked() {
+		files = append(files, f)
+	}
+	k.mu.Unlock()
+	for _, f := range files {
+		f.Close()
+	}
+
+	st := &s.v4
+	st.mu.Lock()
+	for _, f := range st.files {
+		if f.kept != nil {
+			st.closing = append(st.closing, f.kept.f)
+			f.kept = nil
+		}
+	}
+	st.unlock()
+}
+
+// hostPerm is the permission a host file, or with dir a directory, created
+// or chmodded with perm reads back with. Windows keeps only a read-only
+// attribute, which Go reports as 0444 or 0666, adding 0111 for directories.
+func hostPerm(perm os.FileMode, dir bool) os.FileMode {
+	if runtime.GOOS != "windows" {
+		return perm
+	}
+	p := os.FileMode(0o666)
+	if perm&0o200 == 0 {
+		p = 0o444
+	}
+	if dir {
+		p |= 0o111
+	}
+	return p
 }
 
 // rpcClient sends hand-encoded calls, one at a time, over one connection.

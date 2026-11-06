@@ -3,6 +3,7 @@ package nfs
 import (
 	"math"
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -271,7 +272,7 @@ func TestV4GetAttrValues(t *testing.T) {
 	if err := os.Chmod(fs.host("f"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	mtime := time.Unix(1_700_000_000, 123)
+	mtime := time.Unix(1_700_000_000, 123_400) // NTFS keeps 100ns units
 	if err := os.Chtimes(fs.host("f"), mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +305,11 @@ func TestV4GetAttrValues(t *testing.T) {
 	str := func(want string) func(*decoder) bool {
 		return func(d *decoder) bool { return d.str(100) == want }
 	}
-	tm := func(d *decoder) bool { return d.u64() == uint64(mtime.Unix()) && d.u32() == 123 }
+	tm := func(d *decoder) bool { return d.u64() == uint64(mtime.Unix()) && d.u32() == 123_400 }
+	owner := strconv.Itoa(os.Getuid())
+	if runtime.GOOS == "windows" {
+		owner = "0" // os.Getuid is -1, and a Windows host file has no uid
+	}
 	checks := map[uint32]func(*decoder) bool{
 		attr4SupportedAttrs: func(d *decoder) bool {
 			b, _ := getBitmap4(d)
@@ -337,10 +342,10 @@ func TestV4GetAttrValues(t *testing.T) {
 		attr4MaxName:         u32(255),
 		attr4MaxRead:         u64(1 << 20),
 		attr4MaxWrite:        u64(1 << 20),
-		attr4Mode:            u32(0o640),
+		attr4Mode:            u32(uint32(hostPerm(0o640, false))),
 		attr4NoTrunc:         yes,
 		attr4NumLinks:        u32(1),
-		attr4Owner:           str(strconv.Itoa(os.Getuid())),
+		attr4Owner:           str(owner),
 		attr4OwnerGroup:      str(strconv.FormatUint(uint64(a.gid), 10)),
 		attr4RawDev:          func(d *decoder) bool { major, minor := d.u32(), d.u32(); return major == 0 && minor == 0 },
 		attr4SpaceAvail:      u64(st.Avail * uint64(st.BlockSize)),

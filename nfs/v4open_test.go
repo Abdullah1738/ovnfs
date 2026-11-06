@@ -149,7 +149,7 @@ func TestV4GuardedCreateAppliesAttributes(t *testing.T) {
 	if o := v4getOpened(t, r.next(op4Open, stOK)); o.attrset != bitmap4(attr4Mode) || !o.cinfo.atomic || o.cinfo.before == o.cinfo.after {
 		t.Fatalf("attrset %v cinfo %+v", o.attrset, o.cinfo)
 	}
-	if info, err := os.Stat(fs.host("f")); err != nil || info.Mode().Perm() != 0o640 {
+	if info, err := os.Stat(fs.host("f")); err != nil || info.Mode().Perm() != hostPerm(0o640, false) {
 		t.Fatalf("mode %v, %v; want 0640", info.Mode(), err)
 	}
 }
@@ -175,7 +175,7 @@ func TestV4UncheckedOpenLeavesExistingFile(t *testing.T) {
 	if o := open(v4Mode(0o644)); o.attrset != (v4bitmap{}) || o.cinfo.before != o.cinfo.after {
 		t.Fatalf("attrset %v cinfo %+v", o.attrset, o.cinfo)
 	}
-	if info, _ := os.Stat(fs.host("f")); info.Mode().Perm() != 0o755 || info.Size() != 4 {
+	if info, _ := os.Stat(fs.host("f")); info.Mode().Perm() != hostPerm(0o755, false) || info.Size() != 4 {
 		t.Fatalf("existing file changed: %v, %d bytes", info.Mode(), info.Size())
 	}
 	if o := open(v4Size(0)); o.attrset != bitmap4(attr4Size) {

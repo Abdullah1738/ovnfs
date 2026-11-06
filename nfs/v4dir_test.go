@@ -146,7 +146,7 @@ func TestV4NamespaceChangeInfo(t *testing.T) {
 	if !ci.atomic || ci.before != before || ci.after != change("") || ci.after == ci.before {
 		t.Fatalf("CREATE cinfo %+v, directory %x then %x", ci, before, change(""))
 	}
-	if info, _ := os.Stat(fs.host("d")); info.Mode().Perm() != 0o700 {
+	if info, _ := os.Stat(fs.host("d")); info.Mode().Perm() != hostPerm(0o700, true) {
 		t.Fatalf("mode %v", info.Mode())
 	}
 
