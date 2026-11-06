@@ -5,24 +5,45 @@ import (
 	"errors"
 	"io/fs"
 	"testing"
+	"unicode/utf16"
 )
 
+// wireName decodes a UTF-16LE reparse name.
+func wireName(b []byte) string {
+	u := make([]uint16, len(b)/2)
+	for i := range u {
+		u[i] = binary.LittleEndian.Uint16(b[2*i:])
+	}
+	return string(utf16.Decode(u))
+}
+
 func TestSymlinkReparse(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"a/b/c", "a/b/c"},
-		{"/x", "/x"},
-		{`\??\C:\x`, "C:/x"},
-		{`\??\UNC\srv\s`, "//srv/s"},
+	for _, tc := range []struct {
+		target, substitute, print string
+		relative                  bool
+	}{
+		{"a/b/c", `a\b\c`, `a\b\c`, true},
+		{"../x", `..\x`, `..\x`, true},
+		{"/x", `\x`, `\x`, false},
+		{"C:/x/y", `\??\C:\x\y`, `C:\x\y`, false},
+		{"//srv/s/x", `\??\UNC\srv\s\x`, `\\srv\s\x`, false},
 	} {
-		b, err := SymlinkReparse(tc.in)
+		b, err := SymlinkReparse(tc.target)
 		if err != nil {
-			t.Fatalf("%q: %v", tc.in, err)
+			t.Fatalf("%q: %v", tc.target, err)
 		}
-		if relative := binary.LittleEndian.Uint32(b[16:]) == 1; relative == (tc.in[0] == '/') {
-			t.Errorf("%q: relative flag %v", tc.in, relative)
+		name := func(off, n int) string { return wireName(b[20+off : 20+off+n]) }
+		if got := name(int(binary.LittleEndian.Uint16(b[8:])), int(binary.LittleEndian.Uint16(b[10:]))); got != tc.substitute {
+			t.Errorf("%q: substitute name %q, want %q", tc.target, got, tc.substitute)
 		}
-		if got, err := ParseSymlinkReparse(b); err != nil || got != tc.want {
-			t.Errorf("%q: got %q, %v; want %q", tc.in, got, err, tc.want)
+		if got := name(int(binary.LittleEndian.Uint16(b[12:])), int(binary.LittleEndian.Uint16(b[14:]))); got != tc.print {
+			t.Errorf("%q: print name %q, want %q", tc.target, got, tc.print)
+		}
+		if relative := binary.LittleEndian.Uint32(b[16:]) == 1; relative != tc.relative {
+			t.Errorf("%q: relative flag %v", tc.target, relative)
+		}
+		if got, err := ParseSymlinkReparse(b); err != nil || got != tc.target {
+			t.Errorf("%q: parsed %q, %v", tc.target, got, err)
 		}
 	}
 	b, _ := SymlinkReparse("x")

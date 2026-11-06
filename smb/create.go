@@ -614,7 +614,7 @@ func resolveCreatePath(fs Backend, name string, openReparse bool) (string, os.Fi
 		if err != nil {
 			return "", nil, ntinfo.Status(err)
 		}
-		if path.IsAbs(target) {
+		if ntinfo.IsAbs(target) {
 			// Absolute targets retain the backend's host-path semantics.
 			return name, nil, statusSuccess
 		}

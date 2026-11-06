@@ -15,24 +15,46 @@ const ReparseTagSymlink uint32 = 0xa000000c
 // ErrNotSymlink reports a reparse buffer with a tag other than ReparseTagSymlink.
 var ErrNotSymlink = errors.New("ntinfo: reparse tag is not IO_REPARSE_TAG_SYMLINK")
 
+// IsAbs reports whether a stored, slash-separated link target is absolute:
+// rooted (/x), UNC (//srv/share) or a drive path (C:/x). Hosts store targets
+// in their own form, so a server on any OS must not resolve these as relative.
+func IsAbs(target string) bool {
+	return strings.HasPrefix(target, "/") || isDrivePath(target)
+}
+
+// isDrivePath reports a target such as C:/x.
+func isDrivePath(t string) bool {
+	return len(t) >= 3 && t[1] == ':' && t[2] == '/' && ('A' <= t[0] && t[0] <= 'Z' || 'a' <= t[0] && t[0] <= 'z')
+}
+
 // SymlinkReparse encodes target as an IO_REPARSE_TAG_SYMLINK REPARSE_DATA_BUFFER
-// (header included) with equal substitute and print names, for FSCTL_GET_REPARSE_POINT.
+// (header included), for FSCTL_GET_REPARSE_POINT. Drive and UNC targets get
+// the NT substitute name Windows resolves (\??\C:\x, \??\UNC\srv\share) and
+// their usual form as print name; other targets use one name for both.
 func SymlinkReparse(target string) ([]byte, error) {
-	name := utf16.Encode([]rune(strings.ReplaceAll(target, "/", "\\")))
-	n := 2 * len(name)
-	if n > (65535-12)/2 {
+	print := strings.ReplaceAll(target, "/", "\\")
+	substitute := print
+	switch {
+	case strings.HasPrefix(target, "//"):
+		substitute = `\??\UNC\` + print[2:]
+	case isDrivePath(target):
+		substitute = `\??\` + print
+	}
+	sub, prn := utf16.Encode([]rune(substitute)), utf16.Encode([]rune(print))
+	n := 2 * (len(sub) + len(prn))
+	if 12+n > 65535 {
 		return nil, fmt.Errorf("ntinfo: symlink target too long: %w", fs.ErrInvalid)
 	}
-	b := make([]byte, 20, 20+2*n)
+	b := make([]byte, 20, 20+n)
 	binary.LittleEndian.PutUint32(b, ReparseTagSymlink)
-	binary.LittleEndian.PutUint16(b[4:], uint16(12+2*n))
-	binary.LittleEndian.PutUint16(b[10:], uint16(n))
-	binary.LittleEndian.PutUint16(b[12:], uint16(n))
-	binary.LittleEndian.PutUint16(b[14:], uint16(n))
-	if !strings.HasPrefix(target, "/") {
-		binary.LittleEndian.PutUint32(b[16:], 1)
+	binary.LittleEndian.PutUint16(b[4:], uint16(12+n))
+	binary.LittleEndian.PutUint16(b[10:], uint16(2*len(sub)))
+	binary.LittleEndian.PutUint16(b[12:], uint16(2*len(sub)))
+	binary.LittleEndian.PutUint16(b[14:], uint16(2*len(prn)))
+	if !IsAbs(target) {
+		binary.LittleEndian.PutUint32(b[16:], 1) // SYMLINK_FLAG_RELATIVE
 	}
-	for range 2 {
+	for _, name := range [2][]uint16{sub, prn} {
 		for _, u := range name {
 			b = binary.LittleEndian.AppendUint16(b, u)
 		}

@@ -743,6 +743,7 @@ func TestSMBSymlinkReparsePoint(t *testing.T) {
 		{name: "chain", target: "../alias", open: "dir/link"},
 		{name: "directory-component", target: "../dir", open: "dir/link/child"},
 		{name: "cycle", target: "link", open: "dir/link"},
+		{name: "absolute", open: "dir/link"}, // the lower file's host path, a drive path on Windows
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := startSMB(t, nil, func(lower, upper string) {
@@ -752,7 +753,11 @@ func TestSMBSymlinkReparsePoint(t *testing.T) {
 					t.Fatal(err)
 				}
 				putDiskFile(t, upper, "dir/placeholder", "")
-				if err := os.Symlink(tc.target, filepath.Join(upper, "dir/link")); err != nil {
+				target := tc.target
+				if target == "" {
+					target = filepath.Join(lower, "target")
+				}
+				if err := os.Symlink(target, filepath.Join(upper, "dir/link")); err != nil {
 					t.Fatal(err)
 				}
 			})
