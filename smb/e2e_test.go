@@ -109,6 +109,12 @@ func (f smbFixture) flush(t *testing.T) {
 // startSMB prepares on-disk inputs before starting Serve on an ephemeral loopback port.
 func startSMB(t *testing.T, users map[string]string, seed func(lower, upper string)) smbFixture {
 	t.Helper()
+	return startSMBWith(t, func(s *Server) { s.Users = users }, seed)
+}
+
+// startSMBWith is startSMB with the server configured before it serves.
+func startSMBWith(t *testing.T, configure func(*Server), seed func(lower, upper string)) smbFixture {
+	t.Helper()
 	lower, upper := t.TempDir(), t.TempDir()
 	if seed != nil {
 		seed(lower, upper)
@@ -122,7 +128,8 @@ func startSMB(t *testing.T, users map[string]string, seed func(lower, upper stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{FS: backend, Share: "test", Users: users}
+	server := &Server{FS: backend, Share: "test"}
+	configure(server)
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	t.Cleanup(func() {
@@ -873,4 +880,35 @@ func TestSMBDirectoryLinks(t *testing.T) {
 	_, r = c.ioctl(file, 0x000900a4, junctionReparse(abs), 0)
 	c.expectStatus(r, statusNotADirectory)
 	c.expectStatus(c.close(file), wireSuccess)
+}
+
+// TestSMBMountRelativeLinks stores a link whose target names the link's own
+// checkout through one of the server's mount roots relative to the link, so
+// it resolves inside the checkout; a target in another checkout stays as
+// written, since no relative path reaches it.
+func TestSMBMountRelativeLinks(t *testing.T) {
+	fixture := startSMBWith(t, func(s *Server) { s.MountRoots = []string{"O:/", "//127.0.0.1/ovnfs/"} }, func(lower, upper string) {
+		putDiskFile(t, lower, "co/packages/utils/child", "child data")
+	})
+	c := guestClient(t, fixture)
+	for _, tc := range []struct{ link, target, want string }{
+		{"co/drive", "O:/co/packages/utils", "packages/utils"},
+		{"co/share", "//127.0.0.1/OVNFS/co/packages/utils", "packages/utils"},
+		{"co/other", "O:/other/x", "O:/other/x"},
+	} {
+		reparse, err := ntinfo.SymlinkReparse(tc.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := mustOpen(t, c, tc.link, 2, 0x200001)
+		_, r := c.ioctl(id, 0x000900a4, reparse, 0)
+		c.expectStatus(r, wireSuccess)
+		c.expectStatus(c.close(id), wireSuccess)
+		if got, err := os.Readlink(filepath.Join(fixture.upper, tc.link)); err != nil || filepath.ToSlash(got) != tc.want {
+			t.Errorf("%s stored as %q, %v; want %q", tc.link, got, err, tc.want)
+		}
+	}
+	id := mustOpen(t, c, "co/share/child", 1, 0x40)
+	readEquals(t, c, id, "child data")
+	c.expectStatus(c.close(id), wireSuccess)
 }

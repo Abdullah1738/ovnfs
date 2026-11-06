@@ -144,3 +144,26 @@ func TestParseJunction(t *testing.T) {
 		t.Errorf("relative junction: %v", err)
 	}
 }
+
+// TestMountRelative stores links that name their own checkout through the
+// mount relative to the link, and leaves every other target alone.
+func TestMountRelative(t *testing.T) {
+	roots := []string{"O:/", "//127.0.0.1/ovnfs/"}
+	for _, tc := range []struct{ target, link, want string }{
+		{"O:/co/packages/utils", "co/node_modules/@x/utils", "../../packages/utils"},
+		{"o:/co/packages/utils", "co/node_modules/@x/utils", "../../packages/utils"},
+		{"//127.0.0.1/OVNFS/co/packages/utils", "co/node_modules/@x/utils", "../../packages/utils"},
+		{"O:/co", "co/node_modules/root", ".."},
+		{"O:/co/node_modules/a", "co/node_modules/b", "a"},
+		{"O:/co/node_modules", "co/node_modules/self", "."},
+		{"O:/other/packages/utils", "co/node_modules/@x/utils", "O:/other/packages/utils"},
+		{"O:/co/../other/x", "co/link", "O:/co/../other/x"},
+		{"O:/cofee/x", "co/link", "O:/cofee/x"},
+		{"C:/co/packages/utils", "co/link", "C:/co/packages/utils"},
+		{"../packages/utils", "co/node_modules/utils", "../packages/utils"},
+	} {
+		if got := MountRelative(tc.target, tc.link, roots); got != tc.want {
+			t.Errorf("MountRelative(%q, %q) = %q, want %q", tc.target, tc.link, got, tc.want)
+		}
+	}
+}

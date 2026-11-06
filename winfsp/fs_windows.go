@@ -32,6 +32,9 @@ type fileSystem struct {
 	// driver checks it before every open, and Windows has no execute bits to
 	// derive a narrower one from.
 	sd *windows.SECURITY_DESCRIPTOR
+	// roots name the volume's root to Windows tools (O:/, //ovnfs/O/); see
+	// [ntinfo.MountRelative]. Mount sets them.
+	roots []string
 
 	mu      sync.Mutex
 	next    uintptr
@@ -675,6 +678,7 @@ func (x *fileSystem) SetReparsePoint(_ *gowinfsp.FileSystemRef, fc uintptr, name
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := exportPath(name)
+	target = ntinfo.MountRelative(target, p, x.roots)
 	info, err := x.nodes.Lstat(p)
 	if err != nil {
 		return status(err)

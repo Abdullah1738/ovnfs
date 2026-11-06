@@ -17,6 +17,12 @@ import (
 // anywhere else are never treated as ours.
 const smbRemote = `\\127.0.0.1\ovnfs`
 
+// mountRoots are the names Windows tools give the mount's root: its drive and,
+// once they resolve a path, the share net use maps it to.
+func mountRoots(mount string) []string {
+	return []string{filepath.VolumeName(mount) + "/", filepath.ToSlash(smbRemote) + "/"}
+}
+
 // procWNetGetConnection reads a drive's network mapping without spawning net use.
 var procWNetGetConnection = windows.NewLazySystemDLL("mpr.dll").NewProc("WNetGetConnectionW")
 

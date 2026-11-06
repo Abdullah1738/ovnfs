@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path"
 	"strings"
 	"unicode/utf16"
 )
@@ -28,6 +29,38 @@ func IsAbs(target string) bool {
 // isDrivePath reports a target such as C:/x.
 func isDrivePath(t string) bool {
 	return len(t) >= 3 && t[1] == ':' && t[2] == '/' && ('A' <= t[0] && t[0] <= 'Z' || 'a' <= t[0] && t[0] <= 'z')
+}
+
+// MountRelative returns target relative to link when target names a path in
+// link's checkout through one of the mount's roots, such as its drive (O:/)
+// or share (//127.0.0.1/ovnfs/), else target. Windows tools write links on
+// the mount that way (Bun resolves its working directory to the share first);
+// served as stored, they would lead the daemon back into its own mount. A
+// target in another checkout stays as written: each checkout resolves links
+// within itself, so no relative path reaches it. link and the result's base
+// are export paths (checkout/dir/name).
+func MountRelative(target, link string, roots []string) string {
+	for _, root := range roots {
+		if len(target) < len(root) || !strings.EqualFold(target[:len(root)], root) {
+			continue
+		}
+		inner := path.Clean(target[len(root):])
+		checkout, _, _ := strings.Cut(link, "/")
+		if inner != checkout && !strings.HasPrefix(inner, checkout+"/") {
+			return target
+		}
+		from, to := strings.Split(path.Dir(link), "/"), strings.Split(inner, "/")
+		common := 0
+		for common < len(from) && common < len(to) && from[common] == to[common] {
+			common++
+		}
+		rel := strings.Repeat("../", len(from)-common) + strings.Join(to[common:], "/")
+		if rel = strings.TrimSuffix(rel, "/"); rel == "" {
+			return "."
+		}
+		return rel
+	}
+	return target
 }
 
 // SymlinkReparse encodes target as an IO_REPARSE_TAG_SYMLINK REPARSE_DATA_BUFFER

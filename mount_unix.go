@@ -12,6 +12,9 @@ import (
 // smbClientPort is 0: mount_smbfs and mount.cifs dial any port.
 func smbClientPort() int { return 0 }
 
+// mountRoots is empty: Unix kernels resolve absolute links through the mount.
+func mountRoots(string) []string { return nil }
+
 // makeMountPoint creates the directory the mount covers.
 func makeMountPoint(dir string) error { return os.MkdirAll(dir, 0o755) }
 

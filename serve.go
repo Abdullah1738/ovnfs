@@ -383,7 +383,7 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, mo
 		return 0, fmt.Errorf("persist listen: %w", err)
 	}
 	if proto == "smb" {
-		s := &smb.Server{FS: e.SMB(), Share: "ovnfs"}
+		s := &smb.Server{FS: e.SMB(), Share: "ovnfs", MountRoots: mountRoots(mount)}
 		nodes := e.Nodes()
 		e.OnRecall(func(id uint64) {
 			if p, ok := nodes.Path(id); ok {

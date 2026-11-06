@@ -32,6 +32,7 @@ func Mount(e *export.Export, mountpoint string) (*Server, error) {
 		return nil, fmt.Errorf("winfsp: mount %s: %w", mountpoint, err)
 	}
 	drive := strings.TrimSuffix(mountpoint, `\`)
+	fs.roots = []string{drive + "/", "//ovnfs/" + strings.TrimSuffix(drive, ":") + "/"}
 	vol, err := gowinfsp.Mount(fs, drive,
 		// Microsoft Defender re-reads a file on every open of a local WinFsp
 		// disk; as a network volume, like the SMB share, it scans far less

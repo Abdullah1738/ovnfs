@@ -97,6 +97,10 @@ only links marked so. Opened as itself, such a link counts as a directory, so
 `rmdir` removes it. `CreateSymbolicLink`, `mklink /D` and junction tools
 create directory links on the drive; a junction is stored as a symlink to its
 target. `mklink /J` refuses network drives before asking the daemon.
+A link created with a target that names its own checkout through the drive
+(`O:\app\x`) or the share (`\\127.0.0.1\ovnfs\app\x`, as Bun writes them) is
+stored relative to the link: served as written, it would lead the daemon back
+into its own mount.
 
 ### Unix modes and Defender
 

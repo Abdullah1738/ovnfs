@@ -283,6 +283,7 @@ func ioctlWriteReparse(r *request, o *open, in []byte) uint32 {
 	if tag == ntinfo.ReparseTagMountPoint && !o.isDir {
 		return statusNotADirectory
 	}
+	target = ntinfo.MountRelative(target, o.path, r.c.srv.MountRoots)
 	fs := r.c.srv.FS
 	info, err := fs.Lstat(o.path)
 	if err != nil {

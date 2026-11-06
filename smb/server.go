@@ -15,9 +15,12 @@ type Server struct {
 	FS    Backend
 	Share string
 	Users map[string]string
-	Logf  func(format string, args ...any)
-	guid  [16]byte
-	st    state
+	// MountRoots are the paths that name the share's root to its clients,
+	// slash-separated (O:/, //127.0.0.1/ovnfs/); see [ntinfo.MountRelative].
+	MountRoots []string
+	Logf       func(format string, args ...any)
+	guid       [16]byte
+	st         state
 }
 
 // state holds the filesystem-wide open, locking, and notification registries.

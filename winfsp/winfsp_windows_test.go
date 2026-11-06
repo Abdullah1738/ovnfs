@@ -339,6 +339,17 @@ func TestSymlinks(t *testing.T) {
 		t.Fatalf("export readlink = %q, %v", target, err)
 	}
 	f.read(t, "alpha/dirlink/in", "deep")
+	// Targets naming the checkout through the drive or the volume are stored
+	// relative, so they resolve inside the checkout.
+	for name, target := range map[string]string{"alpha/drivelink": f.path("alpha/dir"), "alpha/sharelink": `\\ovnfs\` + f.drive[:1] + `\alpha\dir`} {
+		if err := os.Symlink(target, f.path(name)); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := f.export.Nodes().Readlink(name); err != nil || got != "dir" {
+			t.Fatalf("%s stored as %q, %v; want dir", name, got, err)
+		}
+		f.read(t, name+"/in", "deep")
+	}
 	if err := os.Remove(f.path("alpha/link")); err != nil {
 		t.Fatal(err)
 	}
