@@ -40,7 +40,7 @@ func (r *Registry) searchRoot(ctx context.Context, args api.SearchArgs) (searchT
 	if args.Workers < 0 || args.MaxDepth < 0 {
 		return searchTarget{}, failure("invalid", "workers and max_depth must not be negative")
 	}
-	if filepath.IsAbs(args.Path) || strings.ContainsRune(args.Path, '\\') || path.Clean(args.Path) == ".." || strings.HasPrefix(path.Clean(args.Path), "../") {
+	if args.Path != "" && (strings.ContainsRune(args.Path, '\\') || !filepath.IsLocal(args.Path)) {
 		return searchTarget{}, failure("invalid", "search path must stay relative to its root")
 	}
 	name, sub := args.Checkout, args.Path
