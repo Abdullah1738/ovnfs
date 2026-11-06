@@ -91,20 +91,22 @@ func (i *networkOpenInfo) stamp() Stamp {
 	}
 }
 
-// Stat queries an absolute Win32 path without opening a handle. Reparse
-// points are followed either way.
-func (s *session) Stat(path string, _ bool) (FileInfo, error) {
+// Stat queries an absolute Win32 path without opening a handle. The query
+// describes a reparse point itself, so one is reported as a Symlink, or with
+// follow opened to describe its target.
+func (s *session) Stat(path string, follow bool) (FileInfo, error) {
+	name := path
 	switch {
-	case strings.HasPrefix(path, `\\?\`):
-		path = path[4:]
+	case strings.HasPrefix(name, `\\?\`):
+		name = name[4:]
 		s.wname = appendUTF16(s.wname[:0], `\??\`)
-	case strings.HasPrefix(path, `\\`):
-		path = path[2:]
+	case strings.HasPrefix(name, `\\`):
+		name = name[2:]
 		s.wname = appendUTF16(s.wname[:0], `\??\UNC\`)
 	default:
 		s.wname = appendUTF16(s.wname[:0], `\??\`)
 	}
-	s.wname = appendUTF16(s.wname, path)
+	s.wname = appendUTF16(s.wname, name)
 	if len(s.wname) > 0x7fff {
 		return FileInfo{}, windows.ERROR_FILENAME_EXCED_RANGE
 	}
@@ -114,13 +116,34 @@ func (s *session) Stat(path string, _ bool) (FileInfo, error) {
 	var info networkOpenInfo
 	r, _, _ := syscall.SyscallN(procNtQueryFullAttributesFile.Addr(), uintptr(unsafe.Pointer(&oa)), uintptr(unsafe.Pointer(&info)))
 	if status := windows.NTStatus(r); status != windows.STATUS_SUCCESS {
-		return FileInfo{}, status
+		return FileInfo{}, ntErr(status)
+	}
+	if info.fileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		if !follow {
+			return FileInfo{Type: Symlink, Size: -1, Stamp: info.stamp()}, nil
+		}
+		return s.statTarget(path)
 	}
 	typ, size := File, info.endOfFile
 	if info.fileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
 		typ, size = Dir, -1
 	}
 	return FileInfo{Type: typ, Size: size, Stamp: info.stamp()}, nil
+}
+
+// statTarget opens path, which resolves its reparse points, and describes what
+// it reaches; a dangling link fails as not-exist.
+func (s *session) statTarget(path string) (FileInfo, error) {
+	h, err := s.createFile(path, windows.FILE_READ_ATTRIBUTES, windows.FILE_FLAG_BACKUP_SEMANTICS)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	defer windows.CloseHandle(h)
+	st, typ, size, err := statHandle(h)
+	if typ == Dir {
+		size = -1
+	}
+	return FileInfo{Type: typ, Size: size, Stamp: st}, err
 }
 
 // Identify opens the path because path queries carry no file index.
@@ -226,9 +249,23 @@ func (s *session) ntOpen(parent handle, name string, access, options uint32) (ha
 	err := windows.NtCreateFile(&h, access, &oa, &iosb, nil, 0, shareAll, windows.FILE_OPEN,
 		options|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_FOR_BACKUP_INTENT, 0, 0)
 	if err != nil {
-		return windows.InvalidHandle, err
+		return windows.InvalidHandle, ntErr(err)
 	}
 	return h, nil
+}
+
+// ntErr turns an NTSTATUS into the Win32 error the os package would report, so
+// callers can match fs.ErrNotExist and the like; a FILE_NON_DIRECTORY_FILE open
+// that found a directory is ErrNotRegular, as on Unix.
+func ntErr(err error) error {
+	status, ok := err.(windows.NTStatus)
+	switch {
+	case !ok:
+		return err
+	case status == windows.STATUS_FILE_IS_A_DIRECTORY:
+		return ErrNotRegular
+	}
+	return status.Errno()
 }
 
 func closeHandle(h handle) { windows.CloseHandle(h) }
@@ -254,7 +291,7 @@ func (s *session) list(h handle, _ Detail, _ uint32) error {
 			return nil
 		default:
 			if int32(status) < 0 {
-				return status
+				return ntErr(status)
 			}
 		}
 		n := int(iosb.Information)
