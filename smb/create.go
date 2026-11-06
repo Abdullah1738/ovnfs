@@ -422,7 +422,10 @@ func parseCreate(r *request) (createArgs, uint32) {
 	return a, statusSuccess
 }
 
-// shareCompatible performs the symmetric Windows read/write/delete sharing check.
+// shareCompatible performs the symmetric Windows read/write/delete sharing
+// check. As on NTFS, an open without read, write, execute or delete access
+// takes no part in it: Windows opens the share root for a free-space query
+// with no sharing, which must not lock other clients out of listing it.
 func shareCompatible(access, share uint32, o *open) bool {
 	mask := func(a uint32) uint32 {
 		var v uint32
@@ -437,7 +440,8 @@ func shareCompatible(access, share uint32, o *open) bool {
 		}
 		return v
 	}
-	return mask(access)&^o.shareAccess == 0 && mask(o.access)&^share == 0
+	want, held := mask(access), mask(o.access)
+	return want == 0 || held == 0 || want&^o.shareAccess == 0 && held&^share == 0
 }
 
 // handleCreate opens overlay objects after flushing incompatible client caches.

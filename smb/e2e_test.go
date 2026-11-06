@@ -772,3 +772,42 @@ func TestSMBSymlinkReparsePoint(t *testing.T) {
 		})
 	}
 }
+
+// createShared opens an existing name with explicit access and share masks.
+func createShared(c *wireClient, name string, options, access, share uint32) (wireID, wireReply) {
+	c.t.Helper()
+	b := wireCreateBody(name, 1, options)
+	binary.LittleEndian.PutUint32(b[24:], access)
+	binary.LittleEndian.PutUint32(b[32:], share)
+	r := c.exchange(5, b)
+	var id wireID
+	if r.status == wireSuccess {
+		copy(id[:], r.body[64:80])
+	}
+	return id, r
+}
+
+// TestSMBAttributeOnlyOpensTakeNoPartInSharing keeps sharing to opens with
+// read, write, execute or delete access, as NTFS does: Windows holds the share
+// root open for free-space queries with no sharing, and listing it must still
+// work, while an unshared data open still locks readers out.
+func TestSMBAttributeOnlyOpensTakeNoPartInSharing(t *testing.T) {
+	fixture := startSMB(t, nil, func(lower, upper string) { putDiskFile(t, lower, "dir/file", "data") })
+	c := guestClient(t, fixture)
+	// FILE_OPEN_FOR_FREE_SPACE_QUERY with READ_ATTRIBUTES|SYNCHRONIZE and no sharing.
+	query, r := createShared(c, "dir", 0x800021, 0x100080, 0)
+	c.expectStatus(r, wireSuccess)
+	list, r := createShared(c, "dir", 0x21, 0x100081, 7)
+	c.expectStatus(r, wireSuccess)
+	c.expectStatus(c.close(list), wireSuccess)
+	c.expectStatus(c.close(query), wireSuccess)
+
+	data, r := createShared(c, "dir/file", 0x40, 0x100001, 0)
+	c.expectStatus(r, wireSuccess)
+	_, r = createShared(c, "dir/file", 0x40, 0x100001, 7)
+	c.expectStatus(r, statusSharingViolation)
+	attrs, r := createShared(c, "dir/file", 0x40, 0x100080, 0)
+	c.expectStatus(r, wireSuccess)
+	c.expectStatus(c.close(attrs), wireSuccess)
+	c.expectStatus(c.close(data), wireSuccess)
+}
