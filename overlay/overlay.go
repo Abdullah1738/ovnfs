@@ -37,6 +37,7 @@ type FS struct {
 	upper, work string
 	layers      []*Layer
 	bottom      Bottom
+	bottomEpoch uint64
 	index       *Layer
 	tmpSeq      uint64
 	pathIDs     map[string]inodeKey
@@ -124,6 +125,7 @@ func (f *FS) Rebase(bottom Bottom) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bottom = bottom
+	f.bottomEpoch++
 }
 
 // Upper returns the host directory receiving writes, or empty for read-only views.
@@ -434,15 +436,19 @@ func (f *FS) Create(name string) (billy.File, error) {
 
 // OpenFile copies immutable data up before opening with any write intent.
 func (f *FS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, error) {
-	if flag&writeFlags == 0 {
+	writing := flag&writeFlags != 0
+	if !writing {
 		if h, ok, err := f.openLower(name, flag); ok {
 			return h, err
 		}
+	} else {
+		f.staging.RLock()
+		defer f.staging.RUnlock()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+retry:
 	p := Clean(name)
-	writing := flag&writeFlags != 0
 	if writing {
 		if err := f.mutable("open", p); err != nil {
 			return nil, err
@@ -460,7 +466,20 @@ func (f *FS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, erro
 		if links == 40 {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.ELOOP}
 		}
-		target, linkErr := f.readlink(s, p)
+		var target string
+		var linkErr error
+		if s.layer != nil {
+			target, linkErr = f.readlink(s, p)
+		} else {
+			bottom, epoch := f.bottom, f.bottomEpoch
+			f.mu.Unlock()
+			target, linkErr = bottom.Readlink(p)
+			f.mu.Lock()
+			current, currentInfo, currentErr := f.lookup(p)
+			if f.bottomEpoch != epoch || currentErr != nil || current.layer != nil || currentInfo.Mode()&os.ModeSymlink == 0 {
+				goto retry
+			}
+		}
 		if linkErr != nil {
 			return nil, linkErr
 		}
@@ -488,7 +507,10 @@ func (f *FS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, erro
 		if !info.Mode().IsRegular() {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EISDIR}
 		}
-		fh, err := f.bottom.Open(p)
+		bottom := f.bottom
+		f.mu.Unlock()
+		fh, err := bottom.Open(p)
+		f.mu.Lock()
 		if err != nil {
 			return nil, err
 		}
@@ -539,6 +561,17 @@ func (f *FS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, erro
 				}
 				if err := f.refresh(p); err != nil {
 					return nil, err
+				}
+			} else if s.layer == nil && info.Mode().IsRegular() {
+				changed, err := f.copyUpBottomForOpen(p, info)
+				if err != nil {
+					return nil, err
+				}
+				if changed {
+					goto retry
+				}
+				if m := f.files[p]; m != nil {
+					return f.openMem(m, original, flag)
 				}
 			} else if err := f.copyUp(p); err != nil {
 				return nil, err
@@ -1185,6 +1218,71 @@ func (f *FS) preserveDirTime(d string, fn func() error) error {
 		return timeErr
 	}
 	return refreshErr
+}
+
+// copyUpBottomForOpen stages an immutable bottom file without holding mu.
+// On reacquiring mu it either publishes that same file or tells OpenFile to
+// resolve the name again if another operation changed its source.
+func (f *FS) copyUpBottomForOpen(p string, info os.FileInfo) (bool, error) {
+	bottom, epoch := f.bottom, f.bottomEpoch
+	inMemory := f.mem != nil && info.Size() <= f.mem.fileMax
+	for {
+		var tmp string
+		if !inMemory {
+			tmp = f.stagingName()
+		}
+		f.mu.Unlock()
+		var data []byte
+		var err error
+		if inMemory {
+			var c Content
+			c, err = bottom.Open(p)
+			if err == nil {
+				data, err = readBounded(c, info.Size(), f.mem.fileMax)
+				err = errors.Join(err, c.Close())
+			}
+		} else {
+			err = bottom.CopyTo(p, tmp)
+			if err == nil {
+				err = keepMode(tmp, info.Mode())
+			}
+		}
+		f.mu.Lock()
+		current, currentInfo, lookupErr := f.lookup(p)
+		if f.bottomEpoch != epoch || lookupErr != nil || current.layer != nil || !currentInfo.Mode().IsRegular() {
+			if tmp != "" {
+				_ = os.RemoveAll(tmp)
+			}
+			return true, nil
+		}
+		if err != nil {
+			if tmp != "" {
+				_ = os.RemoveAll(tmp)
+			}
+			return false, err
+		}
+		if err := f.ensureDir(parent(p)); err != nil {
+			if tmp != "" {
+				_ = os.RemoveAll(tmp)
+			}
+			return false, err
+		}
+		if inMemory {
+			if int64(len(data)) <= f.mem.fileMax {
+				m, err := f.addMem(p, info.Mode(), info.ModTime(), data)
+				if m != nil || err != nil {
+					return false, err
+				}
+			}
+			inMemory = false
+			continue
+		}
+		defer os.RemoveAll(tmp)
+		if err := f.preserveDirTime(parent(p), func() error { return hostfile.Rename(tmp, f.up(p)) }); err != nil {
+			return false, err
+		}
+		return false, f.refresh(p)
+	}
 }
 
 // copyUp stages the selected immutable entry before publishing it atomically.

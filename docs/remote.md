@@ -19,8 +19,10 @@ empty directories; local and hidden paths never leave. Writes on the remote go
 to its own copy-on-write upper, and `diff`, `snap` and `fork` work there.
 
 The link reconnects with backoff while the source daemon runs. Without it,
-cached content stays readable and uncached reads fail with EIO. Re-attaching
-the same snapshot reuses the remote checkout. A newer snapshot updates the same
+cached content stays readable and uncached reads fail with EIO. A slow download
+for an open does not hold the overlay's namespace lock: unrelated reads and
+writes can proceed. Re-attaching the same snapshot reuses the remote checkout.
+A newer snapshot updates the same
 lane in place when its changes are only cache/local-class paths: its name,
 path, open handles and warm build outputs stay put. Source changes keep the old
 lane and open the new snapshot beside it.
