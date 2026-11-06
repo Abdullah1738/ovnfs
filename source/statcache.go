@@ -1,9 +1,11 @@
 package source
 
 import (
-	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/stencil-hq/ovnfs/git"
@@ -12,12 +14,12 @@ import (
 
 // statEntry remembers a file's stat data and the blob id its content hashed to.
 type statEntry struct {
-	Size  int64     `json:"s"`
-	Mtime int64     `json:"m"`
-	Ctime int64     `json:"c"`
-	Ino   uint64    `json:"i"`
-	Mode  uint32    `json:"x"`
-	OID   store.OID `json:"o"`
+	Size  int64
+	Mtime int64
+	Ctime int64
+	Ino   uint64
+	Mode  uint32
+	OID   store.OID
 }
 
 // fileKey is the identity that detects a replaced or rewritten file: its inode
@@ -40,31 +42,34 @@ func (e statEntry) matches(info os.FileInfo, key fileKey, mode uint32) bool {
 // statCache is a source folder's stat cache: entries whose blobs were all in the
 // store during the store epoch Epoch.
 type statCache struct {
-	Epoch   string               `json:"epoch"`
-	Entries map[string]statEntry `json:"entries"`
+	Epoch   string
+	Entries map[string]statEntry
 }
 
-// loadStatCache reads a source folder's stat cache; a missing or damaged file is an empty cache.
-func loadStatCache(name string) statCache {
+// loadStatCache reads a source folder's stat cache, whose paths and blob ids
+// are the capture tree it names in trees; a missing, damaged or older-format
+// file, or one whose tree is no longer stored, is an empty cache.
+func loadStatCache(name string, trees *store.Store) statCache {
 	empty := statCache{Entries: map[string]statEntry{}}
-	if name == "" {
+	if name == "" || trees == nil {
 		return empty
 	}
 	data, err := os.ReadFile(name)
 	if err != nil {
 		return empty
 	}
-	var c statCache
-	if json.Unmarshal(data, &c) != nil || c.Entries == nil {
+	c, err := decodeStatCache(data, trees)
+	if err != nil {
 		return empty
 	}
 	return c
 }
 
-// saveStatCache atomically replaces the cache, leaving out entries modified within
-// two seconds of cutoff: on coarse-timestamp filesystems their mtime cannot prove
+// saveStatCache atomically replaces the cache with entries, leaves of the
+// capture files stored as tree, leaving out entries modified within two
+// seconds of cutoff: on coarse-timestamp filesystems their mtime cannot prove
 // that a later write did not happen (git's racy-clean rule).
-func saveStatCache(name string, entries map[string]statEntry, cutoff time.Time, epoch string) error {
+func saveStatCache(name string, tree store.OID, files map[string]store.File, entries map[string]statEntry, cutoff time.Time, epoch string) error {
 	limit := cutoff.Add(-2 * time.Second).UnixNano()
 	kept := statCache{Epoch: epoch, Entries: make(map[string]statEntry, len(entries))}
 	for p, e := range entries {
@@ -72,7 +77,7 @@ func saveStatCache(name string, entries map[string]statEntry, cutoff time.Time, 
 			kept.Entries[p] = e
 		}
 	}
-	data, err := json.Marshal(kept)
+	data, err := encodeStatCache(kept, tree, files)
 	if err != nil {
 		return err
 	}
@@ -83,7 +88,18 @@ func saveStatCache(name string, entries map[string]statEntry, cutoff time.Time, 
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, name)
+	if err := os.Rename(tmp, name); err != nil {
+		return err
+	}
+	// Builds before the binary format kept this cache as JSON beside it.
+	legacy := strings.TrimSuffix(name, filepath.Ext(name)) + ".json"
+	if legacy == name {
+		return nil
+	}
+	if err := os.Remove(legacy); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // indexClean reports a regular file whose stat data still equals its git index

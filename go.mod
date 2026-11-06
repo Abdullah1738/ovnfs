@@ -7,6 +7,7 @@ require (
 	github.com/go-git/go-billy/v5 v5.9.2
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/hanwen/go-fuse/v2 v2.12.1
+	github.com/klauspost/compress v1.20.0
 	github.com/quic-go/quic-go v0.64.1
 	github.com/willscott/go-nfs-client v0.0.0-20240104095149-b44639837b00
 	github.com/winfsp/go-winfsp v1.0.7-0.20261009171518-5c41ad41b7a6

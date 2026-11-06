@@ -78,7 +78,9 @@ first.
 ## Snapshots and forks
 
 `snap` renames the upper into an immutable layer in O(1) and hashes its source
-paths into a git-format tree in the background (`--wait` blocks). `fork`
+paths into a git-format tree in the background (`--wait` blocks); hashing
+touches only the changed paths, and the store keeps a changed file as a delta
+against its previous version, so a snapshot costs about what changed. `fork`
 snapshots a checkout and opens a second one on that snapshot; parent and child
 diverge. `new --from SNAP` opens a checkout on any snapshot. `rm` removes a
 checkout and keeps its snapshots; `drop` releases one. Nothing replaces the

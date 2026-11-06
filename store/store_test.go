@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,41 @@ func openStoreCache(t *testing.T, cache int64) *Store {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// age marks stored object id as last stored at: a packed object's freshness, a loose one's mtime.
+func age(t *testing.T, s *Store, id OID, at time.Time) {
+	t.Helper()
+	r := rawOf(id)
+	s.packs.mu.Lock()
+	e, ok := s.packs.index[r]
+	if ok {
+		e.at = at.UnixNano()
+		s.packs.index[r] = e
+	}
+	s.packs.mu.Unlock()
+	if !ok {
+		if err := os.Chtimes(s.objectPath(id), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// forget drops stored object id's packed or loose copy, leaving any cached body.
+func forget(t *testing.T, s *Store, id OID) {
+	t.Helper()
+	s.packs.mu.Lock()
+	_, ok := s.packs.index[rawOf(id)]
+	delete(s.packs.index, rawOf(id))
+	s.packs.mu.Unlock()
+	if !ok {
+		if err := removeFile(s.objectPath(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.Has(id) {
+		t.Fatalf("%s still stored", id)
+	}
 }
 
 // gitRepo creates a SHA-1 repository in a temp directory, skipping when git is unavailable.
@@ -295,8 +331,14 @@ func testPutFileConcurrentRewrite(t *testing.T, copied bool) {
 		if int64(len(data)) != size || HashBytes("blob", data) != id {
 			t.Fatalf("stored %d bytes hashing to %s; PutFile returned %s size %d", len(data), HashBytes("blob", data), id, size)
 		}
-		if h, _, err := HashFile(s.BlobPath(id)); err != nil || h != id {
-			t.Fatalf("HashFile(object) = %s %v, want %s", h, err, id)
+		r, err := s.Open(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened, err := io.ReadAll(r)
+		r.Close()
+		if err != nil || HashBytes("blob", opened) != id {
+			t.Fatalf("Open(object) read %d bytes hashing to %s (%v), want %s", len(opened), HashBytes("blob", opened), err, id)
 		}
 		ids[id] = true
 	}
@@ -464,7 +506,8 @@ func TestSweep(t *testing.T) {
 		}
 		return id
 	}
-	kept, nested, garbage, fresh := put("kept"), put("nested"), put("garbage"), put("fresh")
+	// Garbage dominates the pack, so Sweep rewrites it (see TestSweepPackThreshold).
+	kept, nested, garbage, fresh := put("kept"), put("nested"), put(string(noisy("garbage", 4096))), put("fresh")
 	absent := HashBytes("blob", []byte("never stored"))
 	root, err := s.Build(map[string]File{
 		"kept":         {Mode: ModeFile, ID: kept},
@@ -487,23 +530,22 @@ func TestSweep(t *testing.T) {
 		}
 	}
 	old := time.Now().Add(-time.Hour)
-	paths := []string{stale, staleNear}
+	for _, p := range []string{stale, staleNear} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
 	all, err := s.Flatten(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range all {
 		if s.Has(f.ID) {
-			paths = append(paths, s.BlobPath(f.ID))
+			age(t, s, f.ID, old)
 		}
 	}
 	for _, id := range []OID{root, garbage, oldTree} {
-		paths = append(paths, s.BlobPath(id))
-	}
-	for _, p := range paths {
-		if err := os.Chtimes(p, old, old); err != nil {
-			t.Fatal(err)
-		}
+		age(t, s, id, old)
 	}
 	n, err := s.Sweep([]OID{root}, time.Now().Add(-time.Minute))
 	if err != nil {
@@ -531,9 +573,7 @@ func TestSweep(t *testing.T) {
 		}
 	}
 	// Re-storing an old object refreshes it so a sweep without its root keeps it.
-	if err := os.Chtimes(s.BlobPath(kept), old, old); err != nil {
-		t.Fatal(err)
-	}
+	age(t, s, kept, old)
 	put("kept")
 	if _, err := s.Sweep(nil, time.Now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
@@ -568,9 +608,7 @@ func TestSweepKeepsBuiltRoots(t *testing.T) {
 	}
 	all = append(all, entries[0].ID)
 	for _, id := range all {
-		if err := os.Chtimes(s.BlobPath(id), old, old); err != nil {
-			t.Fatal(err)
-		}
+		age(t, s, id, old)
 	}
 	epoch := s.Epoch()
 	if n, err := s.Sweep(nil, time.Now().Add(-time.Minute)); err != nil || n != 0 {
@@ -608,10 +646,7 @@ func TestHoldDefersSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(s.BlobPath(id), old, old); err != nil {
-		t.Fatal(err)
-	}
+	age(t, s, id, time.Now().Add(-time.Hour))
 	release := s.Hold()
 	epoch := s.Epoch()
 	done := make(chan int)
@@ -650,10 +685,8 @@ func TestCached(t *testing.T) {
 			t.Fatalf("Cached = %q, %v", data, ok)
 		}
 	}
-	// A resident blob stays served after its file is gone, until a Sweep drops it.
-	if err := removeFile(s.BlobPath(id)); err != nil {
-		t.Fatal(err)
-	}
+	// A resident blob stays served after its stored copy is gone, until a Sweep drops it.
+	forget(t, s, id)
 	if data, ok := s.Cached(id); !ok || string(data) != "from a file" {
 		t.Fatalf("Cached after load = %q, %v", data, ok)
 	}
@@ -682,9 +715,7 @@ func TestCachedPutBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	copy(data, "XXXXXXX")
-	if err := removeFile(s.BlobPath(id)); err != nil {
-		t.Fatal(err)
-	}
+	forget(t, s, id)
 	if got, ok := s.Cached(id); !ok || string(got) != "symlink target" {
 		t.Fatalf("Cached = %q, %v", got, ok)
 	}
@@ -707,9 +738,7 @@ func TestCachedPeerBlob(t *testing.T) {
 	if err := w.Commit(id); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeFile(s.BlobPath(id)); err != nil {
-		t.Fatal(err)
-	}
+	forget(t, s, id)
 	if got, ok := s.Cached(id); !ok || !bytes.Equal(got, body) {
 		t.Fatalf("Cached = %q, %v", got, ok)
 	}

@@ -117,7 +117,7 @@ func TestCaptureReusesKnownContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache := filepath.Join(t.TempDir(), "stat.json")
+	cache := filepath.Join(t.TempDir(), "x.stat")
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "a.txt"), "a")
 	write(t, filepath.Join(dir, "b.txt"), "b")

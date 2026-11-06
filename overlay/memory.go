@@ -304,7 +304,7 @@ func (f *FS) copyUpMem(s source, p string, info os.FileInfo) (bool, error) {
 	var data []byte
 	var err error
 	if s.layer != nil {
-		data, err = os.ReadFile(filepath.Join(s.layer.dir, p))
+		data, err = s.layer.ReadFile(p)
 	} else {
 		var c Content
 		if c, err = f.bottom.Open(p); err == nil {

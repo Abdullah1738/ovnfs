@@ -1,7 +1,6 @@
 package checkout
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -131,7 +130,7 @@ func Open(c Config) (*Registry, error) {
 			cleanup()
 			return nil, failure("io", "layer %s references missing base %s", disk.ID, disk.Base)
 		}
-		layer, openErr := overlay.IndexLayer(filepath.Join(c.State, "layers", disk.ID))
+		layer, openErr := overlay.OpenLayer(filepath.Join(c.State, "layers", disk.ID), blobFiles{st})
 		if openErr != nil {
 			cleanup()
 			return nil, coded(openErr)
@@ -151,7 +150,7 @@ func Open(c Config) (*Registry, error) {
 		}
 		upper := r.upperPath(disk.Name)
 		if disk.Git {
-			if err := git.MarkCheckout(context.Background(), r.gitdirPath(disk.Name), disk.Name); err != nil {
+			if err := git.MarkCheckout(r.gitdirPath(disk.Name), disk.Name); err != nil {
 				cleanup()
 				return nil, coded(err)
 			}
@@ -176,7 +175,7 @@ func Open(c Config) (*Registry, error) {
 			cleanup()
 			return nil, coded(stackErr)
 		}
-		s := &snapRecord{meta: disk.snapMeta, base: b, stack: append([]string{}, disk.Stack...), layer: disk.Layer, stackParent: disk.StackParent, dropped: disk.Dropped, done: make(chan struct{}), announced: true}
+		s := &snapRecord{meta: disk.snapMeta, base: b, stack: append([]string{}, disk.Stack...), layer: disk.Layer, stackParent: disk.StackParent, git: store.OID(disk.Git), dropped: disk.Dropped, done: make(chan struct{}), announced: true}
 		if disk.Dropped || disk.Tree != nil {
 			s.finished = true
 			close(s.done)
@@ -200,7 +199,7 @@ func Open(c Config) (*Registry, error) {
 		cleanup()
 		return nil, coded(err)
 	}
-	r.hasher = newHasher()
+	r.hasher = newHasher(r.storeLayers)
 	r.workers.Add(2)
 	go r.collectGarbage()
 	go r.processNotices()
@@ -215,11 +214,44 @@ func Open(c Config) (*Registry, error) {
 	}
 	r.mu.Lock()
 	r.scheduleHashesLocked()
+	r.storeHashedLayersLocked()
 	r.mu.Unlock()
 	r.wakeGC()
 	r.wakeNotices()
 	opened = true
 	return r, nil
+}
+
+// storeHashedLayersLocked hashes again, in the background, the hashed
+// snapshots whose layers are still raw (a crash or stop came between the hash
+// and storing its layers, or they predate stored layers), so their files that
+// hashing keeps in the store leave the layers too (see storeLayers).
+func (r *Registry) storeHashedLayersLocked() {
+	for id, s := range r.lineage {
+		rec := r.layers[s.layer]
+		if s.meta.Tree == nil || rec == nil || rec.layer.Stored() {
+			continue
+		}
+		parent, layers, ready, err := r.ancestorTreeLocked(s.base, s.stack, s.meta.Parent)
+		if err != nil || !ready {
+			continue
+		}
+		meta := s.base.view.Meta()
+		stack, err := r.layerStackLocked(s.stack, meta.ID)
+		if err != nil {
+			continue
+		}
+		view, err := overlay.New("", stack, s.base.view.Bottom(), nil)
+		if err != nil {
+			continue
+		}
+		r.retainLocked(s.base, s.stack)
+		r.hasher.queue(hashJob{Lineage: meta.ID, Snapshot: id, Base: s.base, Parent: parent, Layers: layers, View: view, Done: func(store.OID, error) {
+			r.mu.Lock()
+			r.releaseLocked(s.base, s.stack)
+			r.mu.Unlock()
+		}})
+	}
 }
 
 // loadBase pairs an opened base with the rules its checkouts were created with.
@@ -270,6 +302,9 @@ func validateDisk(d diskState) error {
 		}
 		if s.StackParent != "" && !validSnapshotID(s.StackParent) {
 			return fmt.Errorf("invalid stack parent in snapshot %s", s.ID)
+		}
+		if s.Git != "" && !store.OID(s.Git).Valid() {
+			return fmt.Errorf("invalid git tree in snapshot %s", s.ID)
 		}
 	}
 	for _, i := range d.Intents {
@@ -613,15 +648,25 @@ func (r *Registry) collectGarbage() {
 	}
 }
 
-// treeRootsLocked lists every tree the store must keep: each base capture and each hashed snapshot.
+// treeRootsLocked lists every tree the store must keep: each base capture, each
+// hashed snapshot, each snapshot's stored private git directory and each layer's
+// stored content.
 func (r *Registry) treeRootsLocked() []store.OID {
-	roots := make([]store.OID, 0, len(r.bases)+len(r.lineage))
+	roots := make([]store.OID, 0, len(r.bases)+len(r.lineage)+len(r.layers))
 	for _, b := range r.bases {
 		roots = append(roots, b.view.Meta().Tree)
+	}
+	for _, l := range r.layers {
+		if tree := l.layer.Tree(); tree != "" {
+			roots = append(roots, store.OID(tree))
+		}
 	}
 	for _, s := range r.lineage {
 		if s.meta.Tree != nil {
 			roots = append(roots, store.OID(*s.meta.Tree))
+		}
+		if s.git != "" {
+			roots = append(roots, s.git)
 		}
 	}
 	for _, h := range r.checkouts {
@@ -630,6 +675,81 @@ func (r *Registry) treeRootsLocked() []store.OID {
 		}
 	}
 	return roots
+}
+
+// blobFiles serves stored layer content from the snapshot store.
+type blobFiles struct{ st *store.Store }
+
+// Open returns blob id's bytes.
+func (b blobFiles) Open(id string) (overlay.Content, error) {
+	c, err := b.st.Open(store.OID(id))
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// CopyTo clones blob id to the new file dst.
+func (b blobFiles) CopyTo(id, dst string, perm os.FileMode) error {
+	return b.st.CloneBlob(store.OID(id), dst, perm)
+}
+
+// storeLayers serves the files snapshot hashing stored from the store instead
+// of their raw layers (see overlay.Layer.Store), so their bytes are kept once.
+// Each layer is held while it is converted; one garbage collection already
+// removed is skipped. A failure leaves the layer raw and is reported.
+func (r *Registry) storeLayers(kept layerBlobs) {
+	for l, ids := range kept {
+		r.mu.Lock()
+		var rec *layerRecord
+		for _, candidate := range r.layers {
+			if candidate.layer == l {
+				rec = candidate
+				break
+			}
+		}
+		if rec != nil {
+			rec.refs++
+		}
+		r.mu.Unlock()
+		if rec == nil {
+			continue
+		}
+		err := storeLayer(r.store, l, ids)
+		r.mu.Lock()
+		rec.refs--
+		if rec.refs == 0 {
+			r.wakeGC()
+		}
+		r.mu.Unlock()
+		if err != nil {
+			r.enqueueNotice(baseNotice{fault: "store layer " + rec.id + ": " + err.Error()})
+		}
+	}
+}
+
+// storeLayer writes the tree that keeps a layer's stored blobs alive, then
+// converts the layer.
+func storeLayer(st *store.Store, l *overlay.Layer, ids map[string]string) error {
+	if l.Stored() {
+		return nil
+	}
+	var tree store.OID
+	if len(ids) != 0 {
+		entries := make([]store.Entry, 0, len(ids))
+		seen := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			if !seen[id] {
+				seen[id] = true
+				entries = append(entries, store.Entry{Name: id, Mode: store.ModeFile, ID: store.OID(id)})
+			}
+		}
+		var err error
+		if tree, err = st.PutTree(entries); err != nil {
+			return err
+		}
+	}
+	return l.Store(ids, string(tree), blobFiles{st})
 }
 
 // baseReservedLocked protects bases belonging to an unfinished create.

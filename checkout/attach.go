@@ -97,8 +97,8 @@ func (r *Registry) Offer(ctx context.Context, name, remoteName string) (peer.Off
 		if f.Mode != store.ModeDir {
 			if info, ok := captured.Info[p]; ok && captured.Files[p] == f {
 				e.Size, e.Mtime = info.Size, info.Mtime.UnixNano()
-			} else if fi, err := os.Stat(st.BlobPath(f.ID)); err == nil {
-				e.Size = fi.Size()
+			} else if size, err := st.Size(f.ID); err == nil {
+				e.Size = size
 			}
 		}
 		entries = append(entries, e)
@@ -116,20 +116,23 @@ func (r *Registry) Offer(ctx context.Context, name, remoteName string) (peer.Off
 // baseBlobs serves an offered snapshot's content: from the store, else from the source folder's git objects.
 type baseBlobs struct{ view *base.Base }
 
-// Open streams a stored blob from its file, or reads a repository object.
+// Open streams a stored blob, or reads a repository object.
 func (b baseBlobs) Open(id store.OID, p string) (io.ReadCloser, int64, error) {
 	st := b.view.Store()
 	if st.Has(id) {
-		f, err := os.Open(st.BlobPath(id))
+		r, err := st.Open(id)
 		if err != nil {
 			return nil, 0, err
 		}
-		info, err := f.Stat()
+		size, err := r.Seek(0, io.SeekEnd)
+		if err == nil {
+			_, err = r.Seek(0, io.SeekStart)
+		}
 		if err != nil {
-			f.Close()
+			r.Close()
 			return nil, 0, err
 		}
-		return f, info.Size(), nil
+		return r, size, nil
 	}
 	data, err := b.view.Blob(p, id)
 	if err != nil {
@@ -270,7 +273,10 @@ func (r *Registry) cacheOnlyLocked(h *checkoutRecord) (bool, error) {
 			}
 			class := parentClass(t.class, p)
 			if class == rules.Source {
-				class = t.classify(p, e.Info)
+				var err error
+				if class, err = t.classify(p, e.Info); err != nil {
+					return err
+				}
 			}
 			if e.Kind == overlay.KindDir {
 				t.class[p] = class

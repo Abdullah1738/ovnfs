@@ -224,8 +224,8 @@ func (b *Base) unchanged(host string, current os.FileInfo, e entry, captured sou
 	return err == nil && ino == captured.Ino
 }
 
-// blobFile serves a source file's captured content: cached bytes, the store's
-// object file, or a repository object written into the store first.
+// blobFile serves a source file's captured content: cached bytes, the stored
+// object, or a repository object written into the store first.
 func (b *Base) blobFile(p string, id store.OID) (overlay.Content, error) {
 	st := b.config.Store
 	if data, ok := st.Cached(id); ok {
@@ -244,16 +244,7 @@ func (b *Base) blobFile(p string, id store.OID) (overlay.Content, error) {
 			return overlay.ByteContent(data), nil
 		}
 	}
-	return openObject(st, id)
-}
-
-// openObject opens a stored object's file as Content.
-func openObject(st *store.Store, id store.OID) (overlay.Content, error) {
-	f, err := hostfile.Open(st.BlobPath(id))
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
+	return st.Open(id)
 }
 
 // copyContent materializes c at the new path dst with mode: host files are

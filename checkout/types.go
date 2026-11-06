@@ -147,6 +147,7 @@ type checkoutRecord struct {
 	generation atomic.Uint64
 	retired    atomic.Bool
 	merge      sync.Mutex // serializes apply and pull, which rewrite meta.MergeBases; taken before Registry.mu and freeze
+	git        gitCache   // stored files of the private git directory, for the next snapshot
 }
 
 // snapRecord retains its full stack until explicitly dropped.
@@ -156,6 +157,7 @@ type snapRecord struct {
 	stack       []string
 	layer       string
 	stackParent string
+	git         store.OID // stored private git directory tree; "" for none or a legacy copy
 	done        chan struct{}
 	hashing     bool
 	announced   bool

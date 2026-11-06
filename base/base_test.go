@@ -2,6 +2,7 @@ package base
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -359,5 +360,60 @@ func TestCapturedSymlinkAndMode(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatal("symlink mode lost")
+	}
+}
+
+// TestOpenLoadsCaptureFormats reopens a base from its binary capture and from
+// the JSON capture of bases created before it, serving the same view, and
+// refuses a damaged capture.
+func TestOpenLoadsCaptureFormats(t *testing.T) {
+	repo, dir := repository(t)
+	writeTestFile(t, filepath.Join(dir, "dir", "ü 日本.txt"), "unicode\n")
+	writeTestFile(t, filepath.Join(dir, "target", "out.bin"), "built\n")
+	b, c := createTestBase(t, repo, nil)
+	want, meta := *b.Capture(), b.Meta()
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopen := func(name string) {
+		t.Helper()
+		b, err := Open(c, meta)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		defer b.Close()
+		got := b.Capture()
+		if got.Root != want.Root || got.Tree != want.Tree || !reflect.DeepEqual(got.Repos, want.Repos) || !reflect.DeepEqual(got.Roots, want.Roots) || len(got.Info) != len(want.Info) {
+			t.Fatalf("%s: capture %+v, want %+v", name, got, want)
+		}
+		for p, i := range want.Info {
+			if g := got.Info[p]; !g.Mtime.Equal(i.Mtime) || g.Size != i.Size || g.Ino != i.Ino {
+				t.Fatalf("%s: info %q = %+v, want %+v", name, p, g, i)
+			}
+		}
+		if got := readBase(t, b, "dir/ü 日本.txt"); got != "unicode\n" {
+			t.Fatalf("%s: read %q", name, got)
+		}
+	}
+	reopen("binary")
+
+	legacy, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.StateDir, legacyCaptureFile), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(c.StateDir, captureFile)); err != nil {
+		t.Fatal(err)
+	}
+	reopen("legacy json")
+
+	if err := os.WriteFile(filepath.Join(c.StateDir, captureFile), []byte("ovnfs-capture-1\ntruncated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := Open(c, meta); err == nil {
+		b.Close()
+		t.Fatal("opened a base whose capture is damaged")
 	}
 }

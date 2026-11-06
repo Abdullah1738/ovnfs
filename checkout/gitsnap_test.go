@@ -1,0 +1,154 @@
+package checkout
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stencil-hq/ovnfs/api"
+	"github.com/stencil-hq/ovnfs/git"
+)
+
+// snapGit snapshots a checkout and returns the snapshot's id and stored git tree.
+func (f *fixture) snapGit(checkout string) (string, string) {
+	f.t.Helper()
+	reply, err := f.reg.Snap(context.Background(), api.SnapArgs{Checkout: checkout, Wait: true})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.reg.mu.RLock()
+	defer f.reg.mu.RUnlock()
+	return reply.Snapshot.ID, string(f.reg.snapshots[reply.Snapshot.ID].git)
+}
+
+// TestGitSnapshotsStoreGitdir checks that snapshots keep a checkout's git directory as a
+// stored tree (shared while unchanged, never copied per snapshot), and that checkouts
+// from them, including forks, start from exactly that git state.
+func TestGitSnapshotsStoreGitdir(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	dir := revisionRepo(t)
+	f.newCheckout(dir, "app")
+	gitdir := f.reg.gitdirPath("app")
+	initial := gitRun(t, dir, "--git-dir", gitdir, "rev-parse", "HEAD")
+	first, firstTree := f.snapGit("app")
+	_, secondTree := f.snapGit("app")
+	if firstTree == "" || firstTree != secondTree {
+		t.Fatalf("unchanged git directory stored as %q then %q", firstTree, secondTree)
+	}
+	gitRun(t, dir, "--git-dir", gitdir, "commit", "--allow-empty", "-qm", "agent")
+	agent := gitRun(t, dir, "--git-dir", gitdir, "rev-parse", "HEAD")
+	write(t, filepath.Join(gitdir, "index.lock"), "")
+	_, thirdTree := f.snapGit("app")
+	if err := os.Remove(filepath.Join(gitdir, "index.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if thirdTree == secondTree {
+		t.Fatal("commit in the checkout did not change its stored git directory")
+	}
+	if entries, err := os.ReadDir(filepath.Join(f.state, "snapshots")); err != nil || len(entries) != 0 {
+		t.Fatalf("snapshot directories = %v, %v", entries, err)
+	}
+	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: first, Name: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	old := f.reg.gitdirPath("old")
+	if got := gitRun(t, dir, "--git-dir", old, "rev-parse", "HEAD"); got != initial {
+		t.Fatalf("checkout from first snapshot at %s, want %s", got, initial)
+	}
+	if got := gitRun(t, dir, "--git-dir", old, "ls-files"); !strings.Contains(got, "tracked.txt") {
+		t.Fatalf("index from first snapshot lists %q", got)
+	}
+	if got := gitRun(t, dir, "--git-dir", old, "config", "--get", "ovnfs.checkout"); got != "old" {
+		t.Fatalf("marker = %q", got)
+	}
+	fork, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: "app", Name: "child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := f.reg.gitdirPath("child")
+	if got := gitRun(t, dir, "--git-dir", child, "cat-file", "-t", "HEAD"); got != "commit" {
+		t.Fatalf("fork cannot read its commit: %q", got)
+	}
+	if got := gitRun(t, dir, "--git-dir", child, "rev-parse", "HEAD"); got != agent {
+		t.Fatalf("fork at %s, want %s", got, agent)
+	}
+	if _, err := os.Lstat(filepath.Join(child, "index.lock")); !os.IsNotExist(err) {
+		t.Fatalf("fork inherited a lock file: %v", err)
+	}
+	if fork.Checkout.Name != "child" {
+		t.Fatalf("fork = %+v", fork)
+	}
+	if entries, err := os.ReadDir(filepath.Join(f.state, "git")); err != nil || len(entries) != 3 {
+		t.Fatalf("git directories = %v, %v (want one per checkout, no leftovers)", entries, err)
+	}
+}
+
+// TestGitSnapshotTreesAreGCRoots sweeps every object no root reaches and checks a
+// snapshot's git directory still materializes afterwards.
+func TestGitSnapshotTreesAreGCRoots(t *testing.T) {
+	f := newFixture(t)
+	dir := revisionRepo(t)
+	f.newCheckout(dir, "app")
+	head := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("app"), "rev-parse", "HEAD")
+	id, _ := f.snapGit("app")
+	f.reg.mu.RLock()
+	roots := f.reg.treeRootsLocked()
+	f.reg.mu.RUnlock()
+	// A cutoff in the future leaves nothing protected by age or by a recent Build.
+	if _, err := f.reg.store.Sweep(roots, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: id, Name: "view"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("view"), "rev-parse", "HEAD"); got != head {
+		t.Fatalf("view at %s, want %s", got, head)
+	}
+}
+
+// TestLegacySnapshotGitCopy opens a snapshot recorded by a build that copied the whole
+// git directory into snapshots/<id>/git, and drops it.
+func TestLegacySnapshotGitCopy(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	dir := revisionRepo(t)
+	f.newCheckout(dir, "app")
+	gitdir := f.reg.gitdirPath("app")
+	head := gitRun(t, dir, "--git-dir", gitdir, "rev-parse", "HEAD")
+	id, _ := f.snapGit("app")
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(f.state, "snapshots", id)
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.CopyGitdir(gitdir, filepath.Join(legacy, "git"), "unused"); err != nil {
+		t.Fatal(err)
+	}
+	d := readDisk(t, f.state)
+	for i := range d.Snapshots {
+		d.Snapshots[i].Git = ""
+	}
+	if err := writeState(f.state, d); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "--git-dir", gitdir, "commit", "--allow-empty", "-qm", "later")
+	f.open()
+	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: id, Name: "view"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("view"), "rev-parse", "HEAD"); got != head {
+		t.Fatalf("view of legacy snapshot at %s, want %s", got, head)
+	}
+	if err := f.reg.Drop(ctx, api.DropArgs{Snapshot: id}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(legacy, "git")); !os.IsNotExist(err) {
+		t.Fatalf("dropped legacy copy remains: %v", err)
+	}
+}

@@ -27,13 +27,17 @@ type diskState struct {
 	Intents      []diskIntent   `json:"intents"`
 }
 
-// diskCheckout records a checkout; Head or Parent identifies its immutable stack.
+// diskCheckout records a checkout; Head or Parent identifies its immutable stack, and
+// Stack is written only when that snapshot's stack does not rebuild it.
 type diskCheckout struct {
 	checkoutMeta
 	Stack []string `json:"stack,omitempty"`
 }
 
-// diskSnapshot records one layer and its snapshot ancestry; Stack is rebuilt at open.
+// diskSnapshot records one layer and its snapshot ancestry. Stack is rebuilt at open
+// from Layer and StackParent, so it is written only when that would rebuild it wrong.
+// Git is the stored tree of the snapshot's private git directory; a git snapshot
+// without one keeps a copied directory in snapshots/<id>/git instead.
 type diskSnapshot struct {
 	snapMeta
 	Base        string   `json:"base"`
@@ -41,6 +45,7 @@ type diskSnapshot struct {
 	StackParent string   `json:"stack_parent,omitempty"`
 	Dropped     bool     `json:"dropped,omitempty"`
 	Stack       []string `json:"stack,omitempty"`
+	Git         string   `json:"git,omitempty"`
 }
 
 // diskLayer binds an indexed layer directory to its frozen base.
@@ -61,10 +66,18 @@ func (r *Registry) stateLocked() diskState {
 		d.Bases = append(d.Bases, b.view.Meta())
 	}
 	for _, h := range r.checkouts {
-		d.Checkouts = append(d.Checkouts, diskCheckout{checkoutMeta: cloneCheckoutMeta(h.meta), Stack: append([]string(nil), h.stack...)})
+		disk := diskCheckout{checkoutMeta: cloneCheckoutMeta(h.meta)}
+		if s := lineage[checkoutSnapshot(h.meta)]; s == nil || !sameStack(s.stack, h.stack) {
+			disk.Stack = append([]string(nil), h.stack...)
+		}
+		d.Checkouts = append(d.Checkouts, disk)
 	}
 	for _, s := range lineage {
-		d.Snapshots = append(d.Snapshots, diskSnapshot{snapMeta: cloneSnapMeta(s.meta), Base: s.base.view.Meta().ID, Layer: s.layer, StackParent: s.stackParent, Dropped: s.dropped, Stack: append([]string(nil), s.stack...)})
+		disk := diskSnapshot{snapMeta: cloneSnapMeta(s.meta), Base: s.base.view.Meta().ID, Layer: s.layer, StackParent: s.stackParent, Dropped: s.dropped, Git: string(s.git)}
+		if !rebuildsStack(lineage, s) {
+			disk.Stack = append([]string(nil), s.stack...)
+		}
+		d.Snapshots = append(d.Snapshots, disk)
 	}
 	for _, l := range r.layers {
 		d.Layers = append(d.Layers, diskLayer{ID: l.id, Base: l.base, Portable: l.portable})
@@ -80,6 +93,23 @@ func (r *Registry) stateLocked() diskState {
 	return d
 }
 
+// rebuildsStack reports whether restoreStacks rebuilds s's stack from its layer and
+// its stack parent's stack, which lineage retains whenever s is retained.
+func rebuildsStack(lineage map[string]*snapRecord, s *snapRecord) bool {
+	var below []string
+	if s.stackParent != "" {
+		parent := lineage[s.stackParent]
+		if parent == nil {
+			return false
+		}
+		below = parent.stack
+	}
+	if s.layer == "" {
+		return sameStack(s.stack, below)
+	}
+	return len(s.stack) == len(below)+1 && s.stack[0] == s.layer && sameStack(s.stack[1:], below)
+}
+
 // persistLocked commits all metadata with a file and directory durability barrier.
 func (r *Registry) persistLocked() error {
 	if err := writeState(r.config.State, r.stateLocked()); err != nil {
@@ -89,18 +119,26 @@ func (r *Registry) persistLocked() error {
 	return nil
 }
 
-// persistIntentLocked publishes recovery metadata before filesystem changes without an extra durability barrier.
+// persistIntentLocked writes metadata atomically without a durability barrier: recovery
+// intents published before filesystem changes, and snapshot tree ids, which reopening
+// computes again when a crash lost them.
 func (r *Registry) persistIntentLocked() error {
 	return writeStateMode(r.config.State, r.stateLocked(), false)
 }
 
-// writeState atomically replaces state.json with a final process/kernel-crash barrier,
-// not a power-loss guarantee; Darwin uses fsync(2), not F_FULLFSYNC.
+// writeState atomically replaces state.json and makes it durable against process
+// crashes, not power loss; Darwin uses fsync(2), not F_FULLFSYNC.
 func writeState(dir string, d diskState) error { return writeStateMode(dir, d, true) }
 
-// writeStateMode keeps intermediate recovery snapshots atomic and syncs only the operation's final commit.
+// writeStateMode keeps intermediate recovery snapshots atomic and syncs only the
+// operation's final commit. The barrier syncs the file after the rename, then the
+// directory: on journaling filesystems the file's sync commits the rename with it,
+// leaving the directory's sync next to free, where syncing before the rename costs
+// two journal commits. Like every unsynced intent write, a kernel crash during the
+// barrier may leave the new name without its data on filesystems that do not
+// order data before renames (ext4's defaults do).
 func writeStateMode(dir string, d diskState, syncCommit bool) error {
-	data, err := json.MarshalIndent(d, "", "  ")
+	data, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
@@ -113,22 +151,28 @@ func writeStateMode(dir string, d diskState, syncCommit bool) error {
 	if err = f.Chmod(0o600); err == nil {
 		_, err = f.Write(append(data, '\n'))
 	}
-	if err == nil && syncCommit {
-		err = durable.Sync(f)
-	}
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(name, filepath.Join(dir, "state.json")); err != nil {
+	final := filepath.Join(dir, "state.json")
+	if err = os.Rename(name, final); err != nil || !syncCommit {
 		return err
 	}
-	if syncCommit {
-		return durable.Dir(dir)
+	// Reopened rather than kept open: Windows cannot rename an open file.
+	if f, err = os.OpenFile(final, os.O_RDWR, 0); err != nil {
+		return err
 	}
-	return nil
+	err = durable.Sync(f)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return durable.Dir(dir)
 }
 
 // exists reports whether a path survived an interrupted operation.
@@ -178,7 +222,8 @@ func recoverIntents(state string, d *diskState) error {
 		case "freezing":
 			layerDir := filepath.Join(state, "layers", intent.Layer)
 			frozen := intent.Layer != "" && exists(layerDir)
-			saved := hi >= 0 && (!d.Checkouts[hi].Git || exists(filepath.Join(state, "snapshots", intent.Snapshot, "git")))
+			// Git state is in the snapshot record itself, or in a directory copy by older builds.
+			saved := hi >= 0 && (!d.Checkouts[hi].Git || (si >= 0 && d.Snapshots[si].Git != "") || exists(filepath.Join(state, "snapshots", intent.Snapshot, "git")))
 			if hi >= 0 && si >= 0 && saved && (frozen || intent.Layer == "") {
 				h := &d.Checkouts[hi]
 				h.Head = copyString(&d.Snapshots[si].ID)

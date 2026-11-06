@@ -75,8 +75,13 @@ type Config struct {
 	OnFault      func(msg string)
 }
 
-// captureFile persists the classified capture next to the base's pins.
-const captureFile = "capture.json"
+// captureFile persists the classified capture next to the base's pins
+// (source.Result.MarshalBinary). Bases created before it hold legacyCaptureFile,
+// the same fields as JSON, and keep loading from it.
+const (
+	captureFile       = "capture.bin"
+	legacyCaptureFile = "capture.json"
+)
 
 // entry is a captured blob, symlink or directory.
 type entry struct {
@@ -147,7 +152,7 @@ func CreateRevision(ctx context.Context, c Config, o source.Options, revision *g
 	if err := takeCapture(ctx, c, o.Rules, &res, work, takes); err != nil {
 		return nil, nil, err
 	}
-	if err := writeJSON(filepath.Join(c.StateDir, captureFile), res); err != nil {
+	if err := saveCapture(c.StateDir, &res); err != nil {
 		return nil, nil, err
 	}
 	m := Meta{ID: c.ID, Dir: o.Root, ForkTime: fork, Tree: res.Tree}
@@ -163,16 +168,16 @@ func Open(c Config, m Meta) (*Base, error) {
 	if c.Store == nil {
 		return nil, errors.New("base: missing store")
 	}
-	var res source.Result
-	if err := readJSON(filepath.Join(c.StateDir, captureFile), &res); err != nil {
-		return nil, err
+	res, err := loadCapture(c.StateDir)
+	if err != nil {
+		return nil, fmt.Errorf("base %s: %w", m.ID, err)
 	}
 	files, err := c.Store.Flatten(m.Tree)
 	if err != nil {
 		return nil, fmt.Errorf("base %s: %w", m.ID, err)
 	}
 	res.Files = files
-	return load(c, m, &res)
+	return load(c, m, res)
 }
 
 // load indexes the capture's leaves and their implied directories.
@@ -327,21 +332,41 @@ func (b *Base) Remove() error {
 	return removeErr
 }
 
-// readJSON decodes a small piece of durable pin metadata.
-func readJSON(p string, v any) error {
-	data, err := os.ReadFile(p)
+// saveCapture persists the capture a base serves in its state directory.
+func saveCapture(stateDir string, res *source.Result) error {
+	data, err := res.MarshalBinary()
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, v)
+	return writeFile(filepath.Join(stateDir, captureFile), data)
 }
 
-// writeJSON replaces metadata atomically and syncs it before publication.
-func writeJSON(p string, v any) error {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return err
+// loadCapture reads the persisted capture of a base, from the JSON file of a
+// base created before the binary format when that is all it has.
+func loadCapture(stateDir string) (*source.Result, error) {
+	var res source.Result
+	data, err := os.ReadFile(filepath.Join(stateDir, captureFile))
+	if errors.Is(err, os.ErrNotExist) {
+		data, err := os.ReadFile(filepath.Join(stateDir, legacyCaptureFile))
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(data, &res); err != nil {
+			return nil, fmt.Errorf("%s: %w", legacyCaptureFile, err)
+		}
+		return &res, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	if err := res.UnmarshalBinary(data); err != nil {
+		return nil, fmt.Errorf("%s: %w", captureFile, err)
+	}
+	return &res, nil
+}
+
+// writeFile replaces metadata atomically and syncs it before publication.
+func writeFile(p string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(p), ".meta-")
 	if err != nil {
 		return err

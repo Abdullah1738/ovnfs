@@ -10,7 +10,13 @@ import (
 	"time"
 )
 
-// Sweep deletes objects not reachable from roots (trees walked recursively) whose files are older than before, dropping them from the cache too; blobs referenced by trees but absent from the store are ignored. Returns the number removed.
+// Sweep deletes objects not reachable from roots (trees walked recursively) last stored before before (a loose object's mtime, a packed one's append or re-store time), dropping them from the cache too; blobs referenced by trees but absent from the store are ignored. Returns the number removed.
+// Packed objects are removed only from packs where removable objects make up
+// at least a quarter of the bytes: such a pack is rewritten without them, its
+// other frames copied as they are, and deleted once the copies are durable.
+// Elsewhere unreachable packed objects stay stored (and uncounted) until a
+// later sweep finds enough garbage beside them. The delta bases of every
+// object still stored are kept too.
 // A missing root or subtree (other than EmptyTree) is an error and nothing is
 // removed, since its unknown children cannot be proven unreachable. Staging
 // files older than before that no goroutine of this process owns (leftovers of
@@ -46,7 +52,37 @@ func (s *Store) Sweep(roots []OID, before time.Time) (int, error) {
 			return 0, fmt.Errorf("sweep: %w", err)
 		}
 	}
+	s.packs.keepBases(live, before.UnixNano())
 	removed := 0
+	// begin starts a new epoch before the first removal.
+	begin := func() error {
+		if removed > 0 {
+			return nil
+		}
+		if err := s.renewEpoch(); err != nil {
+			return err
+		}
+		s.treesMu.Lock()
+		clear(s.trees)
+		s.treesMu.Unlock()
+		return nil
+	}
+	dead, err := s.packs.removals(live, before.UnixNano())
+	if err != nil {
+		return 0, fmt.Errorf("sweep: %w", err)
+	}
+	if len(dead) > 0 {
+		if err := begin(); err != nil {
+			return 0, fmt.Errorf("sweep: %w", err)
+		}
+		for _, id := range dead {
+			s.cache.remove(id.oid())
+		}
+		removed = len(dead)
+		if err := s.packs.remove(dead); err != nil {
+			return removed, fmt.Errorf("sweep: %w", err)
+		}
+	}
 	fanouts, err := os.ReadDir(s.objects)
 	if err != nil {
 		return 0, fmt.Errorf("sweep: %w", err)
@@ -81,13 +117,8 @@ func (s *Store) Sweep(roots []OID, before time.Time) (int, error) {
 			if !ok {
 				continue
 			}
-			if removed == 0 {
-				if err := s.renewEpoch(); err != nil {
-					return 0, fmt.Errorf("sweep: %w", err)
-				}
-				s.treesMu.Lock()
-				clear(s.trees)
-				s.treesMu.Unlock()
+			if err := begin(); err != nil {
+				return removed, fmt.Errorf("sweep: %w", err)
 			}
 			if err := removeFile(filepath.Join(dir, e.Name())); err != nil {
 				return removed, fmt.Errorf("sweep: %w", err)

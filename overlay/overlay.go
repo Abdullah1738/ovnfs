@@ -262,9 +262,7 @@ func (f *FS) lowerHas(p string) (bool, error) {
 // readlink reads the selected backing source without doing another lookup.
 func (f *FS) readlink(s source, p string) (string, error) {
 	if s.layer != nil {
-		// Windows stores and reports targets with backslashes; the overlay uses slashes.
-		target, err := os.Readlink(filepath.Join(s.layer.dir, p))
-		return filepath.ToSlash(target), err
+		return s.layer.Readlink(p)
 	}
 	return f.bottom.Readlink(p)
 }
@@ -416,11 +414,8 @@ func (f *FS) openLower(name string, flag int) (h billy.File, ok bool, err error)
 		return nil, false, nil
 	}
 	if s.layer != nil {
-		h, err := open(filepath.Join(s.layer.dir, p), p, flag, 0, nil)
-		if err != nil {
-			return nil, true, err
-		}
-		return h, true, nil
+		h, err := s.layer.open(p, p, flag)
+		return h, true, err
 	}
 	c, err := bottom.Open(p)
 	if err != nil {
@@ -496,13 +491,17 @@ retry:
 		if m := f.files[p]; m != nil {
 			return f.openMem(m, original, flag)
 		}
-		if s.layer != nil {
-			h, err := open(filepath.Join(s.layer.dir, p), original, flag, 0, nil)
-			if err == nil && s.upper {
-				f.adopt(h)
-				f.bind(h, p)
+		if s.upper {
+			h, err := open(f.up(p), original, flag, 0, nil)
+			if err != nil {
+				return nil, err
 			}
-			return h, err
+			f.adopt(h)
+			f.bind(h, p)
+			return h, nil
+		}
+		if s.layer != nil {
+			return s.layer.open(p, original, flag)
 		}
 		if !info.Mode().IsRegular() {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EISDIR}
@@ -878,7 +877,7 @@ func (f *FS) Rename(from, to string) error {
 	if derr != nil && !errors.Is(derr, fs.ErrNotExist) {
 		return derr
 	}
-	if derr == nil && sameFile(sinfo, dinfo) {
+	if derr == nil && (sameFile(sinfo, dinfo) || sameStored(sinfo, dinfo)) {
 		return nil
 	}
 	if derr == nil {
@@ -1307,7 +1306,7 @@ func (f *FS) copyUp(p string) error {
 	tmp := filepath.Join(f.work, strconv.FormatUint(f.tmpSeq, 36))
 	defer os.RemoveAll(tmp)
 	if s.layer != nil {
-		err = cloneTree(filepath.Join(s.layer.dir, p), tmp)
+		err = s.layer.copyTo(p, tmp, info)
 	} else {
 		err = f.bottom.CopyTo(p, tmp)
 	}

@@ -234,6 +234,41 @@ func (s *Store) Build(files map[string]File) (OID, error) {
 	}
 }
 
+// TreeWriter stores the changed directories of a tree derived from stored
+// trees, reusing the ids of unchanged subtrees, and registers its root the way
+// Build does. Snapshot hashing creates one per attempt, before reading the
+// trees it derives from.
+type TreeWriter struct {
+	s     *Store
+	epoch string
+}
+
+// NewTreeWriter starts a derivation in the current epoch.
+func (s *Store) NewTreeWriter() *TreeWriter { return &TreeWriter{s: s, epoch: s.Epoch()} }
+
+// Put stores the directory holding entries (validated as by PutTree) and
+// returns its id; a tree already known stored in this epoch is not written again.
+func (w *TreeWriter) Put(entries []Entry) (OID, error) {
+	data, err := encodeTree(entries)
+	if err != nil {
+		return "", err
+	}
+	id := HashBytes("tree", data)
+	if w.s.knownTree(id) {
+		return id, nil
+	}
+	if _, err := w.s.putData("tree", id, data); err != nil {
+		return "", fmt.Errorf("put tree: %w", err)
+	}
+	return id, nil
+}
+
+// Commit registers root so Sweep keeps everything it reaches until the caller
+// records it, as Build does. It reports false when objects may have been
+// removed since the writer was created: trees read or reused meanwhile may be
+// gone, so the caller derives the tree again with a new writer.
+func (w *TreeWriter) Commit(root OID) bool { return w.s.register(root, w.epoch) }
+
 // buildTree stores the subtrees of n, then n itself, returning its id; trees
 // stored earlier in the current epoch are not touched again.
 func (s *Store) buildTree(n *buildNode) (OID, error) {

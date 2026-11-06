@@ -62,7 +62,7 @@ func (v *takeView) ReadFile(p string) ([]byte, error) {
 		return nil, os.ErrNotExist
 	}
 	if v.store.Has(f.ID) {
-		return os.ReadFile(v.store.BlobPath(f.ID))
+		return v.store.ReadBlob(f.ID)
 	}
 	repo := v.domains.RepoOf(p)
 	if repo == nil {

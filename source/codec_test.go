@@ -1,0 +1,263 @@
+package source
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stencil-hq/ovnfs/rules"
+	"github.com/stencil-hq/ovnfs/store"
+)
+
+// deepPath is a path hundreds of directories deep.
+var deepPath = strings.Repeat("d/", 300) + "leaf.txt"
+
+// sameResult compares the persisted fields of two captures, mtimes by instant.
+func sameResult(t *testing.T, got, want Result) {
+	t.Helper()
+	if got.Root != want.Root || got.Tree != want.Tree || len(got.Repos) != len(want.Repos) || len(got.Roots) != len(want.Roots) || len(got.BlobRepo) != len(want.BlobRepo) || len(got.Info) != len(want.Info) {
+		t.Fatalf("decoded %+v, want %+v", got, want)
+	}
+	for i := range want.Repos {
+		if got.Repos[i] != want.Repos[i] {
+			t.Fatalf("repo %d: %+v, want %+v", i, got.Repos[i], want.Repos[i])
+		}
+	}
+	for p, c := range want.Roots {
+		if got.Roots[p] != c {
+			t.Fatalf("root %q: %q, want %q", p, got.Roots[p], c)
+		}
+	}
+	for p, r := range want.BlobRepo {
+		if got.BlobRepo[p] != r {
+			t.Fatalf("blob repo %q: %q, want %q", p, got.BlobRepo[p], r)
+		}
+	}
+	for p, i := range want.Info {
+		g, ok := got.Info[p]
+		if !ok || !g.Mtime.Equal(i.Mtime) || g.Size != i.Size || g.Ino != i.Ino {
+			t.Fatalf("info %q: %+v, want %+v", p, g, i)
+		}
+	}
+}
+
+// TestResultBinaryRoundTrip keeps every persisted field, whatever the paths
+// and stat values, including an empty capture.
+func TestResultBinaryRoundTrip(t *testing.T) {
+	full := Result{
+		Root: "/home/ü/项目",
+		Tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+		Repos: []Repo{
+			{Path: "", Head: "0123456789abcdef0123456789abcdef01234567", Index: "repo-0"},
+			{Path: "vendor/lib", Head: "", Index: ""},
+		},
+		Roots: map[string]rules.Class{
+			"node_modules": rules.Cache, ".env": rules.Local, "secret/ключ": rules.Hidden, ".git": rules.Local,
+		},
+		BlobRepo: map[string]string{"taken/файл.go": "vendor/lib", "taken/a": ""},
+		Info: map[string]Info{
+			"a":                 {Mtime: time.Unix(1_700_000_000, 123_456_789), Size: 1, Ino: 42},
+			"a/b":               {Mtime: time.Unix(1_700_000_000, 0), Size: 0, Ino: 41},
+			"ab":                {Mtime: time.Unix(-86_400, 999_999_999), Size: math.MaxInt64, Ino: math.MaxUint64},
+			"日本/ファイル.txt":       {Mtime: time.Unix(1_600_000_000, 5).In(time.FixedZone("x", 3600)), Size: 77, Ino: 0},
+			"emoji/🙂/\u00e9.md": {Mtime: time.Unix(1_700_000_001, 1), Size: 2, Ino: 7},
+			"zero-time":         {Size: 3},
+			deepPath:            {Mtime: time.Unix(1_700_000_002, 2), Size: 4, Ino: 8},
+		},
+	}
+	for name, r := range map[string]Result{"empty": {}, "full": full} {
+		t.Run(name, func(t *testing.T) {
+			data, err := r.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got Result
+			if err := got.UnmarshalBinary(data); err != nil {
+				t.Fatal(err)
+			}
+			sameResult(t, got, r)
+		})
+	}
+}
+
+// TestResultBinaryRejectsDamage fails cleanly on truncated, altered or
+// foreign input instead of decoding a different capture.
+func TestResultBinaryRejectsDamage(t *testing.T) {
+	r := Result{Root: "/src", Tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", Info: map[string]Info{"a.txt": {Mtime: time.Unix(1, 2), Size: 3, Ino: 4}}, Roots: map[string]rules.Class{"tmp": rules.Cache}}
+	data, err := r.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged := map[string][]byte{"empty": nil, "legacy json": legacy, "checksum": bytes.Clone(data)}
+	damaged["checksum"][len(resultMagic)] ^= 1
+	for n := range len(data) {
+		damaged[fmt.Sprintf("truncated to %d", n)] = data[:n]
+	}
+	for name, d := range damaged {
+		var got Result
+		if err := got.UnmarshalBinary(d); err == nil {
+			t.Fatalf("%s: decoded %+v", name, got)
+		}
+	}
+}
+
+// storedTree stores files' blobs and tree for stat cache tests.
+func storedTree(t *testing.T, st *store.Store, paths ...string) (store.OID, map[string]store.File) {
+	t.Helper()
+	files := map[string]store.File{}
+	for _, p := range paths {
+		id, err := st.PutBytes([]byte(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[p] = store.File{Mode: store.ModeFile, ID: id}
+	}
+	tree, err := st.Build(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree, files
+}
+
+// TestStatCacheRoundTrip reloads exactly the entries that were not racily
+// fresh, taking their paths, modes and ids from the capture's stored tree.
+func TestStatCacheRoundTrip(t *testing.T) {
+	st, err := store.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, files := storedTree(t, st, "a.txt", "dir/ü.txt", "dir/日本.md", deepPath, "uncached", "racy")
+	link, err := st.PutBytes([]byte("a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files["link"] = store.File{Mode: store.ModeSymlink, ID: link}
+	files["empty"] = store.File{Mode: store.ModeDir, ID: store.EmptyTree}
+	if tree, err = st.Build(files); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-time.Hour).UnixNano()
+	entries := map[string]statEntry{
+		"a.txt":     {Size: 5, Mtime: old, Ctime: old + 1, Ino: math.MaxUint64, Mode: store.ModeFile, OID: files["a.txt"].ID},
+		"dir/ü.txt": {Size: 0, Mtime: -old, Ctime: 0, Ino: 0, Mode: store.ModeFile, OID: files["dir/ü.txt"].ID},
+		"dir/日本.md": {Size: 1 << 40, Mtime: old - 7, Ctime: old, Ino: 3, Mode: store.ModeFile, OID: files["dir/日本.md"].ID},
+		deepPath:    {Size: 9, Mtime: old, Ctime: old, Ino: 2, Mode: store.ModeFile, OID: files[deepPath].ID},
+		"racy":      {Size: 1, Mtime: now.UnixNano(), Ctime: now.UnixNano(), Ino: 9, Mode: store.ModeFile, OID: files["racy"].ID},
+	}
+	name := filepath.Join(t.TempDir(), "sources", "x.stat")
+	if err := saveStatCache(name, tree, files, entries, now, "epoch-1"); err != nil {
+		t.Fatal(err)
+	}
+	got := loadStatCache(name, st)
+	delete(entries, "racy")
+	if got.Epoch != "epoch-1" || !reflect.DeepEqual(got.Entries, entries) {
+		t.Fatalf("loaded %+v, want %+v", got, entries)
+	}
+
+	empty := filepath.Join(t.TempDir(), "empty.stat")
+	if err := saveStatCache(empty, store.EmptyTree, map[string]store.File{}, map[string]statEntry{}, now, "e"); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadStatCache(empty, st); got.Epoch != "e" || len(got.Entries) != 0 {
+		t.Fatalf("empty cache loaded as %+v", got)
+	}
+
+	stray := map[string]statEntry{"not-captured": {Mode: store.ModeFile, OID: files["a.txt"].ID}}
+	if err := saveStatCache(filepath.Join(t.TempDir(), "stray.stat"), tree, files, stray, now, "e"); err == nil {
+		t.Fatal("saved an entry that is not a leaf of the capture")
+	}
+}
+
+// TestDamagedStatCacheIsIgnored hashes everything again when the cache is
+// damaged, in an older format, or names a tree the store no longer has, and
+// replaces it with one the next capture uses.
+func TestDamagedStatCacheIsIgnored(t *testing.T) {
+	st, err := store.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "x.stat")
+	old := time.Now().Add(-time.Minute)
+	for _, n := range []string{"a.txt", "ü/b.txt"} {
+		write(t, filepath.Join(dir, n), n)
+		if err := os.Chtimes(filepath.Join(dir, n), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capture(t, dir, st, cache)
+	good, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"epoch":"","entries":{"a.txt":{"s":5,"m":0,"c":0,"i":0,"x":33188,"o":"2e65efe2a145dda7ee51d1741299f848e5bf752e"}}}`
+	for name, data := range map[string][]byte{
+		"truncated": good[:len(good)/2],
+		"garbage":   []byte("not a stat cache"),
+		"empty":     {},
+		"legacy":    []byte(legacy),
+	} {
+		if err := os.WriteFile(cache, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if res := capture(t, dir, st, cache); res.Stats.Hashed != 2 {
+			t.Fatalf("%s cache: hashed %d, want 2", name, res.Stats.Hashed)
+		}
+		if res := capture(t, dir, st, cache); res.Stats.Hashed != 0 {
+			t.Fatalf("%s cache: rewritten cache unused, hashed %d", name, res.Stats.Hashed)
+		}
+	}
+	other, err := store.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := capture(t, dir, other, cache); res.Stats.Hashed != 2 {
+		t.Fatalf("cache naming a tree another store lacks: hashed %d, want 2", res.Stats.Hashed)
+	}
+}
+
+// TestHashOnlyCaptureReadsCacheTrees lets a capture without a store (plan)
+// reuse the stat cache through CacheTrees, and hash everything without it.
+func TestHashOnlyCaptureReadsCacheTrees(t *testing.T) {
+	st, err := store.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "x.stat")
+	write(t, filepath.Join(dir, "a.txt"), "a")
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, "a.txt"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	stored := capture(t, dir, st, cache)
+	root, err := Resolve(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		trees  *store.Store
+		hashed int
+	}{{st, 0}, {nil, 1}} {
+		res, err := Capture(context.Background(), Options{Root: root, Rules: rules.Set{Rules: rules.Builtins()}, Cache: cache, CacheTrees: c.trees})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Stats.Hashed != c.hashed || res.Files["a.txt"] != stored.Files["a.txt"] {
+			t.Fatalf("CacheTrees %v: hashed %d, file %+v; want %d, %+v", c.trees != nil, res.Stats.Hashed, res.Files["a.txt"], c.hashed, stored.Files["a.txt"])
+		}
+	}
+}

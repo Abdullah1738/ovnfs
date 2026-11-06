@@ -1,12 +1,16 @@
 // Package store keeps git-format objects (blobs and trees) content-addressed
-// under one directory. Objects are stored uncompressed and without git's
-// "<type> <len>\x00" header, so a blob file holds exactly the file's bytes and
-// can be cloned into a checkout instead of copied. Ids are git's SHA-1 ids, so a
-// snapshot tree built here is byte-identical to the one git would write.
+// under one directory, without git's "<type> <len>\x00" header. Objects up to
+// cloneFile bytes are appended, zstd-compressed where that shrinks them, to
+// pack files indexed in memory; larger ones stay loose and uncompressed, so a
+// loose blob file holds exactly the file's bytes and can be cloned into a
+// checkout instead of copied. Ids are git's SHA-1 ids, so a snapshot tree built
+// here is byte-identical to the one git would write.
 //
 // On-disk layout:
 //
-//	<dir>/objects/<2 hex>/<38 hex>  object body, read-only (0444)
+//	<dir>/packs/<n>.pack            appended object frames (see pack.go)
+//	<dir>/packs/<n>.idx             index of a sealed (full) pack
+//	<dir>/objects/<2 hex>/<38 hex>  loose object body, read-only (0444)
 //	<dir>/tmp/<unique>              private staging files, renamed into objects
 //	<dir>/epoch                     token Sweep replaces before it removes objects
 //
@@ -15,6 +19,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
@@ -32,6 +37,7 @@ import (
 	"time"
 
 	"github.com/stencil-hq/ovnfs/internal/clone"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 // OID is a git object id: 40 lowercase hex SHA-1 over "<type> <len>\x00<body>".
@@ -48,7 +54,7 @@ const (
 	ModeDir     uint32 = 0o040000
 )
 
-// objectPerm protects stored objects from writes through BlobPath; contents are immutable by id.
+// objectPerm protects loose object files from writes; contents are immutable by id.
 const objectPerm os.FileMode = 0o444
 
 // ModeOf maps os.FileMode to a git mode (any user-exec bit → ModeExec; symlink; dir); ok=false for other types.
@@ -80,10 +86,12 @@ func (id OID) Valid() bool {
 	return true
 }
 
-// Store keeps git-format objects uncompressed (blobs as raw content, so they can
-// be cloned) under one directory. One process owns a store: Sweep coordinates
-// with the store's other users through memory, not the filesystem.
+// Store keeps git-format objects under one directory: small ones packed and
+// compressed, large ones loose as raw content, so they can be cloned. One
+// process owns a store: Sweep coordinates with the store's other users through
+// memory, not the filesystem.
 type Store struct {
+	packs   *packSet
 	objects string
 	tmp     string
 	epochAt string // the file persisting epoch across processes
@@ -119,6 +127,11 @@ func Open(dir string, cache int64) (*Store, error) {
 	if err := os.MkdirAll(s.tmp, 0o755); err != nil {
 		return nil, fmt.Errorf("open store %s: %w", dir, err)
 	}
+	packs, err := openPacks(filepath.Join(dir, "packs"))
+	if err != nil {
+		return nil, fmt.Errorf("open store %s: %w", dir, err)
+	}
+	s.packs = packs
 	for i := range 256 {
 		if err := os.MkdirAll(filepath.Join(s.objects, fmt.Sprintf("%02x", i)), 0o755); err != nil {
 			return nil, fmt.Errorf("open store %s: %w", dir, err)
@@ -232,23 +245,70 @@ func hashOpen(f *os.File, size int64) (OID, int64, error) {
 	return sumOID(h), size, nil
 }
 
-// objectPath is the file holding id; callers validate id first.
+// objectPath is the loose file holding id; callers validate id first.
 func (s *Store) objectPath(id OID) string {
 	return filepath.Join(s.objects, string(id[:2]), string(id[2:]))
 }
 
-// BlobPath returns the path of the raw object file for id ("" if id is malformed); read-only for callers.
-func (s *Store) BlobPath(id OID) string {
+// Reader is an open stored object.
+type Reader interface {
+	io.ReadSeekCloser
+	io.ReaderAt
+}
+
+// memReader serves in-memory object content as a Reader.
+type memReader struct{ *bytes.Reader }
+
+// Close releases nothing: the bytes are the reader's own or the cache's.
+func (memReader) Close() error { return nil }
+
+// Open returns the content of stored object id: an *os.File for a loose
+// object, which callers may clone, an in-memory reader for a packed or
+// resident one. Views and peers call it to serve object content.
+func (s *Store) Open(id OID) (Reader, error) {
 	if !id.Valid() {
-		return ""
+		return nil, fmt.Errorf("open object %q: malformed id", id)
 	}
-	return s.objectPath(id)
+	if data, ok := s.cache.get(id); ok {
+		return memReader{bytes.NewReader(data)}, nil
+	}
+	data, ok, err := s.readPacked(rawOf(id))
+	if err != nil {
+		return nil, fmt.Errorf("open object %s: %w", id, err)
+	}
+	if ok {
+		return memReader{bytes.NewReader(data)}, nil
+	}
+	f, err := hostfile.Open(s.objectPath(id))
+	if err != nil {
+		return nil, fmt.Errorf("open object %s: %w", id, err)
+	}
+	return f, nil
+}
+
+// Size returns the content length of stored object id without reading it, for
+// callers that announce sizes (peer offers) before serving content.
+func (s *Store) Size(id OID) (int64, error) {
+	if !id.Valid() {
+		return 0, fmt.Errorf("size of object %q: malformed id", id)
+	}
+	if e, ok := s.packs.lookup(rawOf(id)); ok {
+		return int64(e.raw), nil
+	}
+	info, err := os.Lstat(s.objectPath(id))
+	if err != nil {
+		return 0, fmt.Errorf("size of object %s: %w", id, err)
+	}
+	return info.Size(), nil
 }
 
 // Has reports whether the object id is present in the store.
 func (s *Store) Has(id OID) bool {
 	if !id.Valid() {
 		return false
+	}
+	if _, ok := s.packs.lookup(rawOf(id)); ok {
+		return true
 	}
 	_, err := os.Lstat(s.objectPath(id))
 	return err == nil
@@ -262,17 +322,28 @@ func (s *Store) ReadBlob(id OID) ([]byte, error) {
 	if data, ok := s.cache.get(id); ok {
 		return slices.Clone(data), nil
 	}
-	data, err := os.ReadFile(s.objectPath(id))
+	data, err := s.load(id)
 	if err != nil {
 		return nil, fmt.Errorf("read object %s: %w", id, err)
 	}
 	return data, nil
 }
 
-// CloneBlob materializes a stored blob at the new path dst with mode (clone, else copy).
+// CloneBlob materializes a stored blob at the new path dst with mode: a loose
+// object is cloned (else copied), a packed one written out.
 func (s *Store) CloneBlob(id OID, dst string, mode os.FileMode) error {
 	if !id.Valid() {
 		return fmt.Errorf("clone object %q: malformed id", id)
+	}
+	data, ok, err := s.readPacked(rawOf(id))
+	if err != nil {
+		return fmt.Errorf("clone object %s: %w", id, err)
+	}
+	if ok {
+		if err := writeNew(dst, data, mode); err != nil {
+			return fmt.Errorf("clone object %s: %w", id, err)
+		}
+		return nil
 	}
 	in, err := os.Open(s.objectPath(id))
 	if err != nil {
@@ -285,18 +356,36 @@ func (s *Store) CloneBlob(id OID, dst string, mode os.FileMode) error {
 	return nil
 }
 
-// smallFile is the largest file PutFile reads into memory before storing, which
-// spares writing a copy when the object already exists.
-const smallFile = 64 << 10
+// writeNew creates the new file dst holding data with exactly mode (the umask
+// may narrow it at creation), removing it again on failure.
+func writeNew(dst string, data []byte, mode os.FileMode) error {
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(data)
+	if err == nil {
+		err = out.Chmod(mode)
+	}
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(dst)
+	}
+	return err
+}
 
-// cloneFile is the size above which PutFile stages a block-sharing clone where it
-// can: the clone saves disk space, and from about this size it costs no more
-// time than a copy (measured on APFS and btrfs; below it a copy is up to 2x faster).
+// cloneFile is the largest object kept in a pack, and so the largest file
+// PutFile reads into memory, writing it only if the object is new. Above it
+// PutFile stages a block-sharing clone where it can: the clone saves disk
+// space, and from about this size it costs no more time than a copy (measured
+// on APFS and btrfs; below it a copy is up to 2x faster).
 const cloneFile = 1 << 20
 
 // PutFile stores a regular file as a blob and returns its id and size. It opens
-// path once and reads a small file into memory, writing it only if the object
-// is new; a larger one is staged as a private copy: above cloneFile a
+// path once and reads a file of up to cloneFile bytes into memory, packing it
+// only if the object is new; a larger one is staged as a private loose copy: a
 // block-sharing clone, hashed afterwards, where the file's device can clone into
 // the store, else the bytes read once, written and hashed together. The stored
 // bytes are exactly the hashed bytes even if path changes concurrently; the size
@@ -309,9 +398,9 @@ func (s *Store) PutFile(path string) (OID, int64, error) {
 		return "", 0, fmt.Errorf("store %s: %w", path, err)
 	}
 	defer in.Close()
-	if size <= smallFile {
-		bp := copyBuffers.Get().(*[]byte)
-		defer copyBuffers.Put(bp)
+	if size <= cloneFile {
+		bp := smallBuffers.Get().(*[]byte)
+		defer smallBuffers.Put(bp)
 		data, whole, err := readSmall(in, *bp)
 		if err != nil {
 			return "", 0, fmt.Errorf("store %s: %w", path, err)
@@ -390,7 +479,11 @@ func readSmall(in *os.File, buf []byte) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
-// copyBuffers recycles PutFile's read buffers, which hold more than smallFile.
+// smallBuffers recycles PutFile's whole-file buffers, one byte longer than
+// cloneFile so a file that grew past it is noticed.
+var smallBuffers = sync.Pool{New: func() any { b := make([]byte, cloneFile+1); return &b }}
+
+// copyBuffers recycles stageCopy's read buffers.
 var copyBuffers = sync.Pool{New: func() any { b := make([]byte, 128<<10); return &b }}
 
 // stageCopy reads in to its end once, writing the new staging file stage and
@@ -464,10 +557,14 @@ func (s *Store) putData(kind string, id OID, data []byte) (OID, error) {
 }
 
 // putObject stores data as object id unless it exists, which is then refreshed;
-// keep and tree are recorded as publish does.
+// keep and tree are recorded as publish does. Data of up to cloneFile bytes is
+// packed, compressed before any lock is taken.
 func (s *Store) putObject(id OID, data, keep []byte, tree bool) error {
 	if s.touch(id, keep, tree) {
 		return nil
+	}
+	if len(data) <= cloneFile {
+		return s.putFrame(id, encodeFrame(rawOf(id), data, time.Now().UnixNano()), keep, tree)
 	}
 	stage := s.stageNear(id)
 	defer s.staging.Delete(stage)
@@ -476,6 +573,18 @@ func (s *Store) putObject(id OID, data, keep []byte, tree bool) error {
 		return err
 	}
 	return s.publish(id, stage, keep, tree)
+}
+
+// putFrame packs frame, encoded for object id, unless the object is packed
+// already, which is then refreshed; keep and tree are recorded as publish does.
+func (s *Store) putFrame(id OID, frame, keep []byte, tree bool) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, err := s.packs.add(frame); err != nil {
+		return err
+	}
+	s.stored(id, keep, tree)
+	return nil
 }
 
 // writeExclusive creates the new read-only object file p holding data; the
@@ -575,11 +684,16 @@ func (s *Store) stored(id OID, keep []byte, tree bool) {
 	}
 }
 
-// touch refreshes an existing object's mtime so Sweep keeps it, reporting
-// whether it exists; when it does, it is recorded as stored.
+// touch refreshes an existing object's freshness (in memory for a packed one,
+// its mtime for a loose one) so Sweep keeps it, reporting whether it exists;
+// when it does, it is recorded as stored.
 func (s *Store) touch(id OID, keep []byte, tree bool) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.packs.touch(rawOf(id), time.Now().UnixNano()) {
+		s.stored(id, keep, tree)
+		return true
+	}
 	return s.refresh(id, s.objectPath(id), keep, tree) == nil
 }
 

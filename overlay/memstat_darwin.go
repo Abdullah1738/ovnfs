@@ -29,6 +29,16 @@ func setCreationTime(p string, t time.Time) error {
 	return unix.Setattrlist(p, &attrs, data[:], unix.FSOPT_NOFOLLOW)
 }
 
+// birthTime returns the creation time host metadata records, which a stored
+// layer entry's copy-up restores.
+func birthTime(info os.FileInfo) (time.Time, bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st == nil {
+		return time.Time{}, false
+	}
+	return time.Unix(st.Birthtimespec.Unix()), true
+}
+
 // newOwner returns the owner a file created now in directory dir gets: the
 // effective uid, and the directory's group, which BSD semantics always
 // inherit.

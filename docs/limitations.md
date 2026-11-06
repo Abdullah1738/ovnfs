@@ -22,6 +22,12 @@
 - NFSv3 locks are client-local. Explicit NFSv4 clients use byte-range locks
   held in the daemon's memory, lost when it restarts. SMB has no hard links
   and no durable handles.
+- A file's id derives from its directory and name. Within one daemon run a
+  removed file's id is never reissued, but after a restart a file recreated
+  under the same name can take the id an NFS client still holds for the
+  removed one; a hash collision with a name created behind the export while
+  the daemon was down makes an earlier handle stale (`ESTALE`), never another
+  file's.
 - NFSv3 cannot push cache invalidations: folder edits in cache and local
   paths, `pull`, and reattach can remain cached until the client's attribute
   timeout (up to 60 s). NFSv4 read delegations reduce that window for opened

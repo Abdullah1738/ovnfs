@@ -9,11 +9,13 @@ type Export struct {
 
 // New opens the persistent node log and wraps the checkout router.
 func New(rt *Router, nodesLog, upperVolume string) (*Export, error) {
-	nodes, err := openNodeTable(nodesLog)
+	fs := &nodeFS{Filesystem: rt, Change: rt}
+	nodes, err := openNodeTable(nodesLog, rt.ReadDir)
 	if err != nil {
 		return nil, err
 	}
-	return &Export{fs: &nodeFS{Filesystem: rt, Change: rt, nodes: nodes}, volume: upperVolume, rt: rt}, nil
+	fs.nodes = nodes
+	return &Export{fs: fs, volume: upperVolume, rt: rt}, nil
 }
 
 // Retire invalidates a checkout's directory and every descendant handle,

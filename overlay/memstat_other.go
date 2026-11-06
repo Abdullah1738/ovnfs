@@ -21,5 +21,8 @@ func newOwner(os.FileInfo) (uid, gid uint32) { return 0, 0 }
 // matchOwner leaves ownership to the platform.
 func matchOwner(*os.File, uint32, uint32) error { return nil }
 
+// birthTime reports no creation time to restore: the platform keeps its own.
+func birthTime(os.FileInfo) (time.Time, bool) { return time.Time{}, false }
+
 // setCreationTime leaves creation times to the platform.
 func setCreationTime(string, time.Time) error { return nil }

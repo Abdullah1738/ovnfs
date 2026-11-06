@@ -28,7 +28,7 @@ import (
 type gitSource struct {
 	repo  *git.Repo     // build one from this repository's state at capture
 	index string        // the captured index copy
-	from  string        // copy this existing private git directory instead
+	ready string        // or move this git directory prepared by prepareGit into place
 	rev   *git.Revision // optional initial revision, already resolved
 }
 
@@ -50,23 +50,42 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		if len(args.Rules) != 0 {
 			return api.NewReply{}, failure("invalid", "rules are fixed when a folder is captured; a checkout from a snapshot keeps its base's rules")
 		}
-		r.mu.Lock()
+		r.mu.RLock()
 		s := r.snapshots[args.Snapshot]
+		var tree store.OID
+		var baseID string
+		if s != nil {
+			tree, baseID = s.git, s.base.view.Meta().ID
+		}
+		r.mu.RUnlock()
 		if s == nil {
-			r.mu.Unlock()
 			return api.NewReply{}, failure("not_found", "no snapshot %s", args.Snapshot)
 		}
-		name, err := r.pickNameLocked(args.Name, s.meta.Checkout)
+		ready, err := r.prepareGit(tree, filepath.Join(r.snapshotDir(s.meta.ID), "git"), baseID)
 		if err != nil {
-			r.mu.Unlock()
-			return api.NewReply{}, err
+			return api.NewReply{}, coded(err)
 		}
-		h, err := r.createFromSnapshotLocked(ctx, name, s)
+		r.mu.Lock()
+		var h *checkoutRecord
+		var name string
+		switch {
+		case r.closed:
+			err = failure("io", "registry is closed")
+		case r.snapshots[args.Snapshot] != s:
+			err = failure("not_found", "no snapshot %s", args.Snapshot)
+		default:
+			if name, err = r.pickNameLocked(args.Name, s.meta.Checkout); err == nil {
+				h, err = r.createFromSnapshotLocked(ctx, name, s, ready)
+			}
+		}
 		var reply api.NewReply
 		if err == nil {
 			reply = api.NewReply{Checkout: r.checkoutLocked(h), Warnings: []string{}}
 		}
 		r.mu.Unlock()
+		if discardErr := discardGit(ready); err == nil && discardErr != nil {
+			err = discardErr
+		}
 		if err != nil {
 			return api.NewReply{}, coded(err)
 		}
@@ -289,7 +308,7 @@ func writeLock(name string, lock manifest.Lock) error {
 // statCachePath names a source folder's stat cache, shared by every capture of it.
 func (r *Registry) statCachePath(root string) string {
 	sum := sha256.Sum256([]byte(root))
-	return filepath.Join(r.config.State, "sources", hex.EncodeToString(sum[:8])+".json")
+	return filepath.Join(r.config.State, "sources", hex.EncodeToString(sum[:8])+".stat")
 }
 
 // pickNameLocked validates an explicit name, or derives a free one from hint.
@@ -347,23 +366,22 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 	if err = os.MkdirAll(upper, 0o755); err != nil {
 		return nil, err
 	}
-	hasGit := gs.repo != nil || gs.from != ""
+	hasGit := gs.repo != nil || gs.ready != ""
 	if hasGit {
 		gitdir := r.gitdirPath(name)
 		if err = os.RemoveAll(gitdir); err != nil {
 			return nil, err
 		}
-		objects := r.objectsPath(b.view.Meta().ID)
 		if gs.repo != nil {
-			err = gs.repo.MakeGitdir(ctx, gitdir, objects, gs.index)
+			err = gs.repo.MakeGitdir(ctx, gitdir, r.objectsPath(b.view.Meta().ID), gs.index)
 		} else {
-			err = git.CopyGitdir(gs.from, gitdir, objects)
+			err = os.Rename(gs.ready, gitdir)
 		}
 		if err == nil && gs.rev != nil {
 			err = gs.rev.SetHEAD(gitdir)
 		}
 		if err == nil {
-			err = git.MarkCheckout(ctx, gitdir, name)
+			err = git.MarkCheckout(gitdir, name)
 		}
 		if err == nil {
 			err = writeGitfile(upper, gitdir)
@@ -386,26 +404,17 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 // writeGitfile points a checkout's root at its private git directory.
 func writeGitfile(upper, gitdir string) error { return git.WriteGitfile(upper, gitdir) }
 
-// createFromSnapshotLocked attaches a new checkout to a snapshot's stack and git state.
-func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s *snapRecord) (*checkoutRecord, error) {
+// createFromSnapshotLocked attaches a new checkout to a snapshot's stack and to the git
+// directory prepareGit made from it (ready, "" for none), publishing it with one
+// durable state write. It needs no recovery intent: the registry holds its lock
+// throughout, the snapshot already retains the base, and reopening after a crash
+// removes the upper and git directory of a checkout the state does not name.
+func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s *snapRecord, ready string) (*checkoutRecord, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	r.reserved[name] = true
-	r.intents[name] = diskIntent{Op: "creating", Checkout: name, Layer: s.base.view.Meta().ID, Snapshot: s.meta.ID}
-	if err := r.persistIntentLocked(); err != nil {
-		delete(r.reserved, name)
-		delete(r.intents, name)
-		return nil, err
-	}
-	gs := gitSource{}
-	if saved := filepath.Join(r.snapshotDir(s.meta.ID), "git"); exists(saved) {
-		gs.from = saved
-	}
-	h, err := r.installCheckoutLocked(ctx, name, s.base, s.stack, &s.meta.ID, gs)
+	h, err := r.installCheckoutLocked(ctx, name, s.base, s.stack, &s.meta.ID, gitSource{ready: ready})
 	if err == nil {
-		delete(r.reserved, name)
-		delete(r.intents, name)
 		r.moveRootLocked()
 		if err = r.persistLocked(); err == nil {
 			return h, nil
@@ -413,8 +422,6 @@ func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s 
 		delete(r.checkouts, name)
 		r.releaseLocked(s.base, s.stack)
 	}
-	delete(r.reserved, name)
-	delete(r.intents, name)
 	return nil, errors.Join(err, os.RemoveAll(r.upperPath(name)), os.RemoveAll(r.gitdirPath(name)), r.persistLocked())
 }
 
@@ -431,17 +438,20 @@ func (r *Registry) Snap(ctx context.Context, args api.SnapArgs) (api.SnapReply, 
 	if err := checkContext(ctx); err != nil {
 		return api.SnapReply{}, err
 	}
+	h, _, err := r.liveCheckout(args.Checkout)
+	if err != nil {
+		return api.SnapReply{}, err
+	}
+	tree, err := r.saveGit(h)
+	if err != nil {
+		return api.SnapReply{}, coded(err)
+	}
 	r.mu.Lock()
-	if r.closed {
+	if err = r.stillLiveLocked(h); err != nil {
 		r.mu.Unlock()
-		return api.SnapReply{}, failure("io", "registry is closed")
+		return api.SnapReply{}, err
 	}
-	h := r.checkouts[args.Checkout]
-	if h == nil || h.retired.Load() {
-		r.mu.Unlock()
-		return api.SnapReply{}, failure("not_found", "no checkout %s", args.Checkout)
-	}
-	s, err := r.freezeLocked(ctx, h, args.Label, true)
+	s, err := r.freezeLocked(ctx, h, args.Label, tree, true)
 	var result snapMeta
 	if s != nil {
 		result = cloneSnapMeta(s.meta)
@@ -474,35 +484,49 @@ func (r *Registry) waitHashed(ctx context.Context, s *snapRecord) (api.SnapReply
 	return api.SnapReply{Snapshot: snapshotOf(result)}, coded(err)
 }
 
-// Fork freezes and creates under one registry lock so no competing registry mutation interleaves.
+// Fork freezes and creates under one registry lock so no competing registry mutation
+// interleaves; the git directory is stored and the child's copy written before it, and
+// the freeze and the child are published by one durable state write.
 func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, error) {
 	if err := checkContext(ctx); err != nil {
 		return api.ForkReply{}, err
 	}
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return api.ForkReply{}, failure("io", "registry is closed")
+	h, baseID, err := r.liveCheckout(args.Checkout)
+	if err != nil {
+		return api.ForkReply{}, err
 	}
-	h := r.checkouts[args.Checkout]
-	if h == nil || h.retired.Load() {
+	tree, err := r.saveGit(h)
+	if err != nil {
+		return api.ForkReply{}, coded(err)
+	}
+	ready, err := r.prepareGit(tree, "", baseID)
+	if err != nil {
+		return api.ForkReply{}, coded(err)
+	}
+	defer discardGit(ready)
+	r.mu.Lock()
+	if err = r.stillLiveLocked(h); err == nil && h.meta.Base != baseID {
+		err = failure("conflict", "checkout %s moved to another base while forking; retry", h.meta.Name)
+	}
+	if err != nil {
 		r.mu.Unlock()
-		return api.ForkReply{}, failure("not_found", "no checkout %s", args.Checkout)
+		return api.ForkReply{}, err
 	}
 	child, err := r.pickNameLocked(args.Name, args.Checkout)
 	if err != nil {
 		r.mu.Unlock()
 		return api.ForkReply{}, err
 	}
-	s, err := r.freezeLocked(ctx, h, args.Label, false)
+	s, err := r.freezeLocked(ctx, h, args.Label, tree, false)
 	if err != nil {
 		r.mu.Unlock()
 		return api.ForkReply{}, coded(err)
 	}
 	result := snapshotOf(s.meta)
-	created, createErr := r.createFromSnapshotLocked(ctx, child, s)
+	created, createErr := r.createFromSnapshotLocked(ctx, child, s, ready)
 	var childCheckout api.Checkout
 	if createErr != nil {
+		// The freeze stays published even when its child is not.
 		createErr = errors.Join(createErr, r.persistLocked())
 	} else {
 		childCheckout = r.checkoutLocked(created)
@@ -539,20 +563,38 @@ func upperEmpty(h *checkoutRecord) (bool, error) {
 	return true, nil
 }
 
-// saveGit copies a checkout's private git directory into its new snapshot while the checkout is frozen.
-func (r *Registry) saveGit(h *checkoutRecord, id string) error {
-	if !h.meta.Git {
-		return nil
+// liveCheckout finds a live checkout and its base before an operation's work outside
+// the registry lock.
+func (r *Registry) liveCheckout(name string) (*checkoutRecord, string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.closed {
+		return nil, "", failure("io", "registry is closed")
 	}
-	dir := r.snapshotDir(id)
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		return err
+	h := r.checkouts[name]
+	if h == nil || h.retired.Load() {
+		return nil, "", failure("not_found", "no checkout %s", name)
 	}
-	return git.CopyGitdir(r.gitdirPath(h.meta.Name), filepath.Join(dir, "git"), r.objectsPath(h.meta.Base))
+	return h, h.meta.Base, nil
 }
 
-// freezeLocked freezes an upper; fork defers its durable commit into child publication.
-func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label string, commit bool) (*snapRecord, error) {
+// stillLiveLocked confirms a checkout found by liveCheckout was neither removed nor
+// replaced while the registry lock was released.
+func (r *Registry) stillLiveLocked(h *checkoutRecord) error {
+	if r.closed {
+		return failure("io", "registry is closed")
+	}
+	if r.checkouts[h.meta.Name] != h || h.retired.Load() {
+		return failure("not_found", "no checkout %s", h.meta.Name)
+	}
+	return nil
+}
+
+// freezeLocked freezes an upper into a snapshot whose private git directory saveGit
+// stored as gitTree; fork defers its durable commit into child publication. Only a
+// freeze that moves the upper publishes a recovery intent first; with no layer the
+// snapshot is all metadata and simply does not exist until committed.
+func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label string, gitTree store.OID, commit bool) (*snapRecord, error) {
 	h.freeze.Lock()
 	defer h.freeze.Unlock()
 	if err := checkContext(ctx); err != nil {
@@ -589,15 +631,17 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		stack = append([]string{layerID}, stack...)
 	}
 	stackParent := deref(parent)
-	s := &snapRecord{meta: snapMeta{ID: id, Checkout: h.meta.Name, Parent: copyString(parent), Label: label, Created: time.Now().UTC()}, base: h.base, stack: stack, layer: layerID, stackParent: stackParent, done: make(chan struct{})}
+	s := &snapRecord{meta: snapMeta{ID: id, Checkout: h.meta.Name, Parent: copyString(parent), Label: label, Created: time.Now().UTC()}, base: h.base, stack: stack, layer: layerID, stackParent: stackParent, git: gitTree, done: make(chan struct{})}
 	r.snapshots[id] = s
 	r.lineage[id] = s
-	r.intents[h.meta.Name] = diskIntent{Op: "freezing", Checkout: h.meta.Name, Layer: layerID, Snapshot: id}
-	if err = r.persistIntentLocked(); err != nil {
-		delete(r.snapshots, id)
-		delete(r.lineage, id)
-		delete(r.intents, h.meta.Name)
-		return nil, err
+	if layerID != "" {
+		r.intents[h.meta.Name] = diskIntent{Op: "freezing", Checkout: h.meta.Name, Layer: layerID, Snapshot: id}
+		if err = r.persistIntentLocked(); err != nil {
+			delete(r.snapshots, id)
+			delete(r.lineage, id)
+			delete(r.intents, h.meta.Name)
+			return nil, err
+		}
 	}
 	oldStack, oldFS, oldHead := h.stack, h.fs, copyString(h.meta.Head)
 	renamed, refsChanged, closed := false, false, false
@@ -625,7 +669,6 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		delete(r.snapshots, id)
 		delete(r.lineage, id)
 		delete(r.intents, h.meta.Name)
-		rollbackErr = errors.Join(rollbackErr, os.RemoveAll(r.snapshotDir(id)))
 		// Reopen the restored upper to recreate staging and its in-memory index.
 		if renamed {
 			layers, e := r.layerStackLocked(oldStack, h.meta.Base)
@@ -638,9 +681,6 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 			rollbackErr = r.persistLocked()
 		}
 		return nil, errors.Join(cause, rollbackErr)
-	}
-	if err = r.saveGit(h, id); err != nil {
-		return rollback(err)
 	}
 	if layerID != "" {
 		layerDir := filepath.Join(r.config.State, "layers", layerID)
@@ -893,7 +933,8 @@ func (r *Registry) hashDone(s *snapRecord, tree store.OID, hashErr error) {
 		s.meta.Tree = &id
 	}
 	s.hashErr = hashErr
-	persistErr := r.persistLocked()
+	// No durability barrier: reopening hashes a snapshot again when a crash lost its tree id.
+	persistErr := r.persistIntentLocked()
 	if persistErr != nil {
 		s.meta.Tree = nil
 		s.hashErr = errors.Join(hashErr, persistErr)

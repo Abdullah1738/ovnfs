@@ -53,7 +53,7 @@ func (e *Export) SMB() smb.Backend { return &smbFS{e.protocolFS()} }
 // caches itself before a CREATE opens for writing, and the recall would come
 // back into the same server as an extra lease scan per such open.
 func (s *smbFS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, error) {
-	return s.nodeFS.Filesystem.OpenFile(name, flag, perm)
+	return s.openFile(name, flag, perm)
 }
 
 // The adapter exposes filesystem operations and metadata mutations.

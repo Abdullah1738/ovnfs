@@ -3,7 +3,6 @@ package checkout
 import (
 	"context"
 	"maps"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -124,11 +123,11 @@ func (r *Registry) Plan(ctx context.Context, args api.PlanArgs) (api.PlanReply, 
 			return api.PlanReply{}, coded(err)
 		}
 		captured := h.base.view.Capture()
-		info := make(map[string]source.Info, len(captured.Info)+len(now.hosts))
+		info := make(map[string]source.Info, len(captured.Info)+len(now.layers))
 		maps.Copy(info, captured.Info)
-		for p, host := range now.hosts {
-			if fi, err := os.Lstat(host); err == nil {
-				info[p] = source.Info{Mtime: fi.ModTime(), Size: fi.Size()}
+		for p, l := range now.layers {
+			if e, ok := l.Get(p); ok && e.Info != nil {
+				info[p] = source.Info{Mtime: e.Info.ModTime(), Size: e.Info.Size()}
 			}
 		}
 		in.Root, in.Files, in.Info, in.Roots, in.Domains, in.Lock = h.base.view.Meta().Dir, now.files, info, captured.Roots, h.base.view.Domains(), h.base.lock
@@ -137,7 +136,7 @@ func (r *Registry) Plan(ctx context.Context, args api.PlanArgs) (api.PlanReply, 
 		if err != nil {
 			return api.PlanReply{}, err
 		}
-		res, err := source.Capture(ctx, source.Options{Root: root, Rules: m.Rules, Cache: r.statCachePath(root)})
+		res, err := source.Capture(ctx, source.Options{Root: root, Rules: m.Rules, Cache: r.statCachePath(root), CacheTrees: r.store})
 		if err != nil {
 			return api.PlanReply{}, coded(err)
 		}

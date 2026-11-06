@@ -31,7 +31,16 @@ func (n *nodeFS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, 
 	if flag&routerWriteFlags != 0 {
 		n.recall(name)
 	}
-	return n.Filesystem.OpenFile(name, flag, perm)
+	return n.openFile(name, flag, perm)
+}
+
+// openFile opens name and notes an entry O_CREATE may have made for node ids.
+func (n *nodeFS) openFile(name string, flag int, perm os.FileMode) (billy.File, error) {
+	f, err := n.Filesystem.OpenFile(name, flag, perm)
+	if err == nil && flag&os.O_CREATE != 0 {
+		n.nodes.created(overlay.Clean(name))
+	}
+	return f, err
 }
 
 // Create truncates through OpenFile so the recall is not bypassed.
@@ -74,10 +83,14 @@ func (e *Export) OnRecall(fn func(id uint64)) { e.fs.onRecall.Store(&fn) }
 func (e *Export) Invalidate(checkout string, paths []string) {
 	var targets []nodeRef
 	if paths == nil {
+		e.fs.nodes.unlist(checkout, true)
 		targets = e.fs.nodes.subtree(checkout)
 	} else {
 		for _, p := range paths {
 			full := path.Join(checkout, p)
+			dir, _ := split(full)
+			e.fs.nodes.unlist(full, false)
+			e.fs.nodes.unlist(dir, false)
 			if id, ok := e.fs.nodes.lookup(full); ok {
 				targets = append(targets, nodeRef{id: id, path: full})
 			}

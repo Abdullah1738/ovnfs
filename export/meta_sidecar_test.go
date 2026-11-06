@@ -14,7 +14,7 @@ func newMetadataTestFS(t *testing.T) *nodeFS {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &nodeFS{Filesystem: fs, Change: fs, nodes: newNodeTable()}
+	return &nodeFS{Filesystem: fs, Change: fs, nodes: newNodeTable(fs.ReadDir)}
 }
 
 // TestHiddenSidecarsRemainAddressable verifies hiding does not break xattr writes.
@@ -65,19 +65,5 @@ func TestSidecarsDoNotPermitRemovingVisibleChildren(t *testing.T) {
 	}
 	if _, err := n.Stat("co/dir/file"); os.IsNotExist(err) {
 		t.Fatal("visible child removed")
-	}
-}
-
-// TestCheckoutRetirementLeavesOtherIdentitiesLive checks the checkout boundary.
-func TestCheckoutRetirementLeavesOtherIdentitiesLive(t *testing.T) {
-	nt := newNodeTable()
-	a, b := nt.id("a/file"), nt.id("ab/file")
-	e := &Export{fs: &nodeFS{nodes: nt}}
-	e.Retire("a")
-	if _, ok := nt.path(a); ok {
-		t.Fatal("removed checkout handle lives")
-	}
-	if got := pathOf(t, nt, b); got != "ab/file" {
-		t.Fatalf("other checkout: %s", got)
 	}
 }

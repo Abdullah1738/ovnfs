@@ -19,6 +19,9 @@ func memStat(i memInfo) any {
 // setCreationTime leaves the Linux creation time to the filesystem.
 func setCreationTime(string, time.Time) error { return nil }
 
+// birthTime reports no creation time: Linux leaves it to the filesystem.
+func birthTime(os.FileInfo) (time.Time, bool) { return time.Time{}, false }
+
 // newOwner returns the owner a file created now in directory dir gets: the
 // effective uid, and the effective gid unless dir is setgid, whose group it
 // then inherits.

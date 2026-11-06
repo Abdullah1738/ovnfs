@@ -24,11 +24,16 @@ type nodeFS struct {
 // xattrs too). They must stay creatable and reachable by name, or xattr
 // writes and therefore copies fail, but listing them would show tools like
 // git and cargo a file per real file.
+//
+// The complete listing also tells the node table which children may take
+// derived ids.
 func (n *nodeFS) ReadDir(name string) ([]os.FileInfo, error) {
+	l := n.nodes.startListing(overlay.Clean(name))
 	infos, err := n.Filesystem.ReadDir(name)
 	if err != nil {
 		return nil, err
 	}
+	n.nodes.observe(l, infos)
 	out := infos[:0]
 	for _, info := range infos {
 		if !overlay.AppleDouble(info.Name()) {
@@ -41,10 +46,43 @@ func (n *nodeFS) ReadDir(name string) ([]os.FileInfo, error) {
 // Link forwards hard links without coupling the protocol to the router type.
 func (n *nodeFS) Link(oldname, newname string) error {
 	n.recall(oldname) // its link count changes
-	if fs, ok := n.Filesystem.(interface{ Link(string, string) error }); ok {
-		return fs.Link(oldname, newname)
+	fs, ok := n.Filesystem.(interface{ Link(string, string) error })
+	if !ok {
+		return syscall.ENOTSUP
 	}
-	return syscall.ENOTSUP
+	if err := fs.Link(oldname, newname); err != nil {
+		return err
+	}
+	n.nodes.created(overlay.Clean(newname))
+	return nil
+}
+
+// MkdirAll creates a directory and notes the new entry for node ids.
+func (n *nodeFS) MkdirAll(name string, perm os.FileMode) error {
+	if err := n.Filesystem.MkdirAll(name, perm); err != nil {
+		return err
+	}
+	n.nodes.created(overlay.Clean(name))
+	return nil
+}
+
+// Symlink creates a symbolic link and notes the new entry for node ids.
+func (n *nodeFS) Symlink(target, link string) error {
+	if err := n.Filesystem.Symlink(target, link); err != nil {
+		return err
+	}
+	n.nodes.created(overlay.Clean(link))
+	return nil
+}
+
+// TempFile creates a uniquely named file and notes the new entry for node ids.
+func (n *nodeFS) TempFile(dir, prefix string) (billy.File, error) {
+	f, err := n.Filesystem.TempFile(dir, prefix)
+	if err != nil {
+		return nil, err
+	}
+	n.nodes.created(overlay.Clean(f.Name()))
+	return f, nil
 }
 
 // Rename moves a node without changing its id or those of its descendants.

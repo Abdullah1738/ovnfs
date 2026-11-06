@@ -28,7 +28,10 @@ type Options struct {
 	Rules rules.Set    // the checkout's resolved rules
 	Store *store.Store // nil hashes without storing (plan and explain of a folder)
 	Cache string       // stat cache file; "" hashes every file
-	State string       // directory for index copies; "" reads live indexes
+	// CacheTrees holds the tree a stat cache names when Store is nil (plan and
+	// explain read the cache a stored capture wrote); nil then ignores the cache.
+	CacheTrees *store.Store
+	State      string // directory for index copies; "" reads live indexes
 }
 
 // Info is what a capture remembers about one file or symlink, whatever its class.
@@ -85,8 +88,7 @@ func Resolve(dir string) (string, error) {
 // o.Store is nil); every other class is recorded as a root and never descended.
 func Capture(ctx context.Context, o Options) (Result, error) {
 	start := time.Now()
-	cache := loadStatCache(o.Cache)
-	w := &walker{o: o, res: Result{Root: o.Root, Files: map[string]store.File{}, Info: map[string]Info{}, Roots: map[string]rules.Class{}}, cacheIn: cache.Entries, cacheOut: map[string]statEntry{}, verifiers: map[string]*verifier{}}
+	w := &walker{o: o, res: Result{Root: o.Root, Files: map[string]store.File{}, Info: map[string]Info{}, Roots: map[string]rules.Class{}}, cacheOut: map[string]statEntry{}, cacheReady: make(chan struct{}), verifiers: map[string]*verifier{}}
 	var epoch string
 	if o.Store != nil {
 		// No object is removed until Build has made the tree's objects safe from Sweep,
@@ -94,8 +96,10 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 		release := o.Store.Hold()
 		defer release()
 		epoch = o.Store.Epoch()
-		w.cacheStored = cache.Epoch == epoch
 	}
+	// Reading the stat cache's tree overlaps the start of the walk.
+	go w.loadCache(epoch)
+	defer func() { <-w.cacheReady }()
 	var repos []Repo
 	if repo, err := git.Open(o.Root); err == nil && repo.Top == o.Root {
 		r, err := w.copyRepo(ctx, repo, "")
@@ -117,6 +121,10 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 	w.res.Domains = domains
 	w.startPool()
 	_, walkErr := w.dir(ctx, "")
+	if walkErr == nil {
+		<-w.cacheReady
+		w.resolvePending(ctx)
+	}
 	w.finishVerifiers()
 	w.stopPool()
 	if walkErr != nil {
@@ -127,7 +135,7 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 			return Result{}, err
 		}
 		if o.Cache != "" {
-			if err := saveStatCache(o.Cache, w.cacheOut, start, epoch); err != nil {
+			if err := saveStatCache(o.Cache, w.res.Tree, w.res.Files, w.cacheOut, start, epoch); err != nil {
 				w.warn("stat cache not saved: " + err.Error())
 			}
 		}
@@ -161,8 +169,10 @@ type walker struct {
 	domains     *Domains
 	mu          sync.Mutex
 	res         Result
-	cacheIn     map[string]statEntry // read-only during the walk
+	cacheIn     map[string]statEntry // set before cacheReady closes, read-only after
 	cacheStored bool                 // every cacheIn blob is in the store
+	cacheReady  chan struct{}        // closed once the stat cache is loaded
+	pending     []hashJob            // files met before cacheReady, in walk order; walk goroutine only
 	cacheOut    map[string]statEntry
 	dropped     int
 	repos       int                  // index copies taken so far, naming their directories
@@ -358,15 +368,47 @@ func (w *walker) symlink(p string, info os.FileInfo, key fileKey) error {
 	return nil
 }
 
-// file reuses a known blob id when stat data proves the content unchanged, else
-// queues hashing. The stat cache comes first: it holds work-tree content ids, so
-// files git converts need no question to git once captured.
+// loadCache reads the stat cache for the walk and closes cacheReady.
+func (w *walker) loadCache(epoch string) {
+	defer close(w.cacheReady)
+	trees := w.o.Store
+	if trees == nil {
+		trees = w.o.CacheTrees
+	}
+	c := loadStatCache(w.o.Cache, trees)
+	w.cacheIn = c.Entries
+	w.cacheStored = w.o.Store != nil && c.Epoch == epoch
+}
+
+// file records a regular source file and resolves its blob id, or keeps it
+// pending while the stat cache is still loading.
 func (w *walker) file(ctx context.Context, j hashJob) {
 	w.mu.Lock()
 	w.res.Info[j.p] = infoOf(j.info, j.key, j.info.Size())
 	w.res.Stats.Files++
 	w.res.Stats.Bytes += j.info.Size()
 	w.mu.Unlock()
+	select {
+	case <-w.cacheReady:
+		w.resolvePending(ctx)
+		w.resolve(ctx, j)
+	default:
+		w.pending = append(w.pending, j)
+	}
+}
+
+// resolvePending resolves the files met before the stat cache was loaded.
+func (w *walker) resolvePending(ctx context.Context) {
+	for _, j := range w.pending {
+		w.resolve(ctx, j)
+	}
+	w.pending = nil
+}
+
+// resolve reuses a known blob id when stat data proves the content unchanged,
+// else queues hashing. The stat cache comes first: it holds work-tree content
+// ids, so files git converts need no question to git once captured.
+func (w *walker) resolve(ctx context.Context, j hashJob) {
 	if e, ok := w.cacheIn[j.p]; ok && e.matches(j.info, j.key, j.mode) && (w.o.Store == nil || w.cacheStored || w.o.Store.Has(e.OID)) {
 		w.mu.Lock()
 		w.res.Files[j.p] = store.File{Mode: j.mode, ID: e.OID}

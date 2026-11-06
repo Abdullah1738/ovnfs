@@ -7,7 +7,7 @@ import (
 )
 
 // cacheObjectLimit is the largest object kept in memory; bigger blobs are
-// served from their object files, where reads stream instead of pinning RAM.
+// served by Open each time instead of pinning RAM.
 const cacheObjectLimit = 1 << 20
 
 // blobCache keeps small immutable object bodies in memory by id, evicting the
@@ -112,8 +112,8 @@ func (s *Store) CacheUsage() (used, limit int64) {
 	return s.cache.resident(), s.cache.budget
 }
 
-// Cached returns a small stored blob's bytes from memory, loading it from its object
-// file on first use. ok is false when the cache is off, the object is larger than the
+// Cached returns a small stored blob's bytes from memory, loading it from its pack
+// or object file on first use. ok is false when the cache is off, the object is larger than the
 // per-object limit, or it is missing. The slice is shared and immutable: callers must not modify it.
 func (s *Store) Cached(id OID) (data []byte, ok bool) {
 	if s.cache == nil || !id.Valid() {
@@ -126,6 +126,16 @@ func (s *Store) Cached(id OID) (data []byte, ok bool) {
 	// drops what it deletes: a deleted object is never made resident again.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if e, ok := s.packs.lookup(rawOf(id)); ok {
+		if !s.cache.fits(int64(e.raw)) {
+			return nil, false
+		}
+		data, ok, err := s.readPacked(rawOf(id))
+		if !ok || err != nil {
+			return nil, false
+		}
+		return s.cache.add(id, data), true
+	}
 	p := s.objectPath(id)
 	info, err := os.Lstat(p)
 	if err != nil || !info.Mode().IsRegular() || !s.cache.fits(info.Size()) {

@@ -86,8 +86,9 @@ func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) er
 	return nil
 }
 
-// CopyGitdir copies a checkout's git directory for a fork or snapshot, linking the
-// copy's objects to the shared directory instead of copying them.
+// CopyGitdir copies a private git directory to the new path dst, linking the copy's
+// objects to the shared directory instead of copying them. The registry uses it only
+// for snapshots taken by builds that saved a whole directory copy per snapshot.
 func CopyGitdir(src, dst, objects string) error {
 	if err := os.Mkdir(dst, 0o755); err != nil {
 		return err
@@ -107,11 +108,122 @@ func CopyGitdir(src, dst, objects string) error {
 	return os.Symlink(objects, filepath.Join(dst, "objects"))
 }
 
-// MarkCheckout identifies only this private git directory as an ovnfs checkout. Using an
-// explicit file keeps both inherited user config and the source repo out of it.
-func MarkCheckout(ctx context.Context, gitdir, name string) error {
-	_, err := run(exec.CommandContext(ctx, "git", "config", "--file", filepath.Join(gitdir, "config"), "ovnfs.checkout", name))
-	return err
+// MarkCheckout sets ovnfs.checkout to name in a private git directory's own config, so
+// only this directory identifies as an ovnfs checkout (inherited user config and the
+// source repo stay unmarked). The registry calls it whenever it creates or reopens a
+// checkout; it edits the file in place of exec'ing git config, keeps every other line,
+// and leaves the file untouched when the marker already names the checkout.
+func MarkCheckout(gitdir, name string) error {
+	path := filepath.Join(gitdir, "config")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	marked := markConfig(string(data), name)
+	if marked == string(data) {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(gitdir, ".config-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	_, err = f.WriteString(marked)
+	if err == nil {
+		err = f.Chmod(info.Mode().Perm())
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// markConfig rewrites git config text so its [ovnfs] section holds exactly one
+// checkout = name, placed right after the first [ovnfs] header (or in a new section
+// at the end); every other line, comments and subsections included, is kept.
+func markConfig(config, name string) string {
+	var out []string
+	insert, inSection, continued := -1, false, false
+	for _, line := range strings.SplitAfter(config, "\n") {
+		if line == "" {
+			continue
+		}
+		if continued {
+			continued = continuesLine(line)
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			end := strings.IndexByte(trimmed, ']')
+			if end < 0 {
+				inSection = false
+				out = append(out, line)
+				continue
+			}
+			inSection = strings.EqualFold(strings.TrimSpace(trimmed[1:end]), "ovnfs")
+			if inSection && isCheckoutKey(trimmed[end+1:]) {
+				// "[ovnfs] checkout = old" keeps its header and loses the old value.
+				continued = continuesLine(line)
+				line = trimmed[:end+1] + "\n"
+			}
+			out = append(out, line)
+			if inSection && insert < 0 {
+				insert = len(out)
+			}
+			continue
+		}
+		if inSection && isCheckoutKey(trimmed) {
+			continued = continuesLine(line)
+			continue
+		}
+		out = append(out, line)
+	}
+	entry := "\tcheckout = " + configValue(name) + "\n"
+	if insert < 0 {
+		if n := len(out); n != 0 && !strings.HasSuffix(out[n-1], "\n") {
+			out[n-1] += "\n"
+		}
+		out = append(out, "[ovnfs]\n", entry)
+	} else {
+		out = append(out[:insert], append([]string{entry}, out[insert:]...)...)
+	}
+	return strings.Join(out, "")
+}
+
+// isCheckoutKey reports whether a config line inside a section sets the checkout variable.
+func isCheckoutKey(line string) bool {
+	line = strings.TrimSpace(line)
+	key := line
+	if i := strings.IndexAny(line, "= \t"); i >= 0 {
+		key = line[:i]
+	}
+	return strings.EqualFold(key, "checkout")
+}
+
+// continuesLine reports whether a config line ends in an unescaped backslash, which
+// continues its value on the next line.
+func continuesLine(line string) bool {
+	line = strings.TrimRight(line, "\r\n")
+	n := len(line) - len(strings.TrimRight(line, `\`))
+	return n%2 == 1
+}
+
+// configValue spells a git config value, quoting and escaping it when git would
+// otherwise trim, split or misread it.
+func configValue(v string) string {
+	if v != "" && v == strings.TrimSpace(v) && !strings.ContainsAny(v, "\"\\#;\n\t") {
+		return v
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`)
+	return `"` + r.Replace(v) + `"`
 }
 
 // WriteGitfile points a checkout's root at its private git directory.

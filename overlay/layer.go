@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // Bottom is the read-only filesystem beneath an overlay's immutable layers.
@@ -39,10 +40,17 @@ type Entry struct {
 }
 
 // Layer is a frozen directory indexed once and safe for concurrent readers.
+// Its files start raw in the directory; [Layer.Store] moves those snapshot
+// hashing kept in the store out of it, and both backings serve the same view.
 type Layer struct {
 	dir      string
 	entries  map[string]Entry
 	children map[string]map[string]Entry
+	storing  sync.Mutex        // serializes [Layer.Store]
+	mu       sync.RWMutex      // guards blobs, ids and tree; held shared while raw files are read, see [Layer.Content]
+	blobs    Blobs             // nil while every entry is raw
+	ids      map[string]string // path → blob id of a stored file's content or symlink's target
+	tree     string            // store tree reaching every stored blob; "" when none
 }
 
 // IndexLayer indexes a frozen upper after its staging work directory is removed.
@@ -113,7 +121,9 @@ func indexLayer(dir string, live bool) (*Layer, error) {
 	return l, err
 }
 
-// Dir returns the host directory backing the immutable layer.
+// Dir returns the host path of the immutable layer: the directory of its raw
+// files and, once stored, its manifest; or the manifest file alone once
+// nothing raw remains. Garbage collection removes it with the layer.
 func (l *Layer) Dir() string { return l.dir }
 
 // Get looks up a canonical overlay path without touching the filesystem.

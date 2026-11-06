@@ -74,7 +74,7 @@ func CreateRemote(c Config, res source.Result, r Remote) (*Base, error) {
 	if err := os.MkdirAll(c.StateDir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := writeJSON(filepath.Join(c.StateDir, captureFile), res); err != nil {
+	if err := saveCapture(c.StateDir, &res); err != nil {
 		return nil, err
 	}
 	m := Meta{ID: c.ID, ForkTime: time.Now().UTC(), Tree: res.Tree, Remote: &r}
@@ -290,7 +290,7 @@ func (v remoteBottom) Open(p string) (overlay.Content, error) {
 	if data, ok := v.b.config.Store.Cached(e.oid); ok {
 		return overlay.ByteContent(data), nil
 	}
-	return openObject(v.b.config.Store, e.oid)
+	return v.b.config.Store.Open(e.oid)
 }
 
 // Readlink returns a symlink's target, fetching it if needed.
