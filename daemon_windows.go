@@ -27,16 +27,19 @@ func lockStart(state string) (*os.File, error) {
 	return f, nil
 }
 
-// detachedProcess starts the daemon without a console, in its own process group
-// and, when the invoking job allows it, outside that job: an OpenSSH session
-// kills its job's processes at logout. A job forbidding breakaway keeps the
-// daemon, which then ends with that job.
+// detachedProcess starts the daemon on a console of its own that has no
+// window, in its own process group and, when the invoking job allows it,
+// outside that job: an OpenSSH session kills its job's processes at logout. A
+// job forbidding breakaway keeps the daemon, which then ends with that job.
+// DETACHED_PROCESS would leave the daemon with no console at all, and Windows
+// then opens a visible one for every console program it runs (git, net, ssh);
+// the hidden console is inherited by those children instead.
 func detachedProcess() *syscall.SysProcAttr {
-	flags := uint32(windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP)
+	flags := uint32(windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP)
 	if mayLeaveJob() {
 		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
 	}
-	return &syscall.SysProcAttr{CreationFlags: flags, HideWindow: true}
+	return &syscall.SysProcAttr{CreationFlags: flags}
 }
 
 // mayLeaveJob reports whether this process runs in a job that lets children
