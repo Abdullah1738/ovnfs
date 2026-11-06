@@ -695,3 +695,36 @@ func TestSMBOpenAcrossCheckpoint(t *testing.T) {
 	c.close(child)
 	c.close(old)
 }
+
+// TestSMBDirectoryLinks describes a symlink to a directory as NTFS does: its
+// attributes carry FILE_ATTRIBUTE_DIRECTORY, and RemoveDirectory's open of the
+// link itself (FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT) removes the link,
+// not the directory it names.
+func TestSMBDirectoryLinks(t *testing.T) {
+	f := newStack(t, map[string]string{"dir/in": "deep", "file": "lower"})
+	f.create(t, "alpha")
+	nodes := f.export.Nodes()
+	for link, target := range map[string]string{"alpha/dirlink": "dir", "alpha/filelink": "file"} {
+		if err := nodes.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := startSMB(t, f)
+	for name, attrs := range map[string]uint32{`alpha\dirlink`: 0x410, `alpha\filelink`: 0x420} {
+		id, r := c.open(name, 1, 0x200000)
+		smbExpect(t, r, smbOK)
+		if got := binary.LittleEndian.Uint32(c.queryInfo(id, 1, 35, 0)); got != attrs {
+			t.Errorf("%s attributes = %#x, want %#x", name, got, attrs)
+		}
+		c.close(id)
+	}
+	id, r := c.open(`alpha\dirlink`, 1, 0x201001) // FILE_DIRECTORY_FILE|FILE_DELETE_ON_CLOSE|FILE_OPEN_REPARSE_POINT
+	smbExpect(t, r, smbOK)
+	c.close(id)
+	if _, err := nodes.Lstat("alpha/dirlink"); !os.IsNotExist(err) {
+		t.Fatalf("link survived removal: %v", err)
+	}
+	if _, err := nodes.Stat("alpha/dir/in"); err != nil {
+		t.Fatalf("removing the link touched its target: %v", err)
+	}
+}

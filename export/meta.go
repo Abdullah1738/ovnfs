@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"sync"
 	"sync/atomic"
 	"syscall"
 
@@ -23,7 +24,7 @@ type nodeFS struct {
 // ReadDir hides [overlay.AppleDouble] sidecars (fs::copy and cp copy their
 // xattrs too). They must stay creatable and reachable by name, or xattr
 // writes and therefore copies fail, but listing them would show tools like
-// git and cargo a file per real file.
+// git and cargo a file per real file. Symlinks are typed as by [nodeFS.Lstat].
 //
 // The complete listing also tells the node table which children may take
 // derived ids.
@@ -37,10 +38,47 @@ func (n *nodeFS) ReadDir(name string) ([]os.FileInfo, error) {
 	out := infos[:0]
 	for _, info := range infos {
 		if !overlay.AppleDouble(info.Name()) {
-			out = append(out, info)
+			out = append(out, n.linked(path.Join(name, info.Name()), info))
 		}
 	}
 	return out, nil
+}
+
+// Lstat describes name without following it; see [link] for symlinks.
+func (n *nodeFS) Lstat(name string) (os.FileInfo, error) {
+	info, err := n.Filesystem.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	return n.linked(name, info), nil
+}
+
+// linked returns a symlink's info as a [link]; other infos pass through.
+func (n *nodeFS) linked(p string, info os.FileInfo) os.FileInfo {
+	if info.Mode()&os.ModeSymlink == 0 {
+		return info
+	}
+	return &link{FileInfo: info, fs: n.Filesystem, path: p}
+}
+
+// link is a symlink's metadata that resolves its target only when asked
+// whether it is a directory, which only the frontends serving Windows
+// clients do: Windows enters a link only when it is marked as a directory.
+type link struct {
+	os.FileInfo
+	fs   billy.Filesystem
+	path string
+	once sync.Once
+	dir  bool
+}
+
+// LinksToDir implements [ntinfo.DirLink].
+func (l *link) LinksToDir() bool {
+	l.once.Do(func() {
+		target, err := l.fs.Stat(l.path)
+		l.dir = err == nil && target.IsDir()
+	})
+	return l.dir
 }
 
 // Link forwards hard links without coupling the protocol to the router type.

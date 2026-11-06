@@ -690,10 +690,12 @@ func finishCreate(r *request, a createArgs, info os.FileInfo, epoch uint64) ([]b
 	if !exists && (a.disposition == 1 || a.disposition == 4) {
 		return nil, statusObjectNameNotFound
 	}
-	if exists && info.IsDir() && a.options&createNonDirectory != 0 {
+	// A directory symlink opened as itself counts as a directory, as on NTFS:
+	// RemoveDirectory opens it with FILE_DIRECTORY_FILE.
+	if exists && ntinfo.IsDir(info) && a.options&createNonDirectory != 0 {
 		return nil, statusFileIsADirectory
 	}
-	if exists && !info.IsDir() && a.options&createDirectory != 0 {
+	if exists && !ntinfo.IsDir(info) && a.options&createDirectory != 0 {
 		return nil, statusNotADirectory
 	}
 	if exists && info.IsDir() && (a.disposition == 0 || a.disposition == 4 || a.disposition == 5) {

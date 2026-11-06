@@ -244,10 +244,11 @@ func (x *fileSystem) Open(_ *gowinfsp.FileSystemRef, name string, options, acces
 	if err != nil {
 		return 0, status(err)
 	}
+	// A directory symlink opened as itself counts as a directory, as on NTFS.
 	switch {
-	case options&windows.FILE_DIRECTORY_FILE != 0 && !info.IsDir():
+	case options&windows.FILE_DIRECTORY_FILE != 0 && !ntinfo.IsDir(info):
 		return 0, windows.STATUS_NOT_A_DIRECTORY
-	case options&windows.FILE_NON_DIRECTORY_FILE != 0 && info.IsDir():
+	case options&windows.FILE_NON_DIRECTORY_FILE != 0 && ntinfo.IsDir(info):
 		return 0, windows.STATUS_FILE_IS_A_DIRECTORY
 	}
 	h := &handle{ino: x.nodes.ID(p), append: access&writeAccess == windows.FILE_APPEND_DATA}

@@ -27,10 +27,23 @@ func FromFiletime(v uint64) time.Time {
 	return time.Unix(int64(v/10000000)-windowsEpoch, int64(v%10000000)*100).UTC()
 }
 
-// Attributes maps filesystem mode bits to the FILE_ATTRIBUTE_* mask Windows clients see.
+// DirLink is implemented by symlink metadata that can tell whether the
+// link's target is a directory.
+type DirLink interface{ LinksToDir() bool }
+
+// IsDir reports a directory or, as NTFS directory symlinks count as
+// directories, a symlink to one.
+func IsDir(info os.FileInfo) bool {
+	l, ok := info.(DirLink)
+	return info.IsDir() || ok && l.LinksToDir()
+}
+
+// Attributes maps filesystem mode bits to the FILE_ATTRIBUTE_* mask Windows
+// clients see. A symlink to a directory is a directory (see [IsDir]):
+// Windows tools take any other link for a file.
 func Attributes(info os.FileInfo) uint32 {
 	var a uint32 = 0x20
-	if info.IsDir() {
+	if IsDir(info) {
 		a = 0x10
 	}
 	if info.Mode()&os.ModeSymlink != 0 {

@@ -90,6 +90,13 @@ file symlinks (directory symlinks cannot be created). Open files can be deleted
 and renamed over, as on Unix. The driver caches metadata for one second and
 never caches data.
 
+### Links
+
+Both frontends report a symlink whose target is a directory with
+`FILE_ATTRIBUTE_DIRECTORY`, as NTFS directory symlinks are: Windows tools enter
+only links marked so. Opened as itself, such a link counts as a directory, so
+`rmdir` removes it.
+
 ### Unix modes and Defender
 
 Unix mode bits that NTFS cannot hold (execute, setuid, setgid, sticky, and any
