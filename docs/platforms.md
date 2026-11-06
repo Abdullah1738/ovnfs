@@ -124,4 +124,5 @@ refreshes; only a file open for writing is looked up on the host.
 A live symlink whose absolute target lies inside the folder reads as the same
 path relative to the link, so in a checkout it names the checkout's copy:
 Bun on Windows links workspace packages in `node_modules` by absolute path.
-Absolute targets outside the folder stay as stored.
+Absolute targets outside the folder stay as stored. Windows junctions, in
+live paths and in source alike, read as the directory symlinks they act as.

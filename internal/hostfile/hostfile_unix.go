@@ -17,3 +17,6 @@ func Remove(name string) error { return os.Remove(name) }
 
 // CreateTemp is [os.CreateTemp].
 func CreateTemp(dir, pattern string) (*os.File, error) { return os.CreateTemp(dir, pattern) }
+
+// Linked returns info: Unix has no junctions.
+func Linked(_ string, info os.FileInfo) os.FileInfo { return info }

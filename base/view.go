@@ -211,7 +211,7 @@ func (b *Base) resolve(p string) (string, os.FileInfo, error) {
 	}
 	if e, ok := b.sources[p]; ok {
 		host := b.lower(p)
-		current, err := os.Lstat(host)
+		current, err := hostfile.Lstat(host)
 		if e.mode.IsDir() {
 			if err == nil && current.IsDir() {
 				return host, current, nil
@@ -303,7 +303,7 @@ func (b *Base) live(p string) (string, os.FileInfo, error) {
 		return "", nil, absent(p)
 	}
 	host := b.lower(p)
-	info, err := os.Lstat(host)
+	info, err := hostfile.Lstat(host)
 	if err != nil {
 		return "", nil, err
 	}
@@ -344,7 +344,8 @@ func (b *Base) derivedRoot(p string) (root string, live bool) {
 // liveDir lists live directory p from the folder's own listing, whose entries
 // need no further proof: p's ancestors were just proven and p was lstat'ed.
 func (b *Base) liveDir(p string) ([]os.FileInfo, error) {
-	entries, err := os.ReadDir(b.lower(p))
+	dir := b.lower(p)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +358,7 @@ func (b *Base) liveDir(p string) ([]os.FileInfo, error) {
 			}
 			return nil, err
 		}
-		out = append(out, info)
+		out = append(out, hostfile.Linked(filepath.Join(dir, e.Name()), info))
 	}
 	return out, nil
 }

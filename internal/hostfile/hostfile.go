@@ -5,10 +5,19 @@
 // read-only files are replaced or deleted without touching their attribute, as
 // on Unix.
 // Windows still refuses to rename a directory while any file below it is open;
-// see [overlay.FS.CloseFiles].
+// see [overlay.FS.CloseFiles]. [Lstat] describes Windows junctions as symlinks.
 package hostfile
 
 import "os"
 
 // Open opens name for reading; see [OpenFile].
 func Open(name string) (*os.File, error) { return OpenFile(name, os.O_RDONLY, 0) }
+
+// Lstat is [os.Lstat] with [Linked] applied.
+func Lstat(name string) (os.FileInfo, error) {
+	info, err := os.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	return Linked(name, info), nil
+}

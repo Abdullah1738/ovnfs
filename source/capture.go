@@ -15,6 +15,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/git"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/rules"
 	"github.com/stencil-hq/ovnfs/store"
 )
@@ -264,6 +265,7 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 			w.root(p, rules.Hidden, nil, fileKey{})
 			continue
 		}
+		info = hostfile.Linked(w.abs(p), info)
 		key := keyOf(info)
 		class := rules.Source
 		if rule, ok := w.o.Rules.Match(p, w.domains.Facts(Dir(w.o.Root), p, info)); ok {

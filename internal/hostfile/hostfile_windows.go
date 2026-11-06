@@ -188,6 +188,26 @@ func CreateTemp(dir, pattern string) (*os.File, error) {
 	return nil, &os.PathError{Op: "createtemp", Path: filepath.Join(dir, pattern), Err: os.ErrExist}
 }
 
+// Linked describes a junction, which Go reports as an irregular file since Go
+// 1.23, as the directory symlink it acts as; [os.Readlink] reads its target.
+// info is name's [os.Lstat] or [os.DirEntry.Info].
+func Linked(name string, info os.FileInfo) os.FileInfo {
+	if info.Mode()&os.ModeIrregular == 0 {
+		return info
+	}
+	// Only symlinks and junctions have a target; other reparse points stay irregular.
+	if _, err := os.Readlink(name); err != nil {
+		return info
+	}
+	return junction{info}
+}
+
+// junction is a junction's metadata typed as a symlink.
+type junction struct{ os.FileInfo }
+
+// Mode replaces the irregular type with the symlink type.
+func (j junction) Mode() os.FileMode { return j.FileInfo.Mode()&^os.ModeIrregular | os.ModeSymlink }
+
 // longPath adds the \\?\ prefix to long absolute drive paths, which the os
 // package does internally and plain CreateFile needs (MAX_PATH is 260).
 func longPath(p string) string {

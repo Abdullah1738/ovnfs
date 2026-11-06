@@ -13,6 +13,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/git"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/source"
 	"github.com/stencil-hq/ovnfs/store"
@@ -607,7 +608,7 @@ func hasMarkersAt(name string) (bool, error) {
 
 // leafAt reads the folder's current state of a path as a tree leaf (zero when absent).
 func leafAt(name string) (store.File, bool, error) {
-	info, err := os.Lstat(name)
+	info, err := hostfile.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return store.File{}, false, nil
 	}
