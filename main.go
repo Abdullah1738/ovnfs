@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"syscall"
@@ -88,8 +89,12 @@ func run(args []string) error {
 		return nil
 	}
 	verb, rest := fs.Arg(0), fs.Args()[1:]
-	if verb == "help" {
+	switch verb {
+	case "help":
 		printUsage(os.Stdout)
+		return nil
+	case "version":
+		fmt.Println(version())
 		return nil
 	}
 	if err := c.resolveDirs(); err != nil {
@@ -125,6 +130,17 @@ func (c *cli) resolveDirs() error {
 	return nil
 }
 
+// version names this build: the module version Go stamped into it (the release
+// tag under go install …@vX.Y.Z, a VCS pseudo-version when built in a clone),
+// then the toolchain and platform.
+func version() string {
+	v := "(devel)"
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		v = bi.Main.Version
+	}
+	return fmt.Sprintf("ovnfs %s %s %s/%s", v, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
+
 // printUsage lists every verb, daemon operations first in api.Ops order.
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: ovnfs [--state DIR] [--mount DIR] [--json] VERB [ARGS]")
@@ -143,6 +159,7 @@ func printUsage(w io.Writer) {
 	}
 	fmt.Fprintf(tw, "  serve [-proto nfs|smb|fuse|winfsp] [-listen ADDR]\trun the daemon in the foreground\n")
 	fmt.Fprintf(tw, "  help\tshow this help\n")
+	fmt.Fprintf(tw, "  version\tprint the version and toolchain this binary was built from\n")
 	tw.Flush()
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "options (before the verb or among its arguments):")
