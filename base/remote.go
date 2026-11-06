@@ -19,9 +19,11 @@ import (
 )
 
 // Remote bases serve the attached snapshot from metadata alone: listing and
-// stat never move content. The first open of a file fetches its blob from the
-// source machine into the store, where it stays cached and verified by id; that
-// open also prefetches the directory's other small files in one batch.
+// stat never move content. The first open of a file copies its blob into the
+// store, where it stays cached and verified by id: from the mirror of the
+// source's git origins when that holds it, else from the source machine. An
+// open that crosses the link also prefetches the directory's other small files
+// the mirror lacks, in one batch.
 
 // fetchTimeout bounds how long a read waits for the source machine.
 const fetchTimeout = 2 * time.Minute
@@ -81,7 +83,7 @@ func CreateRemote(c Config, res source.Result, r Remote) (*Base, error) {
 
 // ensure fetches one blob unless the store already holds it.
 func (r *remoteState) ensure(p string, id store.OID) error {
-	if r.b.config.Store.Has(id) {
+	if r.b.config.Store.Has(id) || r.fromMirror(p, id) {
 		return nil
 	}
 	if r.b.config.Fetch == nil {
@@ -97,6 +99,31 @@ func (r *remoteState) ensure(p string, id store.OID) error {
 	}
 	return nil
 }
+
+// fromMirror copies id's blob from the mirror into the store; false when the
+// mirror lacks it or returned bytes that do not hash to id.
+func (r *remoteState) fromMirror(p string, id store.OID) bool {
+	if !r.b.mirrored(id) {
+		return false
+	}
+	data, err := r.b.config.Mirror.Blob(id)
+	if err == nil {
+		var got store.OID
+		if got, err = r.b.config.Store.PutBytes(data); err == nil && got != id {
+			err = fmt.Errorf("content hashes to %s", got)
+		}
+	}
+	if err != nil {
+		if r.b.config.OnFault != nil {
+			r.b.config.OnFault(fmt.Sprintf("read %s from the git mirror: %v; fetching it from %s", p, err, r.b.meta.Remote.Source))
+		}
+		return false
+	}
+	return true
+}
+
+// mirrored reports whether the mirror of this base's git origins holds id.
+func (b *Base) mirrored(id store.OID) bool { return b.config.Mirror != nil && b.config.Mirror.Has(id) }
 
 // prefetch requests, in one batch, the small uncached files of the directory
 // holding p and then of its subdirectories, breadth first, within a budget.
@@ -133,7 +160,7 @@ func (r *remoteState) prefetch(p string) {
 				continue
 			}
 			size := r.b.capture.Info[q].Size
-			if q == p || !e.mode.IsRegular() || size > prefetchFileLimit || r.b.config.Store.Has(e.oid) {
+			if q == p || !e.mode.IsRegular() || size > prefetchFileLimit || r.b.config.Store.Has(e.oid) || r.b.mirrored(e.oid) {
 				continue
 			}
 			if len(wants) == prefetchBatchFiles || total+size > prefetchBatchBytes {
@@ -158,15 +185,16 @@ func (r *remoteState) prefetch(p string) {
 	}()
 }
 
-// Uncached returns the blob a remote base would fetch to read the regular
-// file p; false for local bases, other entries, and content already stored.
+// Uncached returns the blob a remote base would fetch over the link to read the
+// regular file p; false for local bases, other entries, and content already
+// stored or held by the git mirror.
 func (b *Base) Uncached(p string) (Want, bool) {
 	if b.remote == nil {
 		return Want{}, false
 	}
 	p = cleanPath(p)
 	e, ok := b.sources[p]
-	if !ok || !e.mode.IsRegular() || b.config.Store.Has(e.oid) {
+	if !ok || !e.mode.IsRegular() || b.config.Store.Has(e.oid) || b.mirrored(e.oid) {
 		return Want{}, false
 	}
 	return Want{ID: e.oid, Path: p, Size: b.capture.Info[p].Size}, true
@@ -250,8 +278,11 @@ func (v remoteBottom) Open(p string) (overlay.Content, error) {
 		return nil, &fs.PathError{Op: "open", Path: p, Err: syscall.EISDIR}
 	}
 	if !v.b.config.Store.Has(e.oid) {
-		// Siblings ride along on the miss's round trip; a hit has none to share.
-		v.b.remote.prefetch(p)
+		// Siblings ride along on a link miss's round trip; a hit, or a blob the
+		// mirror holds, has none to share.
+		if !v.b.mirrored(e.oid) {
+			v.b.remote.prefetch(p)
+		}
 		if err := v.b.remote.ensure(p, e.oid); err != nil {
 			return nil, err
 		}

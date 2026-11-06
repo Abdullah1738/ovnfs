@@ -73,7 +73,15 @@ func Plan(ctx context.Context, in PlanInput) (api.PlanReply, error) {
 					return api.PlanReply{}, err
 				}
 			}
-			entries, err := repo.LsTree(ctx, commit)
+			// The commit attach names for the remote to fetch: HEAD when pushed,
+			// else its merge base with the upstream.
+			fetched := commit
+			if o, ok, err := repo.Origin(ctx, r.Head); err != nil {
+				return api.PlanReply{}, err
+			} else if ok {
+				fetched = o.Commit
+			}
+			entries, err := repo.LsTree(ctx, fetched)
 			if err != nil {
 				return api.PlanReply{}, err
 			}

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -43,6 +44,9 @@ type Meta struct {
 type Remote struct {
 	Node   string `json:"node"`   // the source daemon's id
 	Source string `json:"source"` // display, e.g. "laptop:/src/app"
+	// Origins are commits on the source's git upstreams; content they hold is
+	// read from a local mirror of them (Config.Mirror) instead of the link.
+	Origins []git.Origin `json:"origins,omitempty"`
 }
 
 // Want is a blob a remote base needs before it can serve a read.
@@ -55,11 +59,19 @@ type Want struct {
 // Fetcher makes wanted blobs present in the store, from the machine a remote base came from.
 type Fetcher func(ctx context.Context, wants []Want) error
 
+// Mirror holds blobs fetched from remote bases' git origins (Remote.Origins) on
+// this machine. A remote base reads what it holds locally; the link serves the rest.
+type Mirror interface {
+	Has(id store.OID) bool
+	Blob(id store.OID) ([]byte, error)
+}
+
 // Config supplies storage and event sinks.
 type Config struct {
 	ID, StateDir string
 	Store        *store.Store
 	Fetch        Fetcher // remote bases only
+	Mirror       Mirror  // remote bases only; nil reads everything through Fetch
 	OnFault      func(msg string)
 }
 
@@ -229,6 +241,7 @@ func (b *Base) Meta() Meta {
 	m := b.meta
 	if m.Remote != nil {
 		r := *m.Remote
+		r.Origins = slices.Clone(r.Origins)
 		m.Remote = &r
 	}
 	return m

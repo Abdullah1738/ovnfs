@@ -98,15 +98,17 @@ func Open(c Config) (*Registry, error) {
 	r.stateLock = stateLock
 	r.node = c.Node
 	r.mounts = mountPaths(c.Mount)
+	r.mirror = newMirror(filepath.Join(c.State, "mirror.git"), func(message string) { r.enqueueNotice(baseNotice{fault: message}) })
 	cleanup := func() {
 		for _, b := range r.bases {
 			b.view.Close()
 		}
+		r.mirror.close()
 	}
 	for _, meta := range d.Bases {
 		config := r.baseConfig(meta.ID)
 		if meta.Remote != nil {
-			config.Fetch = r.fetcher(meta.Remote)
+			config = r.remoteConfig(meta.ID, meta.Remote)
 		}
 		view, openErr := base.Open(config, meta)
 		if openErr != nil {
@@ -120,6 +122,9 @@ func Open(c Config) (*Registry, error) {
 			return nil, coded(openErr)
 		}
 		r.bases[meta.ID] = b
+		if meta.Remote != nil {
+			r.mirror.want(meta.Remote.Origins)
+		}
 	}
 	for _, disk := range d.Layers {
 		if r.bases[disk.Base] == nil && !disk.Portable {
@@ -313,6 +318,7 @@ func (r *Registry) Close() error {
 		r.hasher.close()
 		close(r.stop)
 		r.workers.Wait()
+		r.mirror.close()
 		r.mu.Lock()
 		for _, h := range r.checkouts {
 			h.freeze.Lock()

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/base"
+	"github.com/stencil-hq/ovnfs/git"
 	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/peer"
 	"github.com/stencil-hq/ovnfs/rules"
@@ -29,15 +30,40 @@ func LinkKey(node, source string) string { return node + " " + source }
 // Store returns the object store remote reads are cached in.
 func (r *Registry) Store() *store.Store { return r.store }
 
-// fetcher routes a remote base's reads to whatever link currently connects its source.
-func (r *Registry) fetcher(remote *base.Remote) base.Fetcher {
+// remoteConfig is baseConfig for a base attached from another machine: its reads
+// go to the git mirror, then to whatever link currently connects its source.
+func (r *Registry) remoteConfig(id string, remote *base.Remote) base.Config {
 	key := LinkKey(remote.Node, remote.Source)
-	return func(ctx context.Context, wants []base.Want) error {
+	config := r.baseConfig(id)
+	config.Mirror = r.mirror
+	config.Fetch = func(ctx context.Context, wants []base.Want) error {
 		if r.config.Fetch == nil {
 			return errors.New("this daemon has no links")
 		}
 		return r.config.Fetch(ctx, key, wants)
 	}
+	return config
+}
+
+// offerOrigins names, for each repository of a capture with an upstream, a
+// commit there the remote machine can fetch committed content from instead of
+// asking this one. Repositories git cannot answer for are left out: their
+// content still crosses the link.
+func offerOrigins(ctx context.Context, d *source.Domains) []git.Origin {
+	if d == nil {
+		return nil
+	}
+	var origins []git.Origin
+	for _, info := range d.Repos() {
+		repo := d.Repo(info.Path)
+		if repo == nil {
+			continue
+		}
+		if o, ok, err := repo.Origin(ctx, info.Head); err == nil && ok {
+			origins = append(origins, o)
+		}
+	}
+	return origins
 }
 
 // Offer snapshots a checkout and describes it for attaching on another machine;
@@ -82,7 +108,8 @@ func (r *Registry) Offer(ctx context.Context, name, remoteName string) (peer.Off
 	if remoteName == "" {
 		remoteName = name
 	}
-	offer := peer.Offer{Node: r.node, Source: host + ":" + meta.Dir, Name: remoteName, Tree: store.OID(snap.Snapshot.Tree), Lock: h.base.lock, Files: entries, Roots: captured.Roots, Created: snap.Snapshot.Created}
+	offer := peer.Offer{Node: r.node, Source: host + ":" + meta.Dir, Name: remoteName, Tree: store.OID(snap.Snapshot.Tree), Lock: h.base.lock, Files: entries, Roots: captured.Roots, Created: snap.Snapshot.Created,
+		Origins: offerOrigins(ctx, h.base.view.Domains())}
 	return offer, baseBlobs{h.base.view}, snap.Snapshot, nil
 }
 
@@ -164,6 +191,7 @@ func (r *Registry) AttachRemote(ctx context.Context, o peer.Offer) (api.Checkout
 			if err == nil {
 				// The new base changes whatever the upper does not shadow.
 				r.invalidate(name, nil)
+				r.mirror.want(o.Origins)
 			}
 			return reply, err
 		}
@@ -196,9 +224,8 @@ func (r *Registry) AttachRemote(ctx context.Context, o peer.Offer) (api.Checkout
 		return api.Checkout{}, coded(err)
 	}
 	r.mu.Unlock()
-	remote := base.Remote{Node: o.Node, Source: o.Source}
-	config := r.baseConfig(id)
-	config.Fetch = r.fetcher(&remote)
+	remote := base.Remote{Node: o.Node, Source: o.Source, Origins: o.Origins}
+	config := r.remoteConfig(id, &remote)
 	view, err := base.CreateRemote(config, source.Result{Tree: tree, Files: files, Info: info, Roots: o.Roots}, remote)
 	if err == nil {
 		if err = writeLock(filepath.Join(config.StateDir, lockFile), o.Lock); err != nil {
@@ -212,6 +239,7 @@ func (r *Registry) AttachRemote(ctx context.Context, o peer.Offer) (api.Checkout
 	if err != nil {
 		return api.Checkout{}, err
 	}
+	r.mirror.want(o.Origins)
 	return reply.Checkout, nil
 }
 
@@ -283,9 +311,8 @@ func (r *Registry) reattachLocked(ctx context.Context, h *checkoutRecord, o peer
 		delete(r.intents, name)
 		return api.Checkout{}, coded(err)
 	}
-	remote := base.Remote{Node: o.Node, Source: o.Source}
-	config := r.baseConfig(id)
-	config.Fetch = r.fetcher(&remote)
+	remote := base.Remote{Node: o.Node, Source: o.Source, Origins: o.Origins}
+	config := r.remoteConfig(id, &remote)
 	view, err := base.CreateRemote(config, captured, remote)
 	if err == nil {
 		err = writeLock(filepath.Join(config.StateDir, lockFile), o.Lock)

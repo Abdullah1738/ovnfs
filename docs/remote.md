@@ -18,6 +18,22 @@ uncached files of its directory subtree in one batch. Cache roots arrive as
 empty directories; local and hidden paths never leave. Writes on the remote go
 to its own copy-on-write upper, and `diff`, `snap` and `fork` work there.
 
+### Committed content from the git upstream
+
+When a repository in the snapshot has an upstream, the offer also names its
+URL (without credentials) and a commit there: HEAD when the upstream contains
+it, else HEAD's merge base with the upstream. The remote fetches that commit,
+without history, into `mirror.git` in its state directory, in the background
+and with its own git credentials; git is never allowed to prompt, and only
+https, http, ssh, git and local transports are used. Until the commit arrives,
+reads go over the link as above. After that, every file whose content the
+commit holds is read from the mirror, verified against its id like any fetched
+blob, and only edited and untracked files cross the link; opening a file the
+mirror holds prefetches nothing. A remote that cannot fetch (no network, no
+credentials, an unpushed commit) reports a fault and keeps reading over the
+link. Commits stay in the mirror across restarts and for later attaches; delete
+`mirror.git` to reclaim its space.
+
 The link reconnects with backoff while the source daemon runs. Without it,
 cached content stays readable and uncached reads fail with EIO. A slow download
 for an open does not hold the overlay's namespace lock: unrelated reads and
@@ -32,14 +48,14 @@ lane and open the new snapshot beside it.
 `grep` and `glob` in an attached checkout walk its metadata on the remote, so
 listing costs no round trips. Before walking, they fetch the ignore files the
 walk reads in one batch; reading a cached file never prefetches its siblings.
-Grep then scans the files the remote has not fetched where their bytes are:
-the remote sends batches of blob ids with the pattern over the link, the source
-machine scans them, and only the results come back, so nothing they read enters
-the remote's store. Files written on the remote and fetched files are scanned
-locally, and the results merge in the usual path order. If the link fails a
-batch, grep reads those files through the checkout instead, fetching them as
-any read does. Searching repeatedly costs a round trip each time, since
-scanned files are never fetched.
+Grep then scans the files the remote has neither fetched nor mirrored where
+their bytes are: the remote sends batches of blob ids with the pattern over the
+link, the source machine scans them, and only the results come back, so nothing
+they read enters the remote's store. Files written on the remote, fetched files
+and files the git mirror holds are scanned locally, and the results merge in the
+usual path order. If the link fails a batch, grep reads those files through the
+checkout instead, fetching them as any read does. Searching repeatedly costs a
+round trip each time, since scanned files are never fetched.
 
 ## Pull
 

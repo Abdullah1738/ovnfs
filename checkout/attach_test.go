@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -462,5 +463,98 @@ func TestAttachFetchesLazily(t *testing.T) {
 	}
 	if _, err := reg.Apply(context.Background(), api.ApplyArgs{Checkout: h.Name}); err == nil {
 		t.Fatal("apply ran on a remote checkout")
+	}
+}
+
+// pushedRepo makes a repository folder whose commit is on a bare upstream, then
+// edits one tracked file and adds an untracked one. It returns the folder and the upstream.
+func pushedRepo(t *testing.T) (dir, upstream string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	isolateGit(t)
+	t.Setenv("HOME", t.TempDir())
+	dir = folder(t, map[string]string{"a/one.txt": "one", "a/two.txt": "two", "a/changed.txt": "before", "b/three.txt": "three"})
+	gitRun(t, dir, "init", "-q", "-b", "main")
+	gitRun(t, dir, "add", "--all")
+	gitRun(t, dir, "commit", "-qm", "init")
+	upstream = t.TempDir()
+	gitRun(t, upstream, "init", "-q", "--bare", "-b", "main")
+	gitRun(t, dir, "remote", "add", "origin", upstream)
+	gitRun(t, dir, "push", "-q", "-u", "origin", "main")
+	write(t, filepath.Join(dir, "a/changed.txt"), "after")
+	write(t, filepath.Join(dir, "a/new.txt"), "untracked")
+	time.Sleep(10 * time.Millisecond)
+	return dir, upstream
+}
+
+// offeredID is the blob id the offer names for p.
+func offeredID(t *testing.T, o peer.Offer, p string) store.OID {
+	t.Helper()
+	for _, e := range o.Files {
+		if e.Path == p {
+			return e.ID
+		}
+	}
+	t.Fatalf("%s not offered", p)
+	return ""
+}
+
+// TestAttachReadsCommittedContentFromOrigin: the remote fetches the pushed commit
+// from the folder's upstream, so committed files never cross the link (and stay
+// readable with the link down), while edited and untracked files still do.
+func TestAttachReadsCommittedContentFromOrigin(t *testing.T) {
+	dir, _ := pushedRepo(t)
+	src := newFixture(t)
+	src.newCheckout(dir, "app")
+	l := attachOverPipe(t, src, "app")
+	dst := &fixture{t: t, reg: l.reg}
+	one := offeredID(t, l.offer, "a/one.txt")
+	eventually(t, "the mirror never fetched the pushed commit", func() bool { return l.reg.mirror.Has(one) })
+
+	if got := dst.read(l.name, "a/one.txt"); got != "one" {
+		t.Fatalf("a/one.txt = %q", got)
+	}
+	if got := dst.read(l.name, "a/changed.txt"); got != "after" {
+		t.Fatalf("a/changed.txt = %q, want the folder's edit", got)
+	}
+	want := []store.OID{offeredID(t, l.offer, "a/changed.txt"), offeredID(t, l.offer, "a/new.txt")}
+	eventually(t, "the edit and its untracked sibling never crossed the link", func() bool { return l.servedCount() == len(want) })
+	l.served.mu.Lock()
+	for _, id := range want {
+		if l.served.served[id] == 0 {
+			t.Errorf("%s did not cross the link", id)
+		}
+	}
+	l.served.mu.Unlock()
+
+	l.stop()
+	for p, content := range map[string]string{"a/two.txt": "two", "b/three.txt": "three"} {
+		if got := dst.read(l.name, p); got != content {
+			t.Errorf("%s with the link down = %q, want it from the mirror", p, got)
+		}
+	}
+	if n := l.servedCount(); n != len(want) {
+		t.Fatalf("link served %d blobs, want only the %d the upstream lacks", n, len(want))
+	}
+}
+
+// TestAttachWithoutReachableOrigin reads everything over the link when this
+// machine cannot fetch the upstream.
+func TestAttachWithoutReachableOrigin(t *testing.T) {
+	dir, upstream := pushedRepo(t)
+	src := newFixture(t)
+	src.newCheckout(dir, "app")
+	if err := os.RemoveAll(upstream); err != nil {
+		t.Fatal(err)
+	}
+	l := attachOverPipe(t, src, "app")
+	dst := &fixture{t: t, reg: l.reg}
+	if got := dst.read(l.name, "b/three.txt"); got != "three" {
+		t.Fatalf("b/three.txt = %q", got)
+	}
+	if l.servedCount() == 0 {
+		t.Fatal("committed file was read without the link or the upstream")
 	}
 }

@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"github.com/stencil-hq/ovnfs/api"
+	"github.com/stencil-hq/ovnfs/git"
 	"github.com/stencil-hq/ovnfs/manifest"
 	"github.com/stencil-hq/ovnfs/rules"
 	"github.com/stencil-hq/ovnfs/store"
@@ -82,6 +83,10 @@ type Offer struct {
 	Files   []Entry                `json:"files"` // sorted by path
 	Roots   map[string]rules.Class `json:"roots"`
 	Created time.Time              `json:"created"`
+	// Origins are commits on the source's git upstreams. A remote that can
+	// fetch them reads committed content from there and asks this link only
+	// for the rest; older remotes ignore them.
+	Origins []git.Origin `json:"origins,omitempty"`
 }
 
 // Pulled contains a remote snapshot's source changes since the offered tree.
@@ -303,6 +308,11 @@ func (o *Offer) check() error {
 			}
 		default:
 			return fmt.Errorf("%s: unknown mode %o", e.Path, e.Mode)
+		}
+	}
+	for _, origin := range o.Origins {
+		if err := origin.Valid(); err != nil {
+			return err
 		}
 	}
 	return nil

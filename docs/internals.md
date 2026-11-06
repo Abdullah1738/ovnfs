@@ -69,6 +69,7 @@ forward or back. State of any other version is refused.
 | `git/` | private git directories |
 | `store/` | content as uncompressed git-format objects, so a blob is served as a plain file |
 | `nodes.log` | stable node ids; survive restarts and follow renames |
+| `mirror.git/` | shallow commits fetched from git upstreams of attached checkouts (see [remote](remote.md#committed-content-from-the-git-upstream)) |
 
 Unreferenced layers, bases and store objects are collected in the background.
 Captures store each new object with one read: files over 1 MiB are cloned where
