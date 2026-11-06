@@ -243,6 +243,8 @@ type createArgs struct {
 	leaseParentKey                      [16]byte
 	mode                                os.FileMode
 	posix                               bool
+	// lastLink: the name's last component is a link the server followed.
+	lastLink bool
 }
 
 // init registers the file lifecycle commands.
@@ -503,18 +505,18 @@ func createAttempt(r *request, a createArgs, cancelled <-chan struct{}) ([]byte,
 	default:
 	}
 	epoch := r.c.srv.st.epoch.Load()
-	name, info, st := resolveCreatePath(r.c.srv.FS, a.name, a.options&createOpenReparse != 0)
+	name, info, lastLink, st := resolveCreatePath(r.c.srv.FS, a.name, a.options&createOpenReparse != 0)
 	if st == statusSuccess && name != a.name && !exclusive {
 		// Links led to a name this transaction does not hold.
 		unlock()
 		unlock = g.lockAll()
 		epoch = r.c.srv.st.epoch.Load()
-		name, info, st = resolveCreatePath(r.c.srv.FS, a.name, a.options&createOpenReparse != 0)
+		name, info, lastLink, st = resolveCreatePath(r.c.srv.FS, a.name, a.options&createOpenReparse != 0)
 	}
 	if st != statusSuccess {
 		return nil, st, nil
 	}
-	a.name = name
+	a.name, a.lastLink = name, lastLink
 	if g.deletePending(a.name) {
 		return nil, statusDeletePending, nil
 	}
@@ -563,13 +565,14 @@ func createAttempt(r *request, a createArgs, cancelled <-chan struct{}) ([]byte,
 // resolveCreatePath follows relative links in the merged namespace, leaving a
 // final reparse-point open intact. It also returns the resolved name's
 // metadata as CREATE would read it: nil when the name is missing or ends in an
-// absolute link the backend follows itself. A backend lookup succeeds only
-// through directories, so an existing name, or a missing one in an existing
+// absolute link the backend follows itself; and whether the name's last
+// component is a link it followed. A backend lookup succeeds only through
+// directories, so an existing name, or a missing one in an existing
 // directory, costs one or two lookups instead of one per component.
-func resolveCreatePath(fs Backend, name string, openReparse bool) (string, os.FileInfo, uint32) {
+func resolveCreatePath(fs Backend, name string, openReparse bool) (string, os.FileInfo, bool, uint32) {
 	info, err := fs.Lstat(name)
 	if err == nil && (openReparse || info.Mode()&os.ModeSymlink == 0) {
-		return name, info, statusSuccess
+		return name, info, false, statusSuccess
 	}
 	if os.IsNotExist(err) && name != "" {
 		parent := path.Dir(name)
@@ -577,10 +580,13 @@ func resolveCreatePath(fs Backend, name string, openReparse bool) (string, os.Fi
 			parent = ""
 		}
 		if pi, pe := fs.Lstat(parent); pe == nil && pi.IsDir() {
-			return name, nil, statusSuccess
+			return name, nil, false, statusSuccess
 		}
 	}
 	links := 0
+	// Links before the last component keep it in place, so the first link
+	// followed at the end is the requested name's own.
+	lastLink := false
 	for start := 0; start < len(name); {
 		end := len(name)
 		if i := strings.IndexByte(name[start:], '/'); i >= 0 {
@@ -592,31 +598,32 @@ func resolveCreatePath(fs Backend, name string, openReparse bool) (string, os.Fi
 		info, err := fs.Lstat(name[:end])
 		if err != nil {
 			if os.IsNotExist(err) {
-				return name, nil, statusSuccess
+				return name, nil, lastLink, statusSuccess
 			}
-			return "", nil, ntinfo.Status(err)
+			return "", nil, false, ntinfo.Status(err)
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			if end < len(name) && !info.IsDir() {
-				return "", nil, statusNotADirectory
+				return "", nil, false, statusNotADirectory
 			}
 			if end == len(name) {
-				return name, info, statusSuccess
+				return name, info, lastLink, statusSuccess
 			}
 			start = end + 1
 			continue
 		}
 		if links == 40 {
-			return "", nil, statusTooManyLinks
+			return "", nil, false, statusTooManyLinks
 		}
 		links++
+		lastLink = lastLink || end == len(name)
 		target, err := fs.Readlink(name[:end])
 		if err != nil {
-			return "", nil, ntinfo.Status(err)
+			return "", nil, false, ntinfo.Status(err)
 		}
 		if ntinfo.IsAbs(target) {
 			// Absolute targets retain the backend's host-path semantics.
-			return name, nil, statusSuccess
+			return name, nil, lastLink, statusSuccess
 		}
 		tail := ""
 		if end < len(name) {
@@ -625,7 +632,7 @@ func resolveCreatePath(fs Backend, name string, openReparse bool) (string, os.Fi
 		name = strings.TrimPrefix(path.Clean("/"+path.Join(path.Dir(name[:end]), target, tail)), "/")
 		start = 0
 	}
-	return name, nil, statusSuccess
+	return name, nil, lastLink, statusSuccess
 }
 
 // createPipe opens a supported IPC named pipe without touching the overlay.
@@ -846,6 +853,13 @@ func finishCreate(r *request, a createArgs, info os.FileInfo, epoch uint64) ([]b
 	out := make([]byte, 88)
 	binary.LittleEndian.PutUint16(out, 89)
 	out[2] = oplock
+	if a.lastLink && r.c.dialect == 0x0311 {
+		// SMB2_CREATE_FLAG_REPARSEPOINT: the open went through a link. Without
+		// it, Windows files the target's metadata under the link's name for
+		// its cache lifetime, so the link stops reading as a link (lstat,
+		// readlink, and so realpath in tools such as tsc and bun).
+		out[3] = 1
+	}
 	binary.LittleEndian.PutUint32(out[4:], action)
 	appendCreateAttrs(r.c, out[8:], info)
 	putOpenID(out[64:], o.id)

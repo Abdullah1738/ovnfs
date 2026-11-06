@@ -102,6 +102,13 @@ A link created with a target that names its own checkout through the drive
 stored relative to the link: served as written, it would lead the daemon back
 into its own mount.
 
+The SMB server follows links itself, since Windows refuses by default to
+follow links between network paths. Over SMB 3.1.1 it flags an open that
+followed a link at the end of its path with `SMB2_CREATE_FLAG_REPARSEPOINT`;
+without the flag, Windows would describe the link by its target for its
+metadata cache lifetime, and realpath in tools such as tsc and Bun would
+stop seeing it.
+
 ### Unix modes and Defender
 
 Unix mode bits that NTFS cannot hold (execute, setuid, setgid, sticky, and any

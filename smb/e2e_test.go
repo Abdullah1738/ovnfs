@@ -912,3 +912,37 @@ func TestSMBMountRelativeLinks(t *testing.T) {
 	readEquals(t, c, id, "child data")
 	c.expectStatus(c.close(id), wireSuccess)
 }
+
+// TestSMBCreateFlagsFollowedLinks sets SMB2_CREATE_FLAG_REPARSEPOINT on an
+// open that followed a link named last in the path, and only there: not for a
+// link opened as itself, a link earlier in the path, or a plain name.
+func TestSMBCreateFlagsFollowedLinks(t *testing.T) {
+	fixture := startSMB(t, nil, func(lower, upper string) {
+		putDiskFile(t, lower, "dir/child", "child data")
+		for link, target := range map[string]string{"filelink": "dir/child", "dirlink": "dir", "chain": "dirlink"} {
+			if err := os.Symlink(target, filepath.Join(upper, link)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	c := guestClient(t, fixture)
+	for _, tc := range []struct {
+		name    string
+		options uint32
+		flagged bool
+	}{
+		{"filelink", 0x40, true},
+		{"dirlink", 0x1, true},
+		{"chain", 0x1, true},
+		{"filelink", 0x200040, false}, // FILE_OPEN_REPARSE_POINT: the link itself
+		{"dirlink/child", 0x40, false},
+		{"dir/child", 0x40, false},
+	} {
+		id, r := c.create(tc.name, 1, tc.options)
+		c.expectStatus(r, wireSuccess)
+		if flagged := r.body[3]&1 != 0; flagged != tc.flagged {
+			t.Errorf("%s (options %#x): REPARSEPOINT flag %v, want %v", tc.name, tc.options, flagged, tc.flagged)
+		}
+		c.expectStatus(c.close(id), wireSuccess)
+	}
+}
