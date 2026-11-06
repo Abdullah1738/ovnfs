@@ -1,0 +1,22 @@
+# Release archives, published by .github/workflows/release.yml on a v* tag.
+# The binary reports its version from the tag Go stamps into the build info
+# (ovnfs version), so no -X ldflags are needed.
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+changelog:
+  sort: asc

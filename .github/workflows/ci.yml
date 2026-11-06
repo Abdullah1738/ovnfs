@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go mod tidy
+        run: go mod tidy -diff
+      - name: go vet
+        run: |
+          for goos in linux darwin windows; do
+            echo "GOOS=$goos"
+            GOOS=$goos go vet ./...
+          done
+      - name: release build
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            race: -race
+          - os: macos-latest
+            race: -race
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # FUSE tests mount for real. Ubuntu's fusermount3 AppArmor profile only
+      # lets mounts go under the user's home, so test temp dirs move there.
+      - name: Set up FUSE
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # WinFsp tests mount real drives when WinFsp is installed, else skip.
+      - name: Set up WinFsp
+        if: runner.os == 'Windows'
+        run: choco install winfsp -y --no-progress
+      - name: go test
+        run: go test ${{ matrix.race }} ./...

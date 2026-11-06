@@ -1,5 +1,8 @@
 # ovnfs
 
+[![ci](https://github.com/stencil-hq/ovnfs/actions/workflows/ci.yml/badge.svg)](https://github.com/stencil-hq/ovnfs/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/stencil-hq/ovnfs.svg)](https://pkg.go.dev/github.com/stencil-hq/ovnfs)
+
 Checkouts for agents: isolated, copy-on-write views of any folder, a git
 repository or not, opened without copying it. Agents work in
 the checkout; you review with `diff` and merge back with a three-way `apply`.
@@ -16,8 +19,10 @@ extension beyond WinFsp where you install it.
 go install github.com/stencil-hq/ovnfs@latest
 ```
 
-or `go build -o bin/ovnfs .` in a clone. Needs Go (see `go.mod`) and git; on
-Linux, `fusermount3` (the `fuse3` package).
+needs Go (see `go.mod`). [Releases](https://github.com/stencil-hq/ovnfs/releases)
+have prebuilt binaries for Linux, macOS and Windows on amd64 and arm64, and
+`go build -o bin/ovnfs .` builds a clone. ovnfs runs git, and on Linux needs
+`fusermount3` (the `fuse3` package). `ovnfs version` prints the build.
 
 ## Quick start
 
