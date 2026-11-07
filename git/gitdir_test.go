@@ -39,6 +39,11 @@ func TestMarkCheckout(t *testing.T) {
 				if err := os.WriteFile(file, []byte(config), 0o640); err != nil {
 					t.Fatal(err)
 				}
+				// Windows reports 0640 as 0666, so compare with what the host recorded.
+				created, err := os.Stat(file)
+				if err != nil {
+					t.Fatal(err)
+				}
 				before := get(file, "--list")
 				if err := MarkCheckout(dir, marker); err != nil {
 					t.Fatal(err)
@@ -59,7 +64,7 @@ func TestMarkCheckout(t *testing.T) {
 					}
 				}
 				info, err := os.Stat(file)
-				if err != nil || info.Mode().Perm() != 0o640 {
+				if err != nil || info.Mode().Perm() != created.Mode().Perm() {
 					t.Fatalf("config mode %v, %v", info.Mode(), err)
 				}
 				old := time.Unix(1, 0)
