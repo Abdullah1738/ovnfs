@@ -35,6 +35,9 @@ func SymlinkReparse(target string) ([]byte, error) {
 	print := strings.ReplaceAll(target, "/", "\\")
 	substitute := print
 	switch {
+	case strings.HasPrefix(target, "//?/") || strings.HasPrefix(target, "//./"):
+		// Win32 device paths (\\?\C:\x, \\?\Volume{…}\) name the NT \??\ directory.
+		substitute = `\??\` + print[4:]
 	case strings.HasPrefix(target, "//"):
 		substitute = `\??\UNC\` + print[2:]
 	case isDrivePath(target):

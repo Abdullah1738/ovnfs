@@ -17,6 +17,46 @@ func wireName(b []byte) string {
 	return string(utf16.Decode(u))
 }
 
+func TestIsAbs(t *testing.T) {
+	for target, want := range map[string]bool{
+		"/x":            true,
+		"C:/x":          true,
+		"c:/":           true,
+		"//srv/share/x": true,
+		"//?/C:/x":      true,
+		"C:x":           false,
+		"C:":            false,
+		"1:/x":          false,
+		"x/C:/y":        false,
+		"../x":          false,
+	} {
+		if got := IsAbs(target); got != want {
+			t.Errorf("IsAbs(%q) = %v, want %v", target, got, want)
+		}
+	}
+}
+
+func TestSymlinkReparseDevicePath(t *testing.T) {
+	for target, want := range map[string]string{
+		"//?/C:/x":          `\??\C:\x`,
+		"//?/UNC/srv/s":     `\??\UNC\srv\s`,
+		"//?/Volume{abc}/x": `\??\Volume{abc}\x`,
+		"//./C:/x":          `\??\C:\x`,
+	} {
+		b, err := SymlinkReparse(target)
+		if err != nil {
+			t.Fatalf("%q: %v", target, err)
+		}
+		off, n := int(binary.LittleEndian.Uint16(b[8:])), int(binary.LittleEndian.Uint16(b[10:]))
+		if got := wireName(b[20+off : 20+off+n]); got != want {
+			t.Errorf("%q: substitute name %q, want %q", target, got, want)
+		}
+		if binary.LittleEndian.Uint32(b[16:]) != 0 {
+			t.Errorf("%q: marked relative", target)
+		}
+	}
+}
+
 func TestSymlinkReparse(t *testing.T) {
 	for _, tc := range []struct {
 		target, substitute, print string
