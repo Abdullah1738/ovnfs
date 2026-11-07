@@ -513,7 +513,14 @@ func (f *fixture) snapLayer(name string) (api.Snapshot, *overlay.Layer) {
 	if rec == nil {
 		f.t.Fatalf("snapshot %s froze no layer", reply.Snapshot.ID)
 	}
-	eventually(f.t, "layer "+rec.id+" stored", rec.layer.Stored)
+	// Stored turns true before Store removes the raw files; the keeper runs
+	// until Store returns, so wait for it too before tests read the directory.
+	eventually(f.t, "layer "+rec.id+" stored", func() bool {
+		h := f.reg.hasher
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return rec.layer.Stored() && !h.keeping
+	})
 	return reply.Snapshot, rec.layer
 }
 
