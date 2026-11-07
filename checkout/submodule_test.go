@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -111,12 +112,32 @@ func realDir(t *testing.T, dir string) string {
 func assertSubmodule(t *testing.T, exported, p, gitdir string) {
 	t.Helper()
 	dir := filepath.Join(exported, filepath.FromSlash(p))
-	if got, want := gitRun(t, dir, "rev-parse", "--absolute-git-dir"), realDir(t, gitdir); got != want {
+	// Git prints forward slashes on Windows too.
+	if got, want := filepath.FromSlash(gitRun(t, dir, "rev-parse", "--absolute-git-dir")), realDir(t, gitdir); got != want {
 		t.Errorf("%s: git directory %s, want %s", p, got, want)
 	}
-	if got, want := gitRun(t, dir, "rev-parse", "--show-toplevel"), realDir(t, dir); got != want {
+	if got, want := filepath.FromSlash(gitRun(t, dir, "rev-parse", "--show-toplevel")), realDir(t, dir); got != want {
 		t.Errorf("%s: work tree %s, want %s", p, got, want)
 	}
+}
+
+// newLinkedMountFixture opens a fixture whose mount's parent is a symlink to a
+// directory at another depth, as with --mount /home/u/link/mount where link
+// leads to /srv/ovnfs/mounts.
+func newLinkedMountFixture(t *testing.T) *fixture {
+	t.Helper()
+	real := filepath.Join(t.TempDir(), "a", "b", "c")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create a symlink: %v", err)
+	}
+	f := &fixture{t: t, state: filepath.Join(t.TempDir(), "state"), mount: filepath.Join(link, "mount")}
+	f.open()
+	t.Cleanup(func() { f.reg.Close() })
+	return f
 }
 
 // TestSubmoduleGitdirs gives an absorbed submodule a private git directory below
@@ -204,11 +225,20 @@ func TestSubmoduleMovedInFork(t *testing.T) {
 
 // TestSubmoduleReconnectedInFork forks a checkout whose submodule git deinitialized
 // and initialized again, which leaves a relative gitfile and a core.worktree that
-// both lead into the parent; the fork's submodule is its own.
+// both lead into the parent; the fork's submodule is its own, also when the mount
+// is reached through a symlink, from whose target git spelled the relative path.
 func TestSubmoduleReconnectedInFork(t *testing.T) {
+	app := submoduleRepo(t)
+	for name, open := range map[string]func(*testing.T) *fixture{"mount": newFixture, "linked mount": newLinkedMountFixture} {
+		t.Run(name, func(t *testing.T) { reconnectAndFork(t, open(t), app) })
+	}
+}
+
+// reconnectAndFork deinitializes and initializes again the submodule of a checkout
+// of app, as git does it inside the checkout, then checks a fork's submodule.
+func reconnectAndFork(t *testing.T, f *fixture, app string) {
 	ctx := context.Background()
-	f := newFixture(t)
-	f.newCheckout(submoduleRepo(t), "app")
+	f.newCheckout(app, "app")
 	exported := f.export("app")
 	gitRun(t, exported, "submodule", "deinit", "-q", "-f", "vendor/sub")
 	gitRun(t, exported, "submodule", "update", "-q", "--init")
@@ -225,6 +255,58 @@ func TestSubmoduleReconnectedInFork(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSubmodule(t, f.export("child"), "vendor/sub", filepath.Join(f.reg.gitdirPath("child"), "modules", "vendor", "sub"))
+}
+
+// TestForkLeavesUnrelatedGitfiles rebinds only gitfiles into git state the fork
+// copied: one into another checkout's git directory, and one naming the parent's
+// git directory as a whole, stay as they are.
+func TestForkLeavesUnrelatedGitfiles(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	app := submoduleRepo(t)
+	f.newCheckout(app, "other")
+	f.newCheckout(app, "app")
+	unrelated := "gitdir: " + filepath.Join(f.reg.gitdirPath("other"), "modules", "vendor", "sub") + "\n"
+	whole := "gitdir: " + f.reg.gitdirPath("app") + "\n"
+	f.put("app", "nested/.git", unrelated)
+	f.put("app", "whole/.git", whole)
+	if _, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: "app", Name: "child"}); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{"nested/.git": unrelated, "whole/.git": whole} {
+		if got := f.read("child", p); got != want {
+			t.Errorf("fork's %s = %q, want it kept as %q", p, got, want)
+		}
+	}
+}
+
+// TestSubmoduleSourceTouchIsNoChange keeps an untouched checkout unchanged when
+// the folder's submodule directory changes its mtime, before and after a restart.
+func TestSubmoduleSourceTouchIsNoChange(t *testing.T) {
+	f := newFixture(t)
+	app := submoduleRepo(t)
+	f.newCheckout(app, "app")
+	at := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(app, "vendor", "sub"), at, at); err != nil {
+		t.Fatal(err)
+	}
+	if f.dirty("app") {
+		t.Fatal("touching the folder's vendor/sub made the checkout report changes")
+	}
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.open()
+	if f.dirty("app") {
+		t.Fatal("after a restart, the checkout reports changes")
+	}
+	id, _ := f.snapGit("app")
+	f.reg.mu.RLock()
+	layer := f.reg.snapshots[id].layer
+	f.reg.mu.RUnlock()
+	if layer != "" {
+		t.Fatalf("snapshot of an unchanged checkout froze layer %s", layer)
+	}
 }
 
 // TestSubmoduleDeinitStays keeps a submodule whose .git was removed (as git
@@ -249,18 +331,29 @@ func TestSubmoduleDeinitStays(t *testing.T) {
 	}
 }
 
-// TestSubmoduleDirMetadataIsAChange snapshots a chmod or touch of a directory
-// copied up to hold a submodule's gitfile as a change of its own.
+// TestSubmoduleDirMetadataIsAChange snapshots a chmod (of permission or special
+// bits) or touch of a directory copied up to hold a submodule's gitfile as a
+// change of its own.
 func TestSubmoduleDirMetadataIsAChange(t *testing.T) {
 	f := newFixture(t)
 	app := submoduleRepo(t)
-	for name, change := range map[string]func(s *Session) error{
+	changes := map[string]func(s *Session) error{
 		"chmod": func(s *Session) error { return s.FS.Chmod("vendor/sub", 0o700) },
 		"touch": func(s *Session) error {
 			at := time.Now().Add(-time.Hour)
 			return s.FS.Chtimes("vendor/sub", at, at)
 		},
-	} {
+	}
+	if runtime.GOOS != "windows" {
+		changes["sticky"] = func(s *Session) error {
+			info, err := s.FS.Lstat("vendor/sub")
+			if err != nil {
+				return err
+			}
+			return s.FS.Chmod("vendor/sub", info.Mode().Perm()|os.ModeSticky)
+		}
+	}
+	for name, change := range changes {
 		f.newCheckout(app, name)
 		if f.dirty(name) {
 			t.Fatalf("%s: a fresh checkout reports changes", name)

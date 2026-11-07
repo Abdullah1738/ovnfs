@@ -52,6 +52,16 @@ type checkoutMeta struct {
 	// markers for. Later merges from that source take them as those paths' base,
 	// so a conflict the user resolved is not merged again.
 	MergeBases map[string]string `json:"merge_bases,omitempty"`
+	// Copied lists the directories of the upper that the checkout copied up to hold
+	// submodule gitfiles, with the metadata they had then; while they keep it, they
+	// are infrastructure, not changes (see Registry.upperEmpty).
+	Copied map[string]copiedDir `json:"copied,omitempty"`
+}
+
+// copiedDir is the metadata of a directory copied up to hold a submodule gitfile.
+type copiedDir struct {
+	Mode  os.FileMode `json:"mode"`
+	Mtime time.Time   `json:"mtime"`
 }
 
 // snapMeta is the persisted description of a snapshot; Tree is set once hashed.

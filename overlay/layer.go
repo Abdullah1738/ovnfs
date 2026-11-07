@@ -46,6 +46,7 @@ type Layer struct {
 	dir      string
 	entries  map[string]Entry
 	children map[string]map[string]Entry
+	gits     map[string]bool   // paths of entries named .git, see [Layer.GitEntries]
 	storing  sync.Mutex        // serializes [Layer.Store]
 	mu       sync.RWMutex      // guards blobs, ids and tree; held shared while raw files are read, see [Layer.Content]
 	blobs    Blobs             // nil while every entry is raw
@@ -132,6 +133,11 @@ func (l *Layer) Get(p string) (Entry, bool) { e, ok := l.entries[Clean(p)]; retu
 // Children returns an independent map of direct entries, including whiteouts.
 func (l *Layer) Children(p string) map[string]Entry { return maps.Clone(l.children[Clean(p)]) }
 
+// GitEntries lists the paths of the layer's entries named .git, in no order. The
+// index keeps them as it changes, so the git adapter finds a checkout's gitfiles
+// without walking every entry.
+func (l *Layer) GitEntries() []string { return slices.Collect(maps.Keys(l.gits)) }
+
 // Walk visits entries in deterministic pre-order, including the root directory.
 func (l *Layer) Walk(fn func(p string, e Entry) error) error {
 	var visit func(string) error
@@ -163,6 +169,12 @@ func entry(info os.FileInfo) Entry {
 // set updates a mutable upper's path and direct-child indexes together.
 func (l *Layer) set(p string, e Entry) {
 	l.entries[p] = e
+	if path.Base(p) == ".git" {
+		if l.gits == nil {
+			l.gits = make(map[string]bool)
+		}
+		l.gits[p] = true
+	}
 	if p != "" {
 		d := parent(p)
 		if l.children[d] == nil {
@@ -179,6 +191,7 @@ func (l *Layer) drop(p string) {
 	}
 	delete(l.children, p)
 	delete(l.entries, p)
+	delete(l.gits, p)
 	if p != "" {
 		delete(l.children[parent(p)], path.Base(p))
 	}

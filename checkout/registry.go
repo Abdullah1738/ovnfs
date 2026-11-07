@@ -516,6 +516,7 @@ func cloneCheckoutMeta(h checkoutMeta) checkoutMeta {
 	h.Parent = copyString(h.Parent)
 	h.Head = copyString(h.Head)
 	h.MergeBases = maps.Clone(h.MergeBases)
+	h.Copied = maps.Clone(h.Copied)
 	return h
 }
 

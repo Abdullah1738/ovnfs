@@ -251,3 +251,29 @@ func childKinds(children map[string]Entry) map[string]Entry {
 	}
 	return children
 }
+
+// TestLayerGitEntries indexes every entry named .git as the upper changes, so a
+// frozen layer lists them as an index of its own directory would, without a walk.
+func TestLayerGitEntries(t *testing.T) {
+	f := setup(t, map[string]string{"a/.git": "gitdir: x\n", "b/c/keep.txt": "k", "gone/.git": "gitdir: y\n"})
+	write(t, f, "b/c/.git", "gitdir: z\n", os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+	write(t, f, "a/.git", "gitdir: w\n", os.O_WRONLY|os.O_TRUNC)
+	must(t, f.MkdirAll("d/.git/refs", 0o755))
+	must(t, f.MkdirAll("e", 0o755))
+	write(t, f, "e/.git", "gitdir: v\n", os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+	must(t, f.Remove("e/.git"))
+	must(t, f.Remove("gone/.git"))
+	must(t, f.Flush())
+	l := freezeForTest(t, f)
+	disk, err := IndexLayer(l.Dir())
+	must(t, err)
+	want := []string{"a/.git", "b/c/.git", "d/.git", "gone/.git"}
+	for name, got := range map[string][]string{"frozen": l.GitEntries(), "indexed": disk.GitEntries()} {
+		if slices.Sort(got); !slices.Equal(got, want) {
+			t.Errorf("%s layer .git entries = %v, want %v", name, got, want)
+		}
+	}
+	if e, _ := l.Get("gone/.git"); e.Kind != KindWhiteout {
+		t.Errorf("gone/.git = %+v, want a whiteout", e)
+	}
+}

@@ -436,12 +436,13 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 	if err != nil {
 		return nil, err
 	}
+	var copied map[string]copiedDir
 	if hasGit {
-		if err = r.installGitfiles(fs, name, b.view); err != nil {
+		if copied, err = r.installGitfiles(fs, name, b.view, r.lineageCheckoutsLocked(deref(parent))); err != nil {
 			return nil, err
 		}
 	}
-	h := &checkoutRecord{meta: checkoutMeta{Name: name, Base: b.view.Meta().ID, Parent: copyString(parent), Git: hasGit, Created: time.Now().UTC()}, base: b, stack: append([]string{}, stack...), upper: upper, fs: fs}
+	h := &checkoutRecord{meta: checkoutMeta{Name: name, Base: b.view.Meta().ID, Parent: copyString(parent), Git: hasGit, Created: time.Now().UTC(), Copied: copied}, base: b, stack: append([]string{}, stack...), upper: upper, fs: fs}
 	h.generation.Store(1)
 	r.checkouts[name] = h
 	r.retainLocked(b, stack)
@@ -486,49 +487,55 @@ func markGitdirs(gitdir, name string, view *base.Base) error {
 }
 
 // installGitfiles points a new checkout's submodules at their private git
-// directories below its own, as the root's .git points at that directory. A
-// gitfile the checkout inherits from its snapshot's layers keeps its place (a
-// moved submodule stays moved, a deinitialized one stays without .git) and only
-// changes its target when that lies in another checkout's private git directory,
-// which it moves to the same place in this one's. An absorbed submodule of the
-// capture that no layer touched gets the gitfile it had when its checkout was
-// opened: that one was infrastructure, never frozen into a layer (see upperEmpty).
-// Writes go through fsys, which copies directories up with their metadata.
-func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Base) error {
+// directories below its own, as the root's .git points at that directory, and
+// returns the directories it copied up to hold the gitfiles (copiedDir). A
+// gitfile inherited from the snapshot's layers keeps its place (a moved submodule
+// stays moved, a deinitialized one stays without .git) and only changes its target
+// when that lies below the private git directory of a checkout in the snapshot's
+// lineage (owners), whose git state this checkout's was copied from: it moves to
+// the same place in this one's. An absorbed submodule of the capture that no layer
+// touched gets the gitfile it had when its checkout was opened, which was
+// infrastructure and never frozen into a layer (see upperEmpty). Writes go
+// through fsys, which copies directories up with their metadata.
+func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Base, owners map[string]bool) (map[string]copiedDir, error) {
 	gitdir := r.gitdirPath(name)
+	subs := submodules(view)
+	if len(subs) == 0 && !exists(filepath.Join(gitdir, "modules")) {
+		return nil, nil
+	}
+	var written []string
 	inherited := map[string]bool{}
 	for _, l := range fsys.Stack() {
-		err := l.Walk(func(p string, e overlay.Entry) error {
-			if path.Base(p) == ".git" && p != ".git" && e.Kind == overlay.KindFile {
+		for _, p := range l.GitEntries() {
+			if e, _ := l.Get(p); p != ".git" && e.Kind == overlay.KindFile {
 				inherited[p] = true
 			}
-			return nil
-		})
-		if err != nil {
-			return err
 		}
 	}
+	// Git writes relative gitfiles from the physical location of the checkout it
+	// ran in, the mount with its parent's symlinks resolved, at the same depth.
+	mount := filepath.Join(r.mounts[len(r.mounts)-1], name)
 	for _, p := range source.SortedPaths(inherited) {
 		target, err := readGitfile(fsys, p)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if target == "" {
 			continue
 		}
 		if !filepath.IsAbs(target) {
-			// Git writes relative gitfiles; it ran in the source checkout, at the same depth below the mount.
-			target = filepath.Join(r.config.Mount, name, filepath.FromSlash(path.Dir(p)), target)
+			target = filepath.Join(mount, filepath.FromSlash(path.Dir(p)), target)
 		}
 		owner, rest, ok := r.gitdirOwner(target)
-		if !ok || owner == name {
+		if !ok || owner == name || !owners[owner] || rest == "" {
 			continue
 		}
 		if err := writeGitfileAt(fsys, p, filepath.Join(gitdir, rest)); err != nil {
-			return err
+			return nil, err
 		}
+		written = append(written, p)
 	}
-	for _, sub := range submodules(view) {
+	for _, sub := range subs {
 		touched := false
 		for _, l := range fsys.Stack() {
 			_, atDir := l.Get(sub.Path)
@@ -542,38 +549,76 @@ func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Bas
 		if info, err := fsys.Lstat(sub.Path); errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
 			continue
 		} else if err != nil {
-			return err
+			return nil, err
 		}
-		if err := writeGitfileAt(fsys, path.Join(sub.Path, ".git"), dir); err != nil {
-			return err
+		p := path.Join(sub.Path, ".git")
+		if err := writeGitfileAt(fsys, p, dir); err != nil {
+			return nil, err
+		}
+		written = append(written, p)
+	}
+	if err := fsys.Flush(); err != nil {
+		return nil, err
+	}
+	// The upper was fresh, so every directory in it now was copied up for a gitfile.
+	copied := map[string]copiedDir{}
+	for _, p := range written {
+		for d := path.Dir(p); d != "."; d = path.Dir(d) {
+			if _, ok := copied[d]; ok {
+				break
+			}
+			if _, err := os.Lstat(filepath.Join(fsys.Upper(), filepath.FromSlash(d))); err != nil {
+				continue
+			}
+			info, err := fsys.Lstat(d)
+			if err != nil {
+				return nil, err
+			}
+			copied[d] = copiedDir{Mode: info.Mode(), Mtime: info.ModTime()}
 		}
 	}
-	return fsys.Flush()
+	if len(copied) == 0 {
+		return nil, nil
+	}
+	return copied, nil
+}
+
+// lineageCheckoutsLocked names the checkouts whose snapshots make up snapshot
+// id's lineage, the snapshot's own included: a checkout from it inherits their
+// layers and a copy of their git state.
+func (r *Registry) lineageCheckoutsLocked(id string) map[string]bool {
+	names := map[string]bool{}
+	for id != "" {
+		s := r.lineage[id]
+		if s == nil {
+			break
+		}
+		names[s.meta.Checkout] = true
+		id = s.stackParent
+	}
+	return names
 }
 
 // gitdirOwner reports which checkout's private git directory holds target, and
-// target's path inside it; ok is false for a target outside every one.
+// target's path inside it ("" for the directory itself); ok is false for a target
+// outside every one. Paths are compared as spelled, never resolved, so a target
+// inside the mount is not looked up through it.
 func (r *Registry) gitdirOwner(target string) (owner, rest string, ok bool) {
 	root := filepath.Join(r.config.State, "git")
-	for _, base := range []string{root, realPath(root)} {
-		for _, t := range []string{filepath.Clean(target), realPath(target)} {
-			rel, err := filepath.Rel(base, t)
-			if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				continue
-			}
-			owner, rest, _ = strings.Cut(filepath.ToSlash(rel), "/")
-			return owner, filepath.FromSlash(rest), true
+	spellings := []string{root}
+	if real, err := filepath.EvalSymlinks(root); err == nil && real != root {
+		spellings = append(spellings, real)
+	}
+	target = filepath.Clean(target)
+	for _, base := range spellings {
+		rel, err := filepath.Rel(base, target)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
 		}
+		owner, rest, _ = strings.Cut(filepath.ToSlash(rel), "/")
+		return owner, filepath.FromSlash(rest), true
 	}
 	return "", "", false
-}
-
-// realPath resolves p's symlinks, or returns p cleaned when it cannot be resolved.
-func realPath(p string) string {
-	if real, err := filepath.EvalSymlinks(p); err == nil {
-		return real
-	}
-	return filepath.Clean(p)
 }
 
 // readGitfile returns the target of the gitfile at checkout path p, "" when p is
@@ -769,9 +814,9 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 
 // upperEmpty excludes only infrastructure: the work directory, the root's gitfile,
 // and the gitfiles installGitfiles wrote into the upper (absolute, into the
-// checkout's own private git directory) together with directories copied up only
-// to hold them, as long as those still look exactly like what lies beneath.
-// Every real change requires a layer.
+// checkout's own private git directory) together with the directories it copied
+// up to hold them (checkoutMeta.Copied), as long as those keep the metadata they
+// were copied with. Every real change requires a layer.
 func (r *Registry) upperEmpty(h *checkoutRecord) (bool, error) {
 	if h.fs.Unflushed() {
 		return false, nil
@@ -780,16 +825,17 @@ func (r *Registry) upperEmpty(h *checkoutRecord) (bool, error) {
 	if h.meta.Git {
 		own = r.gitdirPath(h.meta.Name)
 	}
-	empty, _, err := infraOnly(h.fs, h.upper, "", own)
+	empty, _, err := infraOnly(h.fs, h.upper, "", own, h.meta.Copied)
 	return empty, err
 }
 
 // infraOnly reports whether the upper directory dir, at checkout path rel, holds
 // nothing but infrastructure (see upperEmpty), and whether it holds a gitfile into
 // own, the checkout's private git directory ("" for none). A directory counts only
-// when it holds such a gitfile and its mode and mtime still equal those beneath
-// the upper; otherwise it is a change (a chmod, or a removal that left it empty).
-func infraOnly(fsys *overlay.FS, dir, rel, own string) (empty, gitfiles bool, err error) {
+// when it was copied up for gitfiles, holds one, and keeps the mode and mtime
+// copied records for it; otherwise it is a change (a chmod, a touch, or a removal
+// that left it without a gitfile).
+func infraOnly(fsys *overlay.FS, dir, rel, own string, copied map[string]copiedDir) (empty, gitfiles bool, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, false, err
@@ -809,21 +855,18 @@ func infraOnly(fsys *overlay.FS, dir, rel, own string) (empty, gitfiles bool, er
 			}
 			gitfiles = true
 		case entry.IsDir():
-			upper, err := fsys.Lstat(p)
+			was, ok := copied[p]
+			if !ok {
+				return false, false, nil
+			}
+			info, err := fsys.Lstat(p)
 			if err != nil {
 				return false, false, err
 			}
-			lower, err := fsys.LowerLstat(p)
-			if errors.Is(err, os.ErrNotExist) {
+			if info.Mode() != was.Mode || !info.ModTime().Equal(was.Mtime) {
 				return false, false, nil
 			}
-			if err != nil {
-				return false, false, err
-			}
-			if !lower.IsDir() || lower.Mode().Perm() != upper.Mode().Perm() || !lower.ModTime().Equal(upper.ModTime()) {
-				return false, false, nil
-			}
-			ok, held, err := infraOnly(fsys, filepath.Join(dir, entry.Name()), p, own)
+			ok, held, err := infraOnly(fsys, filepath.Join(dir, entry.Name()), p, own, copied)
 			if err != nil || !ok || !held {
 				return false, false, err
 			}
@@ -915,7 +958,7 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 			return nil, err
 		}
 	}
-	oldStack, oldFS, oldHead := h.stack, h.fs, copyString(h.meta.Head)
+	oldStack, oldFS, oldHead, oldCopied := h.stack, h.fs, copyString(h.meta.Head), h.meta.Copied
 	renamed, refsChanged, closed := false, false, false
 	rollback := func(cause error) (*snapRecord, error) {
 		var rollbackErr error
@@ -930,6 +973,7 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 			h.generation.Add(1)
 		}
 		if renamed {
+			h.meta.Copied = oldCopied
 			if e := os.RemoveAll(h.upper); e != nil {
 				rollbackErr = errors.Join(rollbackErr, e)
 			}
@@ -988,7 +1032,8 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		if freshErr != nil {
 			return rollback(freshErr)
 		}
-		h.fs = fresh
+		// The copied-up directories went into the layer with the rest of the upper.
+		h.fs, h.meta.Copied = fresh, nil
 	}
 	r.releaseLocked(h.base, oldStack)
 	h.stack = stack
