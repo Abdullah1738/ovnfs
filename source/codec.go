@@ -25,8 +25,10 @@ import (
 // the stored tree of the capture that wrote it instead of repeating them.
 
 // Formats of the capture metadata files; the version is part of the magic.
+// Version 2 of a capture added each repository's module; version 1 is still read.
 const (
-	resultMagic    = "ovnfs-capture-1\n"
+	resultMagic    = "ovnfs-capture-2\n"
+	resultMagicV1  = "ovnfs-capture-1\n"
 	statCacheMagic = "ovnfs-stat-1\n"
 )
 
@@ -45,6 +47,7 @@ func (r *Result) MarshalBinary() ([]byte, error) {
 		e.str(repo.Path)
 		e.str(repo.Head)
 		e.str(repo.Index)
+		e.str(repo.Module)
 	}
 	roots := SortedPaths(r.Roots)
 	e.paths(roots)
@@ -82,15 +85,22 @@ func (r *Result) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary decodes a capture written by MarshalBinary into r's persisted
 // fields; Files and the other runtime fields are left alone.
 func (r *Result) UnmarshalBinary(data []byte) error {
-	body, err := unpack(resultMagic, data)
+	fields, magic := 4, resultMagic
+	if bytes.HasPrefix(data, []byte(resultMagicV1)) {
+		fields, magic = 3, resultMagicV1
+	}
+	body, err := unpack(magic, data)
 	if err != nil {
 		return err
 	}
 	d := decoder{buf: body}
 	root, tree := d.str(), store.OID(d.str())
-	repos := make([]Repo, d.count(3))
+	repos := make([]Repo, d.count(fields))
 	for i := range repos {
 		repos[i] = Repo{Path: d.str(), Head: d.str(), Index: d.str()}
+		if fields == 4 {
+			repos[i].Module = d.str()
+		}
 	}
 	roots := d.paths()
 	classes := make(map[string]rules.Class, len(roots))

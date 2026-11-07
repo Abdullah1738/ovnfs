@@ -81,3 +81,46 @@ func TestMarkCheckout(t *testing.T) {
 		})
 	}
 }
+
+// TestModuleDir places a submodule absorbed into its parent's modules directory, by
+// a relative or an absolute gitfile, and no other nested repository.
+func TestModuleDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "protocol.file.allow=always"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	work := t.TempDir()
+	sub, app := filepath.Join(work, "sub"), filepath.Join(work, "app")
+	for _, dir := range []string{sub, app} {
+		git(work, "init", "-q", dir)
+		git(dir, "commit", "-q", "--allow-empty", "-m", "init")
+	}
+	git(app, "submodule", "add", "-q", sub, "vendor/sub")
+	git(app, "submodule", "add", "-q", sub, "vendor/abs")
+	parent, err := Open(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(app, "vendor", "abs", ".git"), []byte("gitdir: "+filepath.Join(parent.CommonDir, "modules", "vendor", "abs")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(app, "init", "-q", "own")
+	git(work, "init", "-q", "--separate-git-dir", filepath.Join(work, "elsewhere.git"), filepath.Join(app, "separate"))
+	for rel, want := range map[string]string{"vendor/sub": "modules/vendor/sub", "vendor/abs": "modules/vendor/abs", "own": "", "separate": ""} {
+		repo, err := Open(filepath.Join(app, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := parent.ModuleDir(repo); got != want {
+			t.Errorf("%s: ModuleDir = %q, want %q", rel, got, want)
+		}
+	}
+}

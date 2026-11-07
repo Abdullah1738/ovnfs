@@ -162,3 +162,52 @@ func TestCaptureReusesKnownContent(t *testing.T) {
 		t.Fatalf("repos %+v, nested .git class %q", res.Repos, res.Roots["nested/.git"])
 	}
 }
+
+// TestCaptureAbsorbedSubmodules leaves the .git of a submodule absorbed into the
+// root, and of one absorbed into it, to private git directories placed as git
+// nests them, while a nested repository with its own .git directory stays local.
+func TestCaptureAbsorbedSubmodules(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	work := t.TempDir()
+	for _, name := range []string{"inner", "sub", "app"} {
+		dir := filepath.Join(work, name)
+		runGit(t, work, "init", "-q", dir)
+		runGit(t, dir, "commit", "-q", "--allow-empty", "-m", name)
+	}
+	runGit(t, filepath.Join(work, "sub"), "-c", "protocol.file.allow=always", "submodule", "add", "-q", filepath.Join(work, "inner"), "lib/inner")
+	runGit(t, filepath.Join(work, "sub"), "commit", "-q", "-m", "add inner")
+	app := filepath.Join(work, "app")
+	runGit(t, app, "-c", "protocol.file.allow=always", "submodule", "add", "-q", filepath.Join(work, "sub"), "vendor/sub")
+	runGit(t, app, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init", "--recursive")
+	runGit(t, app, "init", "-q", "tools/own")
+
+	res := capture(t, app, nil, "")
+	modules := map[string]string{}
+	for _, r := range res.Repos {
+		modules[r.Path] = r.Module
+	}
+	want := map[string]string{"": "", "vendor/sub": "modules/vendor/sub", "vendor/sub/lib/inner": "modules/vendor/sub/modules/lib/inner", "tools/own": ""}
+	if len(modules) != len(want) {
+		t.Fatalf("repositories = %v, want %v", modules, want)
+	}
+	for p, m := range want {
+		if got, ok := modules[p]; !ok || got != m {
+			t.Errorf("repository %q module = %q (found %v), want %q", p, got, ok, m)
+		}
+	}
+	for _, p := range []string{".git", "vendor/sub/.git", "vendor/sub/lib/inner/.git"} {
+		if class, ok := res.Roots[p]; ok {
+			t.Errorf("%s recorded as %s, want it left to a private git directory", p, class)
+		}
+		if dec, _ := Explain(Dir(app), res.Domains, rules.Set{Rules: rules.Builtins()}, p); dec.Class != rules.Hidden {
+			t.Errorf("explain %s = %s, want hidden", p, dec.Class)
+		}
+	}
+	if class := res.Roots["tools/own/.git"]; class != rules.Local {
+		t.Errorf("tools/own/.git recorded as %q, want a local copy", class)
+	}
+}

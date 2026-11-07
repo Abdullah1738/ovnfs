@@ -544,9 +544,11 @@ func (r *Registry) snapshotDir(id string) string {
 	return filepath.Join(r.config.State, "snapshots", id)
 }
 
-// objectsPath is the git object directory shared by every checkout on one base.
-func (r *Registry) objectsPath(baseID string) string {
-	return filepath.Join(r.config.State, "bases", baseID, "objects")
+// objectsPath is the git object directory shared by every checkout on one base,
+// the root repository's for module "" and an absorbed submodule's for its
+// source.Repo.Module; the base's directory mirrors the private git directory's layout.
+func (r *Registry) objectsPath(baseID, module string) string {
+	return filepath.Join(r.config.State, "bases", baseID, filepath.FromSlash(module), "objects")
 }
 
 // layerStackLocked resolves top-to-bottom identifiers and verifies base consistency.

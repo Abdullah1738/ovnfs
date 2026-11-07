@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -26,10 +27,18 @@ import (
 
 // gitSource says how a new checkout gets its private git directory, if at all.
 type gitSource struct {
-	repo  *git.Repo     // build one from this repository's state at capture
-	index string        // the captured index copy
-	ready string        // or move this git directory prepared by prepareGit into place
-	rev   *git.Revision // optional initial revision, already resolved
+	repo    *git.Repo     // build one from this repository's state at capture
+	index   string        // the captured index copy
+	modules []gitModule   // and one below it for each absorbed submodule, parents first
+	ready   string        // or move this git directory prepared by prepareGit into place
+	rev     *git.Revision // optional initial revision, already resolved
+}
+
+// gitModule is an absorbed submodule whose private git directory a new checkout
+// builds from the submodule's state at capture.
+type gitModule struct {
+	repo *git.Repo
+	source.Repo
 }
 
 // New opens a checkout from any folder (captured and classified now) or from a snapshot.
@@ -169,7 +178,10 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 				gs.index = rr.Index
 			}
 		}
-		err = repo.PrepareObjects(r.objectsPath(id))
+		err = repo.PrepareObjects(r.objectsPath(id, ""))
+		if err == nil {
+			gs.modules, err = r.prepareModules(view, id)
+		}
 	}
 	if err == nil {
 		err = writeLock(filepath.Join(config.StateDir, lockFile), b.lock)
@@ -185,6 +197,35 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	stats := view.Capture().Stats
 	reply.Capture, reply.Warnings = &stats, append([]string{}, warnings...)
 	return reply, nil
+}
+
+// prepareModules creates the shared object directories of a new base's absorbed
+// submodules and returns what their private git directories are built from.
+func (r *Registry) prepareModules(view *base.Base, id string) ([]gitModule, error) {
+	var modules []gitModule
+	for _, sub := range submodules(view) {
+		repo := view.Domains().Repo(sub.Path)
+		if repo == nil {
+			return nil, fmt.Errorf("submodule %s: repository unavailable", sub.Path)
+		}
+		if err := repo.PrepareObjects(r.objectsPath(id, sub.Module)); err != nil {
+			return nil, err
+		}
+		modules = append(modules, gitModule{repo: repo, Repo: sub})
+	}
+	return modules, nil
+}
+
+// submodules lists the absorbed submodules of a base's capture, parents first;
+// each gets a private git directory below the root's (source.Repo.Module).
+func submodules(view *base.Base) []source.Repo {
+	var out []source.Repo
+	for _, repo := range view.Capture().Repos {
+		if repo.Module != "" {
+			out = append(out, repo)
+		}
+	}
+	return out
 }
 
 // publishBase registers a freshly created base and opens the reserved checkout on it.
@@ -373,7 +414,7 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 			return nil, err
 		}
 		if gs.repo != nil {
-			err = gs.repo.MakeGitdir(ctx, gitdir, r.objectsPath(b.view.Meta().ID), gs.index)
+			err = r.makeGitdirs(ctx, gitdir, b.view.Meta().ID, gs)
 		} else {
 			err = os.Rename(gs.ready, gitdir)
 		}
@@ -381,7 +422,7 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 			err = gs.rev.SetHEAD(gitdir)
 		}
 		if err == nil {
-			err = git.MarkCheckout(gitdir, name)
+			err = markGitdirs(gitdir, name, b.view)
 		}
 		if err == nil {
 			err = writeGitfile(upper, gitdir)
@@ -394,6 +435,11 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 	if err != nil {
 		return nil, err
 	}
+	if hasGit {
+		if err = writeModuleGitfiles(fs, r.gitdirPath(name), b.view); err != nil {
+			return nil, err
+		}
+	}
 	h := &checkoutRecord{meta: checkoutMeta{Name: name, Base: b.view.Meta().ID, Parent: copyString(parent), Git: hasGit, Created: time.Now().UTC()}, base: b, stack: append([]string{}, stack...), upper: upper, fs: fs}
 	h.generation.Store(1)
 	r.checkouts[name] = h
@@ -403,6 +449,77 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 
 // writeGitfile points a checkout's root at its private git directory.
 func writeGitfile(upper, gitdir string) error { return git.WriteGitfile(upper, gitdir) }
+
+// makeGitdirs builds a new checkout's private git directory and, below it where git
+// looks for them, one for each absorbed submodule, all from the repositories' state
+// at capture and each borrowing its repository's objects through the base.
+func (r *Registry) makeGitdirs(ctx context.Context, gitdir, baseID string, gs gitSource) error {
+	if err := gs.repo.MakeGitdir(ctx, gitdir, r.objectsPath(baseID, ""), gs.index); err != nil {
+		return err
+	}
+	for _, m := range gs.modules {
+		dir := filepath.Join(gitdir, filepath.FromSlash(m.Module))
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			return err
+		}
+		if err := m.repo.MakeGitdir(ctx, dir, r.objectsPath(baseID, m.Module), m.Index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// markGitdirs marks a checkout's private git directory and those of its absorbed
+// submodules that it still has as belonging to checkout name (git.MarkCheckout).
+func markGitdirs(gitdir, name string, view *base.Base) error {
+	if err := git.MarkCheckout(gitdir, name); err != nil {
+		return err
+	}
+	for _, sub := range submodules(view) {
+		err := git.MarkCheckout(filepath.Join(gitdir, filepath.FromSlash(sub.Module)), name)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeModuleGitfiles points each absorbed submodule a checkout still has at its
+// private git directory below gitdir, as the root's .git points at gitdir. It
+// writes through the checkout's file system, which copies the submodule's
+// directories up with their metadata; like every .git entry, the gitfiles stay out
+// of the checkout's source changes.
+func writeModuleGitfiles(fsys *overlay.FS, gitdir string, view *base.Base) error {
+	for _, sub := range submodules(view) {
+		dir := filepath.Join(gitdir, filepath.FromSlash(sub.Module))
+		if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if info, err := fsys.Lstat(sub.Path); errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
+			continue // removed from this checkout
+		} else if err != nil {
+			return err
+		}
+		content, err := git.Gitfile(dir)
+		if err != nil {
+			return err
+		}
+		f, err := fsys.OpenFile(path.Join(sub.Path, ".git"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(content)
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return fsys.Flush()
+}
 
 // createFromSnapshotLocked attaches a new checkout to a snapshot's stack and to the git
 // directory prepareGit made from it (ready, "" for none), publishing it with one
@@ -546,17 +663,41 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 	return api.ForkReply{Snapshot: result, Checkout: childCheckout}, nil
 }
 
-// upperEmpty excludes only infrastructure; every real change requires a layer.
+// upperEmpty excludes only infrastructure: the work directory and the gitfiles that
+// point the root and absorbed submodules at private git directories, with the
+// directories copied up to hold them; every real change requires a layer.
 func upperEmpty(h *checkoutRecord) (bool, error) {
 	if h.fs.Unflushed() {
 		return false, nil
 	}
-	entries, err := os.ReadDir(h.upper)
+	infra, dirs := map[string]bool{".git": true, ".wh..wh.work": true}, map[string]bool{}
+	if h.meta.Git {
+		for _, sub := range submodules(h.base.view) {
+			infra[sub.Path+"/.git"] = true
+			for d := sub.Path; d != "."; d = path.Dir(d) {
+				dirs[d] = true
+			}
+		}
+	}
+	return onlyInfra(h.upper, "", infra, dirs)
+}
+
+// onlyInfra reports whether the upper directory dir, at checkout path rel, holds
+// nothing but infra entries and dirs that themselves hold only those.
+func onlyInfra(dir, rel string, infra, dirs map[string]bool) (bool, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, err
 	}
 	for _, entry := range entries {
-		if entry.Name() != ".git" && entry.Name() != ".wh..wh.work" {
+		p := path.Join(rel, entry.Name())
+		switch {
+		case infra[p]:
+		case entry.IsDir() && dirs[p]:
+			if ok, err := onlyInfra(filepath.Join(dir, entry.Name()), p, infra, dirs); !ok || err != nil {
+				return false, err
+			}
+		default:
 			return false, nil
 		}
 	}
@@ -715,6 +856,11 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		fresh, freshErr := overlay.New(h.upper, layers, h.base.view.Bottom(), r.config.Memory)
 		if freshErr != nil {
 			return rollback(freshErr)
+		}
+		if h.meta.Git {
+			if err = writeModuleGitfiles(fresh, r.gitdirPath(h.meta.Name), h.base.view); err != nil {
+				return rollback(err)
+			}
 		}
 		h.fs = fresh
 	}

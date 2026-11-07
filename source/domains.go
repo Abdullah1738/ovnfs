@@ -21,6 +21,10 @@ type Repo struct {
 	Path  string `json:"path"`            // relative to the source root; "" is the root
 	Head  string `json:"head,omitempty"`  // HEAD commit at capture; "" when unborn
 	Index string `json:"index,omitempty"` // index copy taken at capture; "" reads the live index
+	// Module places an absorbed submodule's private git directory below the root's
+	// ("modules/<name>", nested as git nests them, see git.Repo.ModuleDir); "" for
+	// the root and for nested repositories whose .git stays a local copy.
+	Module string `json:"module,omitempty"`
 }
 
 // View is the read-only tree that facts are read from: the source folder at
@@ -46,6 +50,7 @@ func (d Dir) path(p string) string { return filepath.Join(string(d), filepath.Fr
 type domain struct {
 	path    string          // root-relative; "" for the root
 	repo    *git.Repo       // nil outside any repository
+	module  string          // Repo.Module
 	tracked map[string]bool // domain-relative tracked paths and their ancestor directories
 	index   map[string]git.IndexEntry
 	indexAt git.Index
@@ -98,6 +103,11 @@ func (d *Domains) Add(r Repo) error {
 	if err != nil {
 		return err
 	}
+	return d.add(r, repo)
+}
+
+// add reads the index of repo, opened at r.Path, and adds its facts.
+func (d *Domains) add(r Repo, repo *git.Repo) error {
 	name := r.Index
 	if name == "" {
 		name = repo.IndexPath()
@@ -110,7 +120,7 @@ func (d *Domains) Add(r Repo) error {
 	if err != nil {
 		return err
 	}
-	dom := &domain{path: r.Path, repo: repo, tracked: make(map[string]bool, len(index.Entries)), index: make(map[string]git.IndexEntry, len(index.Entries)), indexAt: index, ignore: ignore}
+	dom := &domain{path: r.Path, repo: repo, module: r.Module, tracked: make(map[string]bool, len(index.Entries)), index: make(map[string]git.IndexEntry, len(index.Entries)), indexAt: index, ignore: ignore}
 	for _, e := range index.Entries {
 		dom.index[e.Path] = e
 		for p := e.Path; p != ""; p = parent(p) {
@@ -156,6 +166,33 @@ func (d *Domains) Repo(p string) *git.Repo {
 	return nil
 }
 
+// Module returns Repo.Module of the opened repository whose work tree is p, "" for
+// any path that is not an absorbed submodule.
+func (d *Domains) Module(p string) string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, dom := range d.list {
+		if dom.path == p {
+			return dom.module
+		}
+	}
+	return ""
+}
+
+// moduleOf returns Repo.Module for repo, opened at root-relative path p: where its
+// private git directory goes below the root's when it is a submodule absorbed into
+// the root or into a submodule that is itself absorbed, else "".
+func (d *Domains) moduleOf(p string, repo *git.Repo) string {
+	parent := d.For(p)
+	if parent.repo == nil || (parent.path != "" && parent.module == "") {
+		return ""
+	}
+	if m := parent.repo.ModuleDir(repo); m != "" {
+		return path.Join(parent.module, m)
+	}
+	return ""
+}
+
 // RepoOf returns the repository whose facts apply to p, nil outside any repository.
 func (d *Domains) RepoOf(p string) *git.Repo { return d.For(p).repo }
 
@@ -188,7 +225,9 @@ func (d *Domains) Discover(view View, p string) {
 			continue
 		}
 		if _, err := view.Lstat(prefix + "/.git"); err == nil {
-			_ = d.Add(Repo{Path: prefix})
+			if repo, err := git.Open(filepath.Join(d.root, filepath.FromSlash(prefix))); err == nil {
+				_ = d.add(Repo{Path: prefix, Module: d.moduleOf(prefix, repo)}, repo)
+			}
 		}
 	}
 }

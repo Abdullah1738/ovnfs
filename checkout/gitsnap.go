@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stencil-hq/ovnfs/git"
+	"github.com/stencil-hq/ovnfs/source"
 	"github.com/stencil-hq/ovnfs/store"
 )
 
@@ -41,8 +42,9 @@ type gitCached struct {
 }
 
 // saveGitdir stores dir, a checkout's private git directory, as a tree and returns
-// its id. The shared objects link and lock files of in-flight git commands are left
-// out; empty directories are kept, since git requires refs/ to exist.
+// its id. The shared objects links (the root's and its absorbed submodules') and
+// lock files of in-flight git commands are left out; empty directories are kept,
+// since git requires refs/ to exist.
 func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -73,7 +75,7 @@ func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == "objects" || strings.HasSuffix(d.Name(), ".lock") {
+		if rel == "objects" || (d.Name() == "objects" && d.Type()&fs.ModeSymlink != 0) || strings.HasSuffix(d.Name(), ".lock") {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -146,8 +148,9 @@ func skipVanished(err error) error {
 }
 
 // materializeGitdir writes the git directory stored as tree into the new path dst,
-// linking its objects to the base's shared object directory.
-func materializeGitdir(st *store.Store, tree store.OID, dst, objects string) error {
+// linking its objects, and those of the absorbed submodules' git directories it
+// holds, to the base's shared object directories (objects of a source.Repo.Module).
+func materializeGitdir(st *store.Store, tree store.OID, dst string, objects func(module string) string, modules []source.Repo) error {
 	files, err := st.Flatten(tree)
 	if err != nil {
 		return err
@@ -177,7 +180,19 @@ func materializeGitdir(st *store.Store, tree store.OID, dst, objects string) err
 			return err
 		}
 	}
-	return os.Symlink(objects, filepath.Join(dst, "objects"))
+	for _, sub := range modules {
+		dir := filepath.Join(dst, filepath.FromSlash(sub.Module))
+		if _, err := os.Lstat(filepath.Join(dir, "HEAD")); errors.Is(err, os.ErrNotExist) {
+			continue // removed in the checkout the snapshot was taken of
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "objects")); err == nil {
+			continue // a real object directory, of a submodule cloned again in the checkout
+		}
+		if err := os.Symlink(objects(sub.Module), filepath.Join(dir, "objects")); err != nil {
+			return err
+		}
+	}
+	return os.Symlink(objects(""), filepath.Join(dst, "objects"))
 }
 
 // saveGit stores a git checkout's private git directory for its next snapshot,
@@ -208,9 +223,16 @@ func (r *Registry) prepareGit(tree store.OID, legacy, baseID string) (string, er
 	}
 	dst := filepath.Join(tmp, "git")
 	if tree != "" {
-		err = materializeGitdir(r.store, tree, dst, r.objectsPath(baseID))
+		var modules []source.Repo
+		r.mu.RLock()
+		if b := r.bases[baseID]; b != nil {
+			modules = submodules(b.view)
+		}
+		r.mu.RUnlock()
+		objects := func(module string) string { return r.objectsPath(baseID, module) }
+		err = materializeGitdir(r.store, tree, dst, objects, modules)
 	} else {
-		err = git.CopyGitdir(legacy, dst, r.objectsPath(baseID))
+		err = git.CopyGitdir(legacy, dst, r.objectsPath(baseID, ""))
 	}
 	if err != nil {
 		return "", errors.Join(err, os.RemoveAll(tmp))

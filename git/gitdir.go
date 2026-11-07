@@ -27,6 +27,34 @@ func (r *Repo) PrepareObjects(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "info", "alternates"), []byte(filepath.Join(r.CommonDir, "objects")+"\n"), 0o644)
 }
 
+// ModuleDir returns where sub, a repository nested in r's work tree, keeps its git
+// directory relative to r's: "modules/<name>" for a submodule absorbed into r (its
+// .git a gitfile into r's modules directory, as git submodule lays it out), or ""
+// for any other nested repository. A checkout gives an absorbed submodule a private
+// git directory at that path below the root's, where git looks for it.
+func (r *Repo) ModuleDir(sub *Repo) string {
+	gitdir := realPath(sub.GitDir)
+	if gitdir != realPath(sub.CommonDir) {
+		return "" // a linked work tree of the submodule
+	}
+	for _, own := range []string{r.GitDir, r.CommonDir} {
+		rel, err := filepath.Rel(filepath.Join(realPath(own), "modules"), gitdir)
+		if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "modules/" + filepath.ToSlash(rel)
+		}
+	}
+	return ""
+}
+
+// realPath resolves p's symlinks so paths git reports through different spellings
+// compare equal; a path that cannot be resolved is compared as given.
+func realPath(p string) string {
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	return filepath.Clean(p)
+}
+
 // MakeGitdir writes a checkout's private git directory from the repository's current
 // HEAD, refs and config, the captured index, and a link to the shared objects.
 func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) error {
@@ -228,10 +256,19 @@ func configValue(v string) string {
 
 // WriteGitfile points a checkout's root at its private git directory.
 func WriteGitfile(root, gitdir string) error {
-	if strings.ContainsAny(gitdir, "\r\n") {
-		return errors.New("git directory path contains a newline")
+	content, err := Gitfile(gitdir)
+	if err != nil {
+		return err
 	}
-	return os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+gitdir+"\n"), 0o644)
+	return os.WriteFile(filepath.Join(root, ".git"), content, 0o644)
+}
+
+// Gitfile is the content of a .git file that points at the absolute git directory gitdir.
+func Gitfile(gitdir string) ([]byte, error) {
+	if strings.ContainsAny(gitdir, "\r\n") {
+		return nil, errors.New("git directory path contains a newline")
+	}
+	return []byte("gitdir: " + gitdir + "\n"), nil
 }
 
 // copyTree copies a file, symlink or directory tree to the new path dst.

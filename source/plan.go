@@ -27,7 +27,7 @@ func Explain(view View, d *Domains, set rules.Set, p string) (rules.Decision, bo
 			at = parent(at)
 		}
 		class, text := rules.Local, "a nested repository's .git stays a local copy"
-		if at == ".git" && d.RootIsRepo() {
+		if (at == ".git" && d.RootIsRepo()) || d.Module(parent(at)) != "" {
 			class, text = rules.Hidden, "replaced by the checkout's private git directory"
 		}
 		return rules.Decision{Class: class, At: at, Rule: rules.Rule{Class: class, Text: text, Origin: "git adapter"}}, exists

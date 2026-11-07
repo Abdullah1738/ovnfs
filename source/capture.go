@@ -249,9 +249,10 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 		name := e.Name()
 		p := path.Join(rel, name)
 		if name == ".git" {
-			// The git adapter owns .git: the root's is replaced by a private git
-			// directory; a nested repository's stays as a local copy-on-write root.
-			if rel != "" || !w.domains.RootIsRepo() {
+			// The git adapter owns .git: the root's and an absorbed submodule's are
+			// replaced by private git directories; any other nested repository's
+			// stays as a local copy-on-write root.
+			if (rel != "" || !w.domains.RootIsRepo()) && w.domains.Module(rel) == "" {
 				w.root(p, rules.Local, nil, fileKey{})
 			}
 			continue
@@ -321,7 +322,8 @@ func (w *walker) nested(ctx context.Context, p string) error {
 	if err != nil {
 		return err
 	}
-	if err := w.domains.Add(r); err != nil {
+	r.Module = w.domains.moduleOf(p, repo)
+	if err := w.domains.add(r, repo); err != nil {
 		return err
 	}
 	w.verifier(ctx, p, repo)

@@ -15,8 +15,18 @@ branch name instead. Unrelated staged work stays staged. `--dry-run` previews
 this checked-out-branch update without writing.
 
 On a 49k-file repository, opening a checkout takes about a second and
-`git status` inside it under three. Nested repositories keep their `.git` as a
-local copy-on-write directory.
+`git status` inside it under three.
+
+A submodule absorbed into the repository's `.git/modules`, as `git submodule
+add` and `git submodule update --init` lay it out, gets a private git directory
+of its own, built the same way and placed below the checkout's at
+`modules/<name>`, where git looks for it; the submodule's `.git` in the checkout
+points there. Commits made in the submodule stay in the checkout, forks and
+snapshots carry them, and the folder's `.git/modules` is never written.
+Submodules absorbed into such a submodule work the same way. Other nested
+repositories keep their `.git` as a local copy-on-write directory. A `--rev`
+checkout starts with empty submodule directories; `git submodule update --init`
+inside it clones them into its private git directory.
 
 Each private gitdir records repo-local `ovnfs.checkout = NAME`, including
 forked checkouts with their own names. Existing checkouts gain this marker when

@@ -58,6 +58,7 @@ func TestResultBinaryRoundTrip(t *testing.T) {
 		Repos: []Repo{
 			{Path: "", Head: "0123456789abcdef0123456789abcdef01234567", Index: "repo-0"},
 			{Path: "vendor/lib", Head: "", Index: ""},
+			{Path: "vendor/sub", Head: "89abcdef0123456789abcdef0123456789abcdef", Index: "repo-2", Module: "modules/vendor/sub"},
 		},
 		Roots: map[string]rules.Class{
 			"node_modules": rules.Cache, ".env": rules.Local, "secret/ключ": rules.Hidden, ".git": rules.Local,
@@ -86,6 +87,30 @@ func TestResultBinaryRoundTrip(t *testing.T) {
 			sameResult(t, got, r)
 		})
 	}
+}
+
+// TestResultBinaryReadsVersion1 decodes a capture persisted before repositories
+// recorded their module, as a base created by an older build holds it.
+func TestResultBinaryReadsVersion1(t *testing.T) {
+	var e encoder
+	e.str("/src")
+	e.str("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+	e.uvarint(1)
+	e.str("")
+	e.str("0123456789abcdef0123456789abcdef01234567")
+	e.str("repo-0")
+	for range 3 {
+		e.paths(nil) // roots, taken files, infos
+	}
+	data, err := pack(resultMagicV1, e.buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Result
+	if err := got.UnmarshalBinary(data); err != nil {
+		t.Fatal(err)
+	}
+	sameResult(t, got, Result{Root: "/src", Tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", Repos: []Repo{{Head: "0123456789abcdef0123456789abcdef01234567", Index: "repo-0"}}})
 }
 
 // TestResultBinaryRejectsDamage fails cleanly on truncated, altered or
