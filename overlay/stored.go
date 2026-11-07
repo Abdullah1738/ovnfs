@@ -215,7 +215,7 @@ func (l *Layer) copyTo(p, dst string, info os.FileInfo) error {
 			if err := os.Symlink(filepath.FromSlash(string(target)), dst); err != nil {
 				return err
 			}
-			return linkTime(dst, info.ModTime())
+			return lchtimes(dst, info.ModTime(), info.ModTime())
 		}
 		if err := l.blobs.CopyTo(blob, dst, info.Mode().Perm()); err != nil {
 			return err

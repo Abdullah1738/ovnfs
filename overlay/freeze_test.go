@@ -132,7 +132,7 @@ func TestFreezeTracksHardlinksAndOpenRenames(t *testing.T) {
 	must(t, f.Link("victim", "surviving-victim"))
 	must(t, f.Rename("moved", "victim"))
 	must(t, f.Symlink("victim", "metadata-link"))
-	must(t, f.Chmod("metadata-link", 0o700))
+	must(t, f.Chtimes("metadata-link", past, past))
 	readOnly, err := f.Open("victim")
 	must(t, err)
 	if descriptor, ok := readOnly.(interface{ Chmod(os.FileMode) error }); ok {

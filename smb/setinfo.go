@@ -92,7 +92,8 @@ func handleSetInfo(r *request) ([]byte, uint32) {
 			}
 		}
 		attrs := binary.LittleEndian.Uint32(data[32:])
-		if attrs != 0 && !r.c.posix && !r.c.appleReadDir.Load() {
+		// A symlink's read-only attribute has no mode to map to, as in winfsp.
+		if attrs != 0 && !r.c.posix && !r.c.appleReadDir.Load() && info.Mode()&os.ModeSymlink == 0 {
 			mode := info.Mode()
 			if attrs&1 != 0 {
 				mode &^= 0200

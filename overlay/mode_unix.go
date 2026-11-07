@@ -2,7 +2,12 @@
 
 package overlay
 
-import "os"
+import (
+	"io/fs"
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // Unix files hold their mode natively; see mode_windows.go for hosts that cannot.
 
@@ -20,3 +25,21 @@ func withMode(_ string, info os.FileInfo) (os.FileInfo, error) { return info, ni
 
 // keepMode has nothing to add after the host chmod or create that set the mode.
 func keepMode(string, os.FileMode) error { return nil }
+
+// lchmod changes the symlink name's own mode; Linux refuses it with EOPNOTSUPP.
+func lchmod(name string, mode os.FileMode) error {
+	bits := uint32(mode.Perm())
+	if mode&os.ModeSetuid != 0 {
+		bits |= unix.S_ISUID
+	}
+	if mode&os.ModeSetgid != 0 {
+		bits |= unix.S_ISGID
+	}
+	if mode&os.ModeSticky != 0 {
+		bits |= unix.S_ISVTX
+	}
+	if err := unix.Fchmodat(unix.AT_FDCWD, name, bits, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return &fs.PathError{Op: "chmod", Path: name, Err: err}
+	}
+	return nil
+}

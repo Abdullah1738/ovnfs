@@ -23,7 +23,7 @@ func copyTree(src, dst string) error {
 		if err := os.Symlink(target, dst); err != nil {
 			return err
 		}
-		return linkTime(dst, info.ModTime())
+		return lchtimes(dst, info.ModTime(), info.ModTime())
 	case mode.IsDir():
 		if err := os.Mkdir(dst, mode.Perm()|0o700); err != nil {
 			return err

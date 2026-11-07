@@ -990,9 +990,15 @@ func (f *FS) Root() string { return "/" }
 // Capabilities reports the operations supported by this filesystem.
 func (f *FS) Capabilities() billy.Capability { return billy.AllCapabilities }
 
-// Chmod changes mode after copying the affected entry up.
+// Chmod changes mode after copying the entry up. A symlink's own mode changes,
+// never its target's; hosts without symlink modes refuse it as unsupported.
 func (f *FS) Chmod(name string, mode os.FileMode) error {
+	entry := Clean(name)
 	return f.change(name, "chmod", func(p string) error {
+		// change holds f.mu, so the index has the copied-up entry's kind.
+		if f.index.entries[entry].Kind == KindSymlink {
+			return lchmod(p, mode)
+		}
 		if err := os.Chmod(p, mode); err != nil {
 			return err
 		}
@@ -1005,15 +1011,17 @@ func (f *FS) Lchown(name string, uid, gid int) error {
 	return f.change(name, "lchown", func(p string) error { return os.Lchown(p, uid, gid) }, nil)
 }
 
-// Chown changes ownership after copying the entry up.
+// Chown changes ownership after copying the entry up. Like Lchown, it never
+// follows a symlink: its target may lie outside the checkout.
 func (f *FS) Chown(name string, uid, gid int) error {
-	return f.change(name, "chown", func(p string) error { return os.Chown(p, uid, gid) }, nil)
+	return f.change(name, "chown", func(p string) error { return os.Lchown(p, uid, gid) }, nil)
 }
 
-// Chtimes changes access and modification times in upper only; a zero time
-// leaves that time unchanged, as for os.Chtimes.
+// Chtimes changes access and modification times in upper only, of a symlink
+// itself rather than its target; a zero time leaves that time unchanged, as
+// for os.Chtimes.
 func (f *FS) Chtimes(name string, atime, mtime time.Time) error {
-	return f.change(name, "chtimes", func(p string) error { return os.Chtimes(p, atime, mtime) },
+	return f.change(name, "chtimes", func(p string) error { return lchtimes(p, atime, mtime) },
 		func(m *memFile) {
 			if !atime.IsZero() {
 				m.atime = atime
@@ -1026,7 +1034,9 @@ func (f *FS) Chtimes(name string, atime, mtime time.Time) error {
 
 // change applies one metadata mutation under the structural lock: host to an
 // upper path, or mem to a memory file. Without mem, a memory file spills first
-// (ownership needs the kernel's permission checks).
+// (ownership needs the kernel's permission checks). host must not follow a
+// symlink: a target inside the mount would re-enter the daemon, which waits
+// for f.mu.
 func (f *FS) change(name, op string, host func(string) error, mem func(*memFile)) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1050,29 +1060,6 @@ func (f *FS) change(name, op string, host func(string) error, mem func(*memFile)
 	}
 	if err := host(f.up(p)); err != nil {
 		return err
-	}
-	if op != "lchown" && f.index.entries[p].Kind == KindSymlink {
-		target, err := filepath.EvalSymlinks(f.up(p))
-		if err != nil {
-			return err
-		}
-		// The target is resolved, so compare it with the resolved upper (macOS /var is /private/var).
-		root, err := filepath.EvalSymlinks(f.upper)
-		if err != nil {
-			return err
-		}
-		if within(target, root) {
-			rel, err := filepath.Rel(root, target)
-			if err != nil {
-				return err
-			}
-			q := Clean(rel)
-			if _, ok := f.index.entries[q]; ok && q != p {
-				if err := f.refresh(q); err != nil {
-					return err
-				}
-			}
-		}
 	}
 	return f.refresh(p)
 }

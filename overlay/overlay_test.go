@@ -196,6 +196,50 @@ func TestMetadataCopyUpPreservesMtime(t *testing.T) {
 	}
 }
 
+// Metadata changes on a symlink apply to the link itself: following it would
+// write outside the checkout and, through a mount, deadlock the daemon (#20).
+func TestMetadataChangesLeaveSymlinkTarget(t *testing.T) {
+	f := setup(t, nil)
+	victim := filepath.Join(t.TempDir(), "victim")
+	must(t, os.WriteFile(victim, []byte("v"), 0o644))
+	must(t, os.Chtimes(victim, past, past))
+	before, err := os.Stat(victim)
+	must(t, err)
+	must(t, f.Symlink(victim, "link"))
+	when := past.Add(time.Hour)
+	must(t, f.Chtimes("link", when, when))
+	// Linux and Windows symlinks have no mode of their own, and Windows has no
+	// Unix owners: those hosts refuse the change as unsupported.
+	unsupported := func(err error) bool {
+		if err != nil && !errors.Is(err, errors.ErrUnsupported) {
+			t.Fatal(err)
+		}
+		return err != nil
+	}
+	chmodRefused := unsupported(f.Chmod("link", 0o600))
+	unsupported(f.Chown("link", -1, -1))
+	target, err := os.Stat(victim)
+	must(t, err)
+	if !target.ModTime().Equal(past) || target.Mode() != before.Mode() {
+		t.Fatalf("target changed: mtime %v, mode %v", target.ModTime(), target.Mode())
+	}
+	link, err := f.Lstat("link")
+	must(t, err)
+	if !link.ModTime().Equal(when) {
+		t.Errorf("link mtime = %v, want %v", link.ModTime(), when)
+	}
+	if !chmodRefused && link.Mode().Perm() != 0o600 {
+		t.Errorf("link mode = %v, want 0600", link.Mode())
+	}
+	// A zero time leaves that time unchanged.
+	must(t, f.Chtimes("link", past, time.Time{}))
+	link, err = f.Lstat("link")
+	must(t, err)
+	if !link.ModTime().Equal(when) {
+		t.Errorf("link mtime after zero mtime = %v, want %v", link.ModTime(), when)
+	}
+}
+
 // TestTruncatingOpenKeepsLowerMode preserves executable permissions on truncation.
 func TestTruncatingOpenKeepsLowerMode(t *testing.T) {
 	if runtime.GOOS == "windows" {

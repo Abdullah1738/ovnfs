@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 )
@@ -131,12 +131,17 @@ func readMode(name string) (os.FileMode, bool, error) {
 	return mode, true, nil
 }
 
-// keepMode gives name (following a final symlink, as chmod does) the Unix
-// mode's permission and setuid/setgid/sticky bits: the read-only attribute
-// mirrors the owner write bit, and a mode other than the default is stored in
-// the mode stream, as is any mode of a file that already has one. Writing the
-// stream leaves the file's timestamps alone. It fails on filesystems without
-// alternate data streams when the mode is not the default.
+// lchmod refuses to change a symlink's mode, which Windows does not keep.
+func lchmod(name string, _ os.FileMode) error {
+	return &fs.PathError{Op: "chmod", Path: name, Err: syscall.EOPNOTSUPP}
+}
+
+// keepMode gives name, which is not a symlink, the Unix mode's permission and
+// setuid/setgid/sticky bits: the read-only attribute mirrors the owner write
+// bit, and a mode other than the default is stored in the mode stream, as is
+// any mode of a file that already has one. Writing the stream leaves the
+// file's timestamps alone. It fails on filesystems without alternate data
+// streams when the mode is not the default.
 func keepMode(name string, mode os.FileMode) error {
 	path, err := windows.UTF16PtrFromString(name)
 	if err != nil {
@@ -145,17 +150,6 @@ func keepMode(name string, mode os.FileMode) error {
 	attrs, err := windows.GetFileAttributes(path)
 	if err != nil {
 		return &fs.PathError{Op: "chmod", Path: name, Err: err}
-	}
-	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		if name, err = filepath.EvalSymlinks(name); err != nil {
-			return err
-		}
-		if path, err = windows.UTF16PtrFromString(name); err != nil {
-			return err
-		}
-		if attrs, err = windows.GetFileAttributes(path); err != nil {
-			return &fs.PathError{Op: "chmod", Path: name, Err: err}
-		}
 	}
 	mode &= memModeBits
 	readOnly := mode&0o200 == 0
