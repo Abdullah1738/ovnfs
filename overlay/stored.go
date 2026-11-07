@@ -286,6 +286,10 @@ func (l *Layer) manifest(ids map[string]string, tree string) (manifest, error) {
 			me.Sys = sys
 		}
 		if e.Kind == KindFile || e.Kind == KindSymlink {
+			// Windows reads a raw entry's file id from its path on first use;
+			// load it before Store removes the file, or Rename stops telling
+			// this layer's hard links apart from other files.
+			_ = primeInfo(e.Info)
 			if key, err := identity(l.dir, filepath.FromSlash(p), e.Info); err == nil {
 				if i, ok := first[key]; ok {
 					me.Link = i + 1
