@@ -945,4 +945,18 @@ func TestSMBCreateFlagsFollowedLinks(t *testing.T) {
 		}
 		c.expectStatus(c.close(id), wireSuccess)
 	}
+	// MS-SMB2 2.2.14 defines Flags for the whole SMB 3.x family and reserves
+	// it before.
+	for dialect, flagged := range map[uint16]bool{0x0210: false, 0x0302: true} {
+		c := newWireClient(t, fixture.address)
+		c.negotiate([]uint16{dialect})
+		c.expectStatus(c.login("", "", true), wireSuccess)
+		c.expectStatus(c.treeConnect("test"), wireSuccess)
+		id, r := c.create("filelink", 1, 0x40)
+		c.expectStatus(r, wireSuccess)
+		if got := r.body[3]&1 != 0; got != flagged {
+			t.Errorf("dialect %#x: REPARSEPOINT flag %v, want %v", dialect, got, flagged)
+		}
+		c.expectStatus(c.close(id), wireSuccess)
+	}
 }

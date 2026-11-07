@@ -853,7 +853,7 @@ func finishCreate(r *request, a createArgs, info os.FileInfo, epoch uint64) ([]b
 	out := make([]byte, 88)
 	binary.LittleEndian.PutUint16(out, 89)
 	out[2] = oplock
-	if a.lastLink && r.c.dialect == 0x0311 {
+	if a.lastLink && r.c.dialect >= 0x0300 {
 		// SMB2_CREATE_FLAG_REPARSEPOINT: the open went through a link. Without
 		// it, Windows files the target's metadata under the link's name for
 		// its cache lifetime, so the link stops reading as a link (lstat,
