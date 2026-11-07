@@ -501,18 +501,29 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.App
 	}
 	h.merge.Lock()
 	defer h.merge.Unlock()
-	snap, err := r.Snap(ctx, api.SnapArgs{Checkout: args.Checkout, Label: "apply", Wait: true})
+	snap, err := r.Snap(ctx, api.SnapArgs{Checkout: args.Checkout, Label: "apply", Wait: !args.DryRun})
 	if err != nil {
 		return api.ApplyReply{}, err
 	}
 	if args.DryRun {
 		// A dry run writes nothing: release the snapshot it read the checkout from,
-		// or it would hold the checkout's layers on disk after rm.
+		// or it would hold the checkout's layers on disk after rm. Waiting for its
+		// tree comes after, so a canceled or failed wait releases it too.
+		id := snap.Snapshot.ID
 		defer func() {
-			if dropErr := r.Drop(context.WithoutCancel(ctx), api.DropArgs{Snapshot: snap.Snapshot.ID}); dropErr != nil && err == nil {
+			if dropErr := r.Drop(context.WithoutCancel(ctx), api.DropArgs{Snapshot: id}); dropErr != nil && err == nil {
 				reply, err = api.ApplyReply{}, dropErr
 			}
 		}()
+		r.mu.RLock()
+		s := r.snapshots[id]
+		r.mu.RUnlock()
+		if s == nil {
+			return api.ApplyReply{}, failure("not_found", "no snapshot %s", id)
+		}
+		if snap, err = r.waitHashed(ctx, s); err != nil {
+			return api.ApplyReply{}, err
+		}
 	} else {
 		reply.Snapshot = snap.Snapshot
 	}
