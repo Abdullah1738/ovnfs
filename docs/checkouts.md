@@ -22,7 +22,10 @@ add` and `git submodule update --init` lay it out, gets a private git directory
 of its own, built the same way and placed below the checkout's at
 `modules/<name>`, where git looks for it; the submodule's `.git` in the checkout
 points there. Commits made in the submodule stay in the checkout, forks and
-snapshots carry them, and the folder's `.git/modules` is never written.
+snapshots carry them, and the folder's `.git/modules` is never written. A fork
+or a checkout from a snapshot points every submodule `.git` at its own private
+git directory, wherever the submodule was moved, and a deinitialized submodule
+stays without one.
 Submodules absorbed into such a submodule work the same way. Other nested
 repositories keep their `.git` as a local copy-on-write directory. A `--rev`
 checkout starts with empty submodule directories; `git submodule update --init`

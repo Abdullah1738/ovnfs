@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,6 +122,42 @@ func TestModuleDir(t *testing.T) {
 		}
 		if got := parent.ModuleDir(repo); got != want {
 			t.Errorf("%s: ModuleDir = %q, want %q", rel, got, want)
+		}
+	}
+}
+
+// TestUnsetModuleWorktrees clears the recorded work tree of every submodule git
+// directory below a private git directory, nested ones and names with slashes
+// included, and of nothing else.
+func TestUnsetModuleWorktrees(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	gitdir := t.TempDir()
+	config := "[core]\n\tworktree = ../../elsewhere\n"
+	for _, dir := range []string{"", "modules/vendor/sub", "modules/vendor/sub/modules/lib/inner", "modules/dep.lock"} {
+		d := filepath.Join(gitdir, filepath.FromSlash(dir))
+		if err := os.MkdirAll(filepath.Join(d, "refs"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, data := range map[string]string{"HEAD": "ref: refs/heads/main\n", "config": config} {
+			if err := os.WriteFile(filepath.Join(d, name), []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := UnsetModuleWorktrees(context.Background(), gitdir); err != nil {
+		t.Fatal(err)
+	}
+	for dir, want := range map[string]bool{"": true, "modules/vendor/sub": false, "modules/vendor/sub/modules/lib/inner": false, "modules/dep.lock": false} {
+		data, err := os.ReadFile(filepath.Join(gitdir, filepath.FromSlash(dir), "config"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(string(data), "worktree"); got != want {
+			t.Errorf("%q: core.worktree kept = %v, want %v", dir, got, want)
 		}
 	}
 }

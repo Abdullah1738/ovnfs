@@ -92,15 +92,39 @@ func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) er
 	}
 	// The checkout is its own work tree (the directory holding the .git file), and its
 	// files keep their mtimes but not their inodes, so stat checks stay minimal.
+	return configure(ctx, gitdir,
+		[]string{"--unset-all", "core.worktree"},
+		[]string{"--bool", "core.bare", "false"},
+		[]string{"core.checkStat", "minimal"},
+		[]string{"--bool", "core.trustctime", "false"},
+		[]string{"--bool", "core.untrackedCache", "false"},
+		[]string{"--bool", "core.fsmonitor", "false"},
+	)
+}
+
+// UnsetModuleWorktrees removes core.worktree from every submodule git directory
+// below a private git directory restored for another checkout, as MakeGitdir does
+// at creation: git records it when it (re)connects a submodule, as a path into the
+// checkout it ran in, and each restored directory must serve the checkout whose
+// .git file points at it.
+func UnsetModuleWorktrees(ctx context.Context, gitdir string) error {
+	modules, err := moduleGitdirs(gitdir)
+	if err != nil {
+		return err
+	}
+	for _, m := range modules {
+		if err := configure(ctx, filepath.Join(gitdir, filepath.FromSlash(m)), []string{"--unset-all", "core.worktree"}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// configure applies git config edits, each the arguments of one git config call,
+// to gitdir's own config file.
+func configure(ctx context.Context, gitdir string, edits ...[]string) error {
 	config := filepath.Join(gitdir, "config")
-	for _, args := range [][]string{
-		{"--unset-all", "core.worktree"},
-		{"--bool", "core.bare", "false"},
-		{"core.checkStat", "minimal"},
-		{"--bool", "core.trustctime", "false"},
-		{"--bool", "core.untrackedCache", "false"},
-		{"--bool", "core.fsmonitor", "false"},
-	} {
+	for _, args := range edits {
 		cmd := exec.CommandContext(ctx, "git", append([]string{"config", "--file", config}, args...)...)
 		if _, err := run(cmd); err != nil {
 			var exit *exec.ExitError
@@ -112,6 +136,42 @@ func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) er
 		}
 	}
 	return nil
+}
+
+// moduleGitdirs lists the submodule git directories below gitdir where git keeps
+// them, modules/<name> and recursively <module>/modules/<name>, as slash paths
+// relative to gitdir. A name may hold slashes, so any directory below modules/
+// holding a HEAD file is a git directory and any other is walked through.
+func moduleGitdirs(gitdir string) ([]string, error) {
+	var found []string
+	var walk func(dir, rel string) error
+	walk = func(dir, rel string) error {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			sub, subRel := filepath.Join(dir, e.Name()), rel+"/"+e.Name()
+			if info, err := os.Lstat(filepath.Join(sub, "HEAD")); err == nil && info.Mode().IsRegular() {
+				found = append(found, subRel)
+				err = walk(filepath.Join(sub, "modules"), subRel+"/modules")
+			} else {
+				err = walk(sub, subRel)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	err := walk(filepath.Join(gitdir, "modules"), "modules")
+	return found, err
 }
 
 // CopyGitdir copies a private git directory to the new path dst, linking the copy's
@@ -261,6 +321,15 @@ func WriteGitfile(root, gitdir string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(root, ".git"), content, 0o644)
+}
+
+// ParseGitfile returns the git directory a .git file's content points at, as
+// written (relative paths are relative to the file's directory), and false for
+// content that is not a gitfile.
+func ParseGitfile(content []byte) (string, bool) {
+	line, _, _ := strings.Cut(string(content), "\n")
+	gitdir, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "gitdir: ")
+	return gitdir, ok && gitdir != ""
 }
 
 // Gitfile is the content of a .git file that points at the absolute git directory gitdir.

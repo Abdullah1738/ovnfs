@@ -1,6 +1,7 @@
 package checkout
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -75,10 +76,14 @@ func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == "objects" || (d.Name() == "objects" && d.Type()&fs.ModeSymlink != 0) || strings.HasSuffix(d.Name(), ".lock") {
+		if rel == "objects" || (d.Name() == "objects" && d.Type()&fs.ModeSymlink != 0) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// A directory named *.lock is a submodule's git directory, not a lock.
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".lock") {
 			return nil
 		}
 		switch {
@@ -212,8 +217,10 @@ func (r *Registry) saveGit(h *checkoutRecord) (store.OID, error) {
 // with into a fresh directory below git/, outside the registry lock; installation
 // renames it into place, and reopening the registry removes it if it never is. It
 // returns "" when the snapshot has no git directory. A snapshot taken by a build
-// that copied whole directories (legacy, no tree) is read from its copy.
-func (r *Registry) prepareGit(tree store.OID, legacy, baseID string) (string, error) {
+// that copied whole directories (legacy, no tree) is read from its copy. Every
+// submodule git directory in it loses the work tree git may have recorded for
+// the checkout the snapshot was taken of (git.UnsetModuleWorktrees).
+func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseID string) (string, error) {
 	if tree == "" && (legacy == "" || !exists(legacy)) {
 		return "", nil
 	}
@@ -233,6 +240,9 @@ func (r *Registry) prepareGit(tree store.OID, legacy, baseID string) (string, er
 		err = materializeGitdir(r.store, tree, dst, objects, modules)
 	} else {
 		err = git.CopyGitdir(legacy, dst, r.objectsPath(baseID, ""))
+	}
+	if err == nil {
+		err = git.UnsetModuleWorktrees(ctx, dst)
 	}
 	if err != nil {
 		return "", errors.Join(err, os.RemoveAll(tmp))

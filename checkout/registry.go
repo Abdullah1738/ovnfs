@@ -475,7 +475,7 @@ func (r *Registry) Counts(s *api.Status) {
 
 // checkoutLocked describes a checkout for replies.
 func (r *Registry) checkoutLocked(h *checkoutRecord) api.Checkout {
-	empty, err := upperEmpty(h)
+	empty, err := r.upperEmpty(h)
 	meta := h.base.view.Meta()
 	src := meta.Dir
 	if meta.Remote != nil {

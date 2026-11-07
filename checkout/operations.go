@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -70,7 +71,7 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		if s == nil {
 			return api.NewReply{}, failure("not_found", "no snapshot %s", args.Snapshot)
 		}
-		ready, err := r.prepareGit(tree, filepath.Join(r.snapshotDir(s.meta.ID), "git"), baseID)
+		ready, err := r.prepareGit(ctx, tree, filepath.Join(r.snapshotDir(s.meta.ID), "git"), baseID)
 		if err != nil {
 			return api.NewReply{}, coded(err)
 		}
@@ -436,7 +437,7 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 		return nil, err
 	}
 	if hasGit {
-		if err = writeModuleGitfiles(fs, r.gitdirPath(name), b.view); err != nil {
+		if err = r.installGitfiles(fs, name, b.view); err != nil {
 			return nil, err
 		}
 	}
@@ -484,41 +485,144 @@ func markGitdirs(gitdir, name string, view *base.Base) error {
 	return nil
 }
 
-// writeModuleGitfiles points each absorbed submodule a checkout still has at its
-// private git directory below gitdir, as the root's .git points at gitdir. It
-// writes through the checkout's file system, which copies the submodule's
-// directories up with their metadata; like every .git entry, the gitfiles stay out
-// of the checkout's source changes.
-func writeModuleGitfiles(fsys *overlay.FS, gitdir string, view *base.Base) error {
-	for _, sub := range submodules(view) {
-		dir := filepath.Join(gitdir, filepath.FromSlash(sub.Module))
-		if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		if info, err := fsys.Lstat(sub.Path); errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
-			continue // removed from this checkout
-		} else if err != nil {
-			return err
-		}
-		content, err := git.Gitfile(dir)
-		if err != nil {
-			return err
-		}
-		f, err := fsys.OpenFile(path.Join(sub.Path, ".git"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if err != nil {
-			return err
-		}
-		_, err = f.Write(content)
-		if closeErr := f.Close(); err == nil {
-			err = closeErr
-		}
+// installGitfiles points a new checkout's submodules at their private git
+// directories below its own, as the root's .git points at that directory. A
+// gitfile the checkout inherits from its snapshot's layers keeps its place (a
+// moved submodule stays moved, a deinitialized one stays without .git) and only
+// changes its target when that lies in another checkout's private git directory,
+// which it moves to the same place in this one's. An absorbed submodule of the
+// capture that no layer touched gets the gitfile it had when its checkout was
+// opened: that one was infrastructure, never frozen into a layer (see upperEmpty).
+// Writes go through fsys, which copies directories up with their metadata.
+func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Base) error {
+	gitdir := r.gitdirPath(name)
+	inherited := map[string]bool{}
+	for _, l := range fsys.Stack() {
+		err := l.Walk(func(p string, e overlay.Entry) error {
+			if path.Base(p) == ".git" && p != ".git" && e.Kind == overlay.KindFile {
+				inherited[p] = true
+			}
+			return nil
+		})
 		if err != nil {
 			return err
 		}
 	}
+	for _, p := range source.SortedPaths(inherited) {
+		target, err := readGitfile(fsys, p)
+		if err != nil {
+			return err
+		}
+		if target == "" {
+			continue
+		}
+		if !filepath.IsAbs(target) {
+			// Git writes relative gitfiles; it ran in the source checkout, at the same depth below the mount.
+			target = filepath.Join(r.config.Mount, name, filepath.FromSlash(path.Dir(p)), target)
+		}
+		owner, rest, ok := r.gitdirOwner(target)
+		if !ok || owner == name {
+			continue
+		}
+		if err := writeGitfileAt(fsys, p, filepath.Join(gitdir, rest)); err != nil {
+			return err
+		}
+	}
+	for _, sub := range submodules(view) {
+		touched := false
+		for _, l := range fsys.Stack() {
+			_, atDir := l.Get(sub.Path)
+			_, atGitfile := l.Get(sub.Path + "/.git")
+			touched = touched || atDir || atGitfile
+		}
+		dir := filepath.Join(gitdir, filepath.FromSlash(sub.Module))
+		if touched || !exists(dir) {
+			continue
+		}
+		if info, err := fsys.Lstat(sub.Path); errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := writeGitfileAt(fsys, path.Join(sub.Path, ".git"), dir); err != nil {
+			return err
+		}
+	}
 	return fsys.Flush()
+}
+
+// gitdirOwner reports which checkout's private git directory holds target, and
+// target's path inside it; ok is false for a target outside every one.
+func (r *Registry) gitdirOwner(target string) (owner, rest string, ok bool) {
+	root := filepath.Join(r.config.State, "git")
+	for _, base := range []string{root, realPath(root)} {
+		for _, t := range []string{filepath.Clean(target), realPath(target)} {
+			rel, err := filepath.Rel(base, t)
+			if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			owner, rest, _ = strings.Cut(filepath.ToSlash(rel), "/")
+			return owner, filepath.FromSlash(rest), true
+		}
+	}
+	return "", "", false
+}
+
+// realPath resolves p's symlinks, or returns p cleaned when it cannot be resolved.
+func realPath(p string) string {
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	return filepath.Clean(p)
+}
+
+// readGitfile returns the target of the gitfile at checkout path p, "" when p is
+// not a regular file holding one.
+func readGitfile(fsys *overlay.FS, p string) (string, error) {
+	info, err := fsys.Lstat(p)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	f, err := fsys.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	content, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return "", err
+	}
+	target, _ := git.ParseGitfile(content)
+	return target, nil
+}
+
+// writeGitfileAt writes a gitfile pointing at gitdir to checkout path p through
+// fsys and keeps the mtime of p's directory, so a directory copied up only to
+// hold the gitfile still matches what lies beneath it (see upperEmpty).
+func writeGitfileAt(fsys *overlay.FS, p, gitdir string) error {
+	content, err := git.Gitfile(gitdir)
+	if err != nil {
+		return err
+	}
+	dir, err := fsys.Lstat(path.Dir(p))
+	if err != nil {
+		return err
+	}
+	f, err := fsys.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(content)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return fsys.Chtimes(path.Dir(p), dir.ModTime(), dir.ModTime())
 }
 
 // createFromSnapshotLocked attaches a new checkout to a snapshot's stack and to the git
@@ -616,7 +720,7 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 	if err != nil {
 		return api.ForkReply{}, coded(err)
 	}
-	ready, err := r.prepareGit(tree, "", baseID)
+	ready, err := r.prepareGit(ctx, tree, "", baseID)
 	if err != nil {
 		return api.ForkReply{}, coded(err)
 	}
@@ -663,45 +767,72 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 	return api.ForkReply{Snapshot: result, Checkout: childCheckout}, nil
 }
 
-// upperEmpty excludes only infrastructure: the work directory and the gitfiles that
-// point the root and absorbed submodules at private git directories, with the
-// directories copied up to hold them; every real change requires a layer.
-func upperEmpty(h *checkoutRecord) (bool, error) {
+// upperEmpty excludes only infrastructure: the work directory, the root's gitfile,
+// and the gitfiles installGitfiles wrote into the upper (absolute, into the
+// checkout's own private git directory) together with directories copied up only
+// to hold them, as long as those still look exactly like what lies beneath.
+// Every real change requires a layer.
+func (r *Registry) upperEmpty(h *checkoutRecord) (bool, error) {
 	if h.fs.Unflushed() {
 		return false, nil
 	}
-	infra, dirs := map[string]bool{".git": true, ".wh..wh.work": true}, map[string]bool{}
+	own := ""
 	if h.meta.Git {
-		for _, sub := range submodules(h.base.view) {
-			infra[sub.Path+"/.git"] = true
-			for d := sub.Path; d != "."; d = path.Dir(d) {
-				dirs[d] = true
-			}
-		}
+		own = r.gitdirPath(h.meta.Name)
 	}
-	return onlyInfra(h.upper, "", infra, dirs)
+	empty, _, err := infraOnly(h.fs, h.upper, "", own)
+	return empty, err
 }
 
-// onlyInfra reports whether the upper directory dir, at checkout path rel, holds
-// nothing but infra entries and dirs that themselves hold only those.
-func onlyInfra(dir, rel string, infra, dirs map[string]bool) (bool, error) {
+// infraOnly reports whether the upper directory dir, at checkout path rel, holds
+// nothing but infrastructure (see upperEmpty), and whether it holds a gitfile into
+// own, the checkout's private git directory ("" for none). A directory counts only
+// when it holds such a gitfile and its mode and mtime still equal those beneath
+// the upper; otherwise it is a change (a chmod, or a removal that left it empty).
+func infraOnly(fsys *overlay.FS, dir, rel, own string) (empty, gitfiles bool, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	for _, entry := range entries {
 		p := path.Join(rel, entry.Name())
 		switch {
-		case infra[p]:
-		case entry.IsDir() && dirs[p]:
-			if ok, err := onlyInfra(filepath.Join(dir, entry.Name()), p, infra, dirs); !ok || err != nil {
-				return false, err
+		case p == ".git" || p == ".wh..wh.work":
+		case own != "" && entry.Name() == ".git" && entry.Type().IsRegular():
+			content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				return false, false, err
 			}
+			target, _ := git.ParseGitfile(content)
+			if !filepath.IsAbs(target) || !strings.HasPrefix(target, own+string(filepath.Separator)) {
+				return false, false, nil
+			}
+			gitfiles = true
+		case entry.IsDir():
+			upper, err := fsys.Lstat(p)
+			if err != nil {
+				return false, false, err
+			}
+			lower, err := fsys.LowerLstat(p)
+			if errors.Is(err, os.ErrNotExist) {
+				return false, false, nil
+			}
+			if err != nil {
+				return false, false, err
+			}
+			if !lower.IsDir() || lower.Mode().Perm() != upper.Mode().Perm() || !lower.ModTime().Equal(upper.ModTime()) {
+				return false, false, nil
+			}
+			ok, held, err := infraOnly(fsys, filepath.Join(dir, entry.Name()), p, own)
+			if err != nil || !ok || !held {
+				return false, false, err
+			}
+			gitfiles = true
 		default:
-			return false, nil
+			return false, false, nil
 		}
 	}
-	return true, nil
+	return true, gitfiles, nil
 }
 
 // liveCheckout finds a live checkout and its base before an operation's work outside
@@ -745,7 +876,7 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 	if err := h.fs.Flush(); err != nil {
 		return nil, err
 	}
-	empty, err := upperEmpty(h)
+	empty, err := r.upperEmpty(h)
 	if err != nil {
 		return nil, err
 	}
@@ -856,11 +987,6 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		fresh, freshErr := overlay.New(h.upper, layers, h.base.view.Bottom(), r.config.Memory)
 		if freshErr != nil {
 			return rollback(freshErr)
-		}
-		if h.meta.Git {
-			if err = writeModuleGitfiles(fresh, r.gitdirPath(h.meta.Name), h.base.view); err != nil {
-				return rollback(err)
-			}
 		}
 		h.fs = fresh
 	}

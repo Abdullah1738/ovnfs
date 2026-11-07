@@ -221,6 +221,11 @@ func (f *FS) lookup(p string) (source, os.FileInfo, error) {
 			return source{}, nil, notExist("lstat", p)
 		}
 	}
+	return f.lookupLower(p)
+}
+
+// lookupLower resolves p in the frozen layers and the bottom, ignoring the upper.
+func (f *FS) lookupLower(p string) (source, os.FileInfo, error) {
 	for _, l := range f.layers {
 		if e, ok := l.entries[p]; ok {
 			if e.Kind == KindWhiteout {
@@ -282,6 +287,19 @@ func (f *FS) Lstat(name string) (os.FileInfo, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	_, info, err := f.lookup(Clean(name))
+	return info, err
+}
+
+// LowerLstat describes name as the frozen layers and the bottom beneath the upper
+// hold it: what a copy-up of name started from, whatever the upper holds now.
+func (f *FS) LowerLstat(name string) (os.FileInfo, error) {
+	p := Clean(name)
+	if reserved(p) {
+		return nil, notExist("lstat", p)
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	_, info, err := f.lookupLower(p)
 	return info, err
 }
 
