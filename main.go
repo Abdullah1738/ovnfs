@@ -28,7 +28,7 @@ import (
 // only place distribution FUSE confinement (Ubuntu's fusermount3 AppArmor
 // profile) lets a mount go, on macOS the volume that usually holds the
 // repositories, so pins clone rather than copy. On Windows state is in
-// %LOCALAPPDATA% and checkouts on a free drive letter, where net use maps the
+// %LOCALAPPDATA% and checkouts on a free drive letter, where the daemon maps the
 // SMB share and WinFsp mounts its drive.
 var defaultState, defaultMount = defaultDirs()
 

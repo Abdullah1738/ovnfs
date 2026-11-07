@@ -9,7 +9,6 @@ import (
 	"math"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -248,7 +247,7 @@ func serve(args []string) error {
 			_ = release(true)
 			return fmt.Errorf("persist listen: %w", err)
 		}
-	} else if port, err = listenAndMount(reg, e, *proto, *address, *mount, served, func(s *smb.Server) { smbServer = s }); err != nil {
+	} else if port, err = listenAndMount(reg, e, *proto, *address, *state, *mount, served, func(s *smb.Server) { smbServer = s }); err != nil {
 		return err
 	}
 	log.Printf("mounted at %s", *mount)
@@ -302,7 +301,7 @@ func serve(args []string) error {
 // defaultProto picks the frontend an unprivileged user can mount on this OS.
 // On Windows SMB, whose client caches under leases, is faster than WinFsp,
 // which sends every open to the daemon; WinFsp wins only where installed and
-// net use dials port 445 alone, which the Server service holds (smbClientPort).
+// the SMB client dials port 445 alone, which the Server service holds (smbClientPort).
 func defaultProto() string {
 	switch runtime.GOOS {
 	case "linux":
@@ -348,14 +347,21 @@ func mountInProcess(proto string, e *export.Export, mount string) (inProcessMoun
 // listenAndMount serves NFS or SMB on the persisted port and mounts it at mount
 // with the system client, unless a previous run's mount is still there. An SMB
 // client that dials one port only pins it, overriding an earlier run's port.
-func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, mount string, served chan<- error, smbStarted func(*smb.Server)) (int, error) {
+// SMB authenticates with the state directory's account where the OS has one
+// (smbAccount), otherwise as guest.
+func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, state, mount string, served chan<- error, smbStarted func(*smb.Server)) (int, error) {
 	savedProto, savedPort := reg.Listen()
 	if savedPort != 0 && savedProto != proto {
 		return 0, fmt.Errorf("listen: state uses %s; restart with -proto %s", savedProto, savedProto)
 	}
 	pinned := 0
+	var user, password string
 	if proto == "smb" {
 		pinned = smbClientPort()
+		var err error
+		if user, password, err = smbAccount(state); err != nil {
+			return 0, err
+		}
 	}
 	if want := cmp.Or(pinned, savedPort); want != 0 {
 		host, _, splitErr := net.SplitHostPort(address)
@@ -384,6 +390,9 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, mo
 	}
 	if proto == "smb" {
 		s := &smb.Server{FS: e.SMB(), Share: "ovnfs", MountRoots: mountRoots(mount)}
+		if user != "" {
+			s.Users = map[string]string{user: password}
+		}
 		nodes := e.Nodes()
 		e.OnRecall(func(id uint64) {
 			if p, ok := nodes.Path(id); ok {
@@ -402,9 +411,8 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, mo
 		if err = makeMountPoint(mount); err != nil {
 			return 0, fmt.Errorf("mount directory: %w", err)
 		}
-		cmd := mountCmd(proto, port, mount, "", "ovnfs", "", "")
-		if out, mountErr := exec.Command(cmd[0], cmd[1:]...).CombinedOutput(); mountErr != nil {
-			return 0, fmt.Errorf("mount: %w: %s", mountErr, out)
+		if err = mountServer(proto, port, mount, user, password); err != nil {
+			return 0, fmt.Errorf("mount: %w", err)
 		}
 	}
 	return port, nil

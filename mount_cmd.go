@@ -1,9 +1,10 @@
+//go:build !windows
+
 package main
 
 import (
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 )
@@ -18,14 +19,6 @@ import (
 func mountCmd(proto string, port int, dir, extra, share, user, password string) []string {
 	p := strconv.Itoa(port)
 	if proto == "smb" {
-		if runtime.GOOS == "windows" {
-			cmd := []string{"net", "use", filepath.VolumeName(dir), `\\127.0.0.1\` + share, password, "/USER:" + user, "/persistent:no"}
-			// Only Windows 11 24H2 and later dial another port; 445 works on any client.
-			if port != 445 {
-				cmd = append(cmd, "/TCPPORT:"+p)
-			}
-			return cmd
-		}
 		if runtime.GOOS == "darwin" {
 			u := url.User("guest").String()
 			if user != "" {

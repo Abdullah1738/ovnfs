@@ -32,6 +32,10 @@
   paths, `pull`, and reattach can remain cached until the client's attribute
   timeout (up to 60 s). NFSv4 read delegations reduce that window for opened
   files, but do not cover directories or files only inspected with `stat`.
+- One SMB daemon per Windows logon session: the SMB client keeps one set of
+  credentials per server name, whatever the port, so a second daemon, whose
+  state directory holds another password, cannot map `\\127.0.0.1\ovnfs`
+  (error 1219). Run further daemons with `-proto winfsp`.
 - WinFsp mounts get no recalls or change notifications for changes made
   behind them (`pull`, reattach, folder edits): they show once the one-second
   metadata cache expires, and directory watchers miss them.

@@ -6,7 +6,7 @@ One daemon serves every checkout as a folder of a single mount.
 | --- | --- | --- | --- |
 | macOS | NFSv3 | `smb` | nothing |
 | Linux | FUSE | `nfs`, `smb` (mounting them needs root) | `fusermount3` |
-| Windows | WinFsp where installed and `net use` dials only port 445, else SMB | `smb`, `winfsp` | [WinFsp](https://winfsp.dev) for `winfsp` |
+| Windows | WinFsp where installed and the SMB client dials only port 445, else SMB | `smb`, `winfsp` | [WinFsp](https://winfsp.dev) for `winfsp` |
 
 ## NFS
 
@@ -38,9 +38,10 @@ timeouts.
 
 ## SMB
 
-`serve -proto smb` serves the `ovnfs` share as guest, with Unix modes,
-executable bits, symlinks, byte-range locks and change notifications; macOS
-smbfs caches negative lookups for about two seconds.
+`serve -proto smb` serves the `ovnfs` share, to guests on macOS and Linux and
+to one account on Windows (below), with Unix modes, executable bits, symlinks,
+byte-range locks and change notifications; macOS smbfs caches negative lookups
+for about two seconds.
 
 SMB2.1+ file leases allow read and handle caching, recalled on conflicting
 opens, rename/deletion, and daemon or watched-folder changes. Unwatched live
@@ -61,14 +62,23 @@ and creates that follow links run alone.
 
 ### SMB
 
-The daemon maps its share with `net use` onto the mount drive and refuses a
-drive mapped elsewhere. `net use` dials another port only from Windows 11 24H2
-(build 26100), so older builds serve on `127.0.0.1:445`, which the Server
-service holds until it is stopped (`sc config LanmanServer start= disabled` and
-`net stop LanmanServer /y`, from an elevated prompt; this ends the machine's
-own file sharing); the daemon says so when it cannot bind. Drive mappings
-belong to a logon session, so a daemon started over ssh maps `O:` for that
-session only.
+The daemon maps its share onto the mount drive (`WNetAddConnection4W`, as
+`net use` does) and refuses a drive mapped elsewhere. The SMB client dials
+another port only from Windows 11 24H2 (build 26100), so older builds serve on
+`127.0.0.1:445`, which the Server service holds until it is stopped
+(`sc config LanmanServer start= disabled` and `net stop LanmanServer /y`, from
+an elevated prompt; this ends the machine's own file sharing); the daemon says
+so when it cannot bind. Drive mappings belong to a logon session, so a daemon
+started over ssh maps `O:` for that session only.
+
+Windows 11 24H2 and Server 2025 refuse anonymous NTLM, guest logons and
+unsigned sessions by default, so on Windows the server accepts one account,
+`ovnfs`, with a random 128-bit password, and its sessions are NTLMv2
+authenticated and signed. The password is kept in `smb-password` in the state
+directory, readable by the daemon's user alone, so a mapping a previous run
+left reconnects to the next; it is passed to the SMB client as an SSPI
+identity, never on a command line, and never logged. Deleting the file makes
+the next start create another password.
 
 The daemon opens host files with delete sharing and renames with POSIX
 semantics, so clients can rename, replace and delete files other handles hold
@@ -82,7 +92,7 @@ descriptors, which reopen in the next generation.
 filesystem driver installed once per machine (installing needs an
 administrator; mounting does not), as the network volume `\\ovnfs\O`, with no
 SMB and no port. It is the Windows default where WinFsp is installed and
-`net use` dials only port 445; elsewhere SMB stays the default, being faster.
+the SMB client dials only port 445; elsewhere SMB stays the default, being faster.
 
 Files look as they do to Windows SMB clients: case-sensitive names,
 `FILE_ATTRIBUTE_READONLY` as the owner write bit, node ids as file indexes,
