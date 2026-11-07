@@ -96,6 +96,25 @@ func TestSymlinkReparse(t *testing.T) {
 	}
 }
 
+// TestParseMalformedJunction refuses junction buffers whose names do not fit,
+// without reading past them.
+func TestParseMalformedJunction(t *testing.T) {
+	short := make([]byte, 12)
+	binary.LittleEndian.PutUint32(short, ReparseTagMountPoint)
+	binary.LittleEndian.PutUint16(short[4:], 4)
+	for name, mutate := range map[string]func([]byte) []byte{
+		"short header": func([]byte) []byte { return short },
+		"odd offset":   func(b []byte) []byte { binary.LittleEndian.PutUint16(b[8:], 1); return b },
+		"long name":    func(b []byte) []byte { binary.LittleEndian.PutUint16(b[10:], uint16(len(b)-14)); return b },
+		"far offset":   func(b []byte) []byte { binary.LittleEndian.PutUint16(b[8:], uint16(len(b)-14)); return b },
+	} {
+		b := mutate(mountPointReparse(`\??\C:\x`, `C:\x`))
+		if _, err := ParseSymlinkReparse(b); !errors.Is(err, fs.ErrInvalid) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // mountPointReparse builds the IO_REPARSE_TAG_MOUNT_POINT buffer mklink /J and
 // libuv send: substitute name, then print name, each NUL-terminated.
 func mountPointReparse(substitute, print string) []byte {
