@@ -116,3 +116,8 @@ Small store blobs (at most 1 MiB) are served from a second budget
 (`-blob-cache`) instead of their object files. `ovnfs status` shows both. A
 crash or `kill -9` loses the files still in memory; `-memory 0` writes every
 file to the upper as it happens.
+
+Node ids are outside both budgets: the daemon keeps every path it has handed
+out until it is removed, a file as a name in its directory's table rather than
+a full node, about 150 bytes per path. A restart drops the unlogged ids, which
+resolve again by listing their directory when a client presents them.

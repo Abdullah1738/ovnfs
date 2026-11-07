@@ -22,6 +22,12 @@ import (
 // key, so a directory keeps its children's ids wherever it moves; a node
 // moved away from its derived name is pinned with its id instead.
 //
+// An issued unlogged child is held as a leaf: its name under its hash in
+// the parent's dirState, a fraction of a node's memory, since most of the
+// paths a tree walk hands out are such files. A leaf owns its derived id
+// exactly as a node would, and becomes a node only when an operation needs
+// one: listing it, moving it, retiring it or giving it a child.
+//
 // Every id stays below 1<<53: JavaScript runtimes report inode numbers as
 // doubles, so larger ids would lose precision and distinct files could
 // compare equal. A directory whose key does not fit 30 bits gives its new
@@ -40,10 +46,11 @@ const (
 )
 
 // nodeTable gives every path the server has handed out a stable id, used as
-// both its NFS file handle and its fileid. Ids live in a tree mirroring the
-// namespace, so a rename re-parents one node in O(depth) and every handle
-// below it keeps working, as with an inode-based server. Logged ids and
-// namespace changes of logged nodes are appended to the identity log.
+// both its NFS file handle and its fileid. Ids live in a tree of nodes and
+// leaves mirroring the namespace, so a rename re-parents one node in
+// O(depth) and every handle below it keeps working, as with an inode-based
+// server. Logged ids and namespace changes of logged nodes are appended to
+// the identity log.
 type nodeTable struct {
 	mu        sync.Mutex
 	root      *node
@@ -85,6 +92,9 @@ type dirState struct {
 	// retired holds the hashes of retired derived children: their ids are
 	// never handed out again in this process.
 	retired map[uint32]struct{}
+	// leaves maps the name hash of each leaf to its name, shared with the
+	// listing it was derived from where possible.
+	leaves map[uint32]string
 }
 
 // derivation is how ensure may identify a new child.
@@ -116,9 +126,9 @@ func (t *nodeTable) id(p string) uint64 {
 	defer t.flush()
 	var listed *node
 	for try := 0; ; try++ {
-		n, unlisted := t.ensure(p, listed, try < 3)
-		if n != nil {
-			return n.id
+		id, unlisted := t.ensure(p, listed, try < 3)
+		if unlisted == nil {
+			return id
 		}
 		if ok, err := t.relist(unlisted); ok || err != nil {
 			listed = unlisted
@@ -134,7 +144,20 @@ func (t *nodeTable) lookup(p string) (uint64, bool) {
 	if n := t.find(p); n != nil {
 		return n.id, true
 	}
-	return 0, false
+	return t.leafID(p)
+}
+
+// leafID returns p's id if p is a leaf.
+func (t *nodeTable) leafID(p string) (uint64, bool) {
+	if p == "" {
+		return 0, false
+	}
+	dir, name := split(p)
+	d := t.find(dir)
+	if d == nil || !d.leaf(name) {
+		return 0, false
+	}
+	return derivedID(d.key, nameHash(name)), true
 }
 
 // nodeRef is one issued id with its current path.
@@ -149,6 +172,9 @@ func (t *nodeTable) subtree(p string) []nodeRef {
 	defer t.mu.Unlock()
 	n := t.find(p)
 	if n == nil {
+		if id, ok := t.leafID(p); ok {
+			return []nodeRef{{id: id, path: p}}
+		}
 		return nil
 	}
 	var out []nodeRef
@@ -157,6 +183,11 @@ func (t *nodeTable) subtree(p string) []nodeRef {
 		out = append(out, nodeRef{id: n.id, path: p})
 		for name, k := range n.kids {
 			walk(k, path.Join(p, name))
+		}
+		if s := n.dir; s != nil {
+			for h, name := range s.leaves {
+				out = append(out, nodeRef{id: derivedID(n.key, h), path: path.Join(p, name)})
+			}
 		}
 	}
 	walk(n, p)
@@ -169,22 +200,31 @@ func (t *nodeTable) subtree(p string) []nodeRef {
 func (t *nodeTable) path(id uint64) ([]string, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := t.byID[id]
-	if n == nil {
-		if n = t.resolve(id); n == nil {
-			return nil, false
-		}
+	if n := t.byID[id]; n != nil {
+		return n.components(0), true
 	}
-	depth := 0
+	d, name := t.resolve(id)
+	if d == nil {
+		return nil, false
+	}
+	out := d.components(1)
+	out[len(out)-1] = name
+	return out, true
+}
+
+// components returns n's path components followed by extra empty ones.
+func (n *node) components(extra int) []string {
+	depth := extra
 	for c := n; c.parent != nil; c = c.parent {
 		depth++
 	}
 	out := make([]string, depth)
+	depth -= extra
 	for c := n; c.parent != nil; c = c.parent {
 		depth--
 		out[depth] = c.name
 	}
-	return out, true
+	return out
 }
 
 // rename moves from's subtree to to, retiring whatever ids to held.
@@ -195,18 +235,18 @@ func (t *nodeTable) rename(from, to string) {
 	if from == to {
 		return
 	}
-	src := t.find(from)
+	src := t.node(from)
 	if src == t.root {
 		return
 	}
 	dir, name := split(to)
 	d := t.dirNode(dir)
-	if dst := d.kids[name]; dst != src {
+	if dst := t.child(d, name); dst != src {
 		t.drop(dst)
 	}
 	if src != nil {
 		delete(src.parent.kids, src.name)
-		src.name, src.parent = name, d
+		src.name, src.parent = strings.Clone(name), d
 		t.link(d, src)
 		if src.key == 0 {
 			// Its id no longer derives from its path.
@@ -223,7 +263,7 @@ func (t *nodeTable) remove(p string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer t.flush()
-	t.drop(t.find(p))
+	t.drop(t.node(p))
 }
 
 // created notes a directory entry made through the export at p, keeping the
@@ -235,7 +275,7 @@ func (t *nodeTable) created(p string) {
 	defer t.mu.Unlock()
 	defer t.flush()
 	dir, name := split(p)
-	if d := t.find(dir); d != nil && d.kids[name] == nil {
+	if d := t.find(dir); d != nil && d.kids[name] == nil && !d.leaf(name) {
 		t.appeared(d, name)
 	}
 }
@@ -252,7 +292,7 @@ type listing struct {
 func (t *nodeTable) startListing(dir string) listing {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := t.find(dir)
+	n := t.node(dir)
 	if n == nil {
 		return listing{}
 	}
@@ -292,105 +332,123 @@ func (t *nodeTable) unlist(p string, deep bool) {
 	}
 }
 
-// ensure returns p's node, creating missing nodes, or the directory that
-// must be listed before p's derived id can be decided. A directory just
+// ensure returns p's id, creating missing nodes and leaves, or the directory
+// that must be listed before p's derived id can be decided. A directory just
 // listed, or derive false, falls back to a counter id instead.
-func (t *nodeTable) ensure(p string, listed *node, derive bool) (n, unlisted *node) {
+func (t *nodeTable) ensure(p string, listed *node, derive bool) (id uint64, unlisted *node) {
 	if p == "" {
-		return t.root, nil
+		return t.root.id, nil
 	}
 	dir, name := split(p)
 	d := t.dirNode(dir)
 	if k := d.kids[name]; k != nil {
-		return k, nil
+		return k.id, nil
+	}
+	if d.leaf(name) {
+		return derivedID(d.key, nameHash(name)), nil
 	}
 	if derive {
-		switch id, how := t.derive(d, name); {
+		switch id, kept, how := t.derive(d, name); {
 		case how == useDerived:
-			k := &node{id: id, name: name, parent: d}
-			t.link(d, k)
-			return k, nil
+			d.addLeaf(kept)
+			return id, nil
 		case how == needListing && d != listed:
-			return nil, d
+			return 0, d
 		}
 	}
-	return t.alloc(d, name), nil
+	return t.alloc(d, name).id, nil
 }
 
-// derive decides whether name, new in directory d, takes its derived id.
-func (t *nodeTable) derive(d *node, name string) (uint64, derivation) {
+// derive decides whether name, new in directory d, takes its derived id,
+// and returns the listing's copy of name for the leaf to keep.
+func (t *nodeTable) derive(d *node, name string) (uint64, string, derivation) {
 	if t.list == nil || d.key >= maxDerivingKey {
-		return 0, useCounter
+		return 0, "", useCounter
 	}
 	h := nameHash(name)
+	if t.taken(d, h) {
+		return 0, "", useCounter
+	}
 	id := derivedID(d.key, h)
-	if t.byID[id] != nil {
-		return 0, useCounter
-	}
 	s := d.dir
-	if s != nil {
-		if _, gone := s.retired[h]; gone {
-			return 0, useCounter
-		}
-	}
 	if s == nil || s.entries == nil {
-		return id, needListing
+		return id, "", needListing
 	}
 	switch v, ok := s.entries[h]; {
 	case v == name:
-		return id, useDerived
+		return id, v, useDerived
 	case !ok || v != ambiguous:
-		return id, needListing // the listing predates name
+		return id, "", needListing // the listing predates name
 	}
-	names, ok := s.dups[h]
-	if !ok || !slices.Contains(names, name) {
-		return id, needListing
+	names := s.dups[h]
+	i := slices.Index(names, name)
+	if i < 0 {
+		return id, "", needListing
 	}
 	for _, other := range names {
 		if other != name && d.kids[other] == nil {
 			// Resolution could not tell the two apart.
-			return 0, useCounter
+			return 0, "", useCounter
 		}
 	}
-	return id, useDerived
+	return id, names[i], useDerived
 }
 
-// resolve finds the node a derived id issued before a restart names: the one
-// entry of its hash in the keyed directory that no other node owns.
-func (t *nodeTable) resolve(id uint64) *node {
+// taken reports whether derived id hash h of keyed directory d is held by a
+// node or leaf, or retired.
+func (t *nodeTable) taken(d *node, h uint32) bool {
+	if t.byID[derivedID(d.key, h)] != nil {
+		return true
+	}
+	s := d.dir
+	if s == nil {
+		return false
+	}
+	_, leaf := s.leaves[h]
+	_, gone := s.retired[h]
+	return leaf || gone
+}
+
+// resolve finds the entry a derived id that no node holds names, as its
+// directory and name: a leaf, or for an id issued before a restart the one
+// entry of its hash in the keyed directory that no other node owns, which
+// becomes a leaf.
+func (t *nodeTable) resolve(id uint64) (*node, string) {
 	if id&derivedBit == 0 || id >= idLimit || t.list == nil {
-		return nil
+		return nil, ""
 	}
 	key, h := id>>hashBits&(maxDerivingKey-1), uint32(id&(1<<hashBits-1))
 	fresh := false
 	for range 4 {
 		d := t.byKey[key]
 		if d == nil {
-			return nil
+			return nil, ""
 		}
 		if s := d.dir; s != nil {
 			if _, gone := s.retired[h]; gone {
-				return nil
+				return nil, ""
+			}
+			if name, ok := s.leaves[h]; ok {
+				return d, name
 			}
 			if name, ok := s.candidate(d, h); ok {
-				k := &node{id: id, name: name, parent: d}
-				t.link(d, k)
-				return k
+				d.addLeaf(name)
+				return d, name
 			}
 		}
 		if fresh {
-			return nil
+			return nil, ""
 		}
 		installed, err := t.relist(d)
 		if err != nil {
-			return nil
+			return nil, ""
 		}
 		if n := t.byID[id]; n != nil {
-			return n
+			return n.parent, n.name
 		}
 		fresh = installed
 	}
-	return nil
+	return nil, ""
 }
 
 // candidate returns the entry of hash h in d's listing that no node owns,
@@ -434,7 +492,8 @@ func (t *nodeTable) install(d *node, gen uint64, infos []os.FileInfo) bool {
 	}
 	s.entries, s.dups = make(map[uint32]string, len(infos)), nil
 	for _, info := range infos {
-		name := info.Name()
+		// A FileInfo's name may slice the whole path it was statted by.
+		name := strings.Clone(info.Name())
 		h := nameHash(name)
 		prev, ok := s.entries[h]
 		if !ok {
@@ -462,7 +521,7 @@ func (t *nodeTable) appeared(d *node, name string) {
 		if s.entries != nil {
 			switch v, ok := s.entries[h]; {
 			case !ok:
-				s.entries[h] = name
+				s.entries[h] = strings.Clone(name)
 			case v == name, v == ambiguous && slices.Contains(s.dups[h], name):
 			default:
 				s.entries[h] = ambiguous
@@ -470,15 +529,10 @@ func (t *nodeTable) appeared(d *node, name string) {
 			}
 		}
 	}
-	if d.kids[name] != nil || t.list == nil || d.key == 0 || d.key >= maxDerivingKey {
+	if d.kids[name] != nil || d.leaf(name) || t.list == nil || d.key == 0 || d.key >= maxDerivingKey {
 		return
 	}
-	held := t.byID[derivedID(d.key, h)] != nil
-	if s != nil {
-		_, gone := s.retired[h]
-		held = held || gone
-	}
-	if held {
+	if t.taken(d, h) {
 		t.alloc(d, name)
 	}
 }
@@ -490,7 +544,7 @@ func (t *nodeTable) dirNode(p string) *node {
 	for rest := p; rest != ""; {
 		var name string
 		name, rest, _ = strings.Cut(rest, "/")
-		k := n.kids[name]
+		k := t.child(n, name)
 		switch {
 		case k == nil:
 			k = t.alloc(n, name)
@@ -504,7 +558,7 @@ func (t *nodeTable) dirNode(p string) *node {
 
 // alloc logs a new child of the logged directory d under a counter id.
 func (t *nodeTable) alloc(d *node, name string) *node {
-	k := &node{id: t.next, key: t.next, name: name, parent: d}
+	k := &node{id: t.next, key: t.next, name: strings.Clone(name), parent: d}
 	t.next++
 	t.link(d, k)
 	t.byKey[k.key] = k
@@ -529,6 +583,39 @@ func (t *nodeTable) link(d, k *node) {
 	t.byID[k.id] = k
 }
 
+// leaf reports whether name is one of n's leaves.
+func (n *node) leaf(name string) bool {
+	if n.dir == nil {
+		return false
+	}
+	v, ok := n.dir.leaves[nameHash(name)]
+	return ok && v == name
+}
+
+// addLeaf holds name as a leaf of the keyed directory n.
+func (n *node) addLeaf(name string) {
+	s := n.state()
+	if s.leaves == nil {
+		s.leaves = make(map[uint32]string)
+	}
+	s.leaves[nameHash(name)] = name
+}
+
+// child returns d's child name, turning a leaf into a node.
+func (t *nodeTable) child(d *node, name string) *node {
+	if k := d.kids[name]; k != nil {
+		return k
+	}
+	if !d.leaf(name) {
+		return nil
+	}
+	h := nameHash(name)
+	k := &node{id: derivedID(d.key, h), name: d.dir.leaves[h], parent: d}
+	delete(d.dir.leaves, h)
+	t.link(d, k)
+	return k
+}
+
 // state returns n's directory state, creating it on first use.
 func (n *node) state() *dirState {
 	if n.dir == nil {
@@ -546,6 +633,19 @@ func (t *nodeTable) nodePath(n *node) string {
 		return n.name
 	}
 	return t.nodePath(n.parent) + "/" + n.name
+}
+
+// node resolves p like find, turning a leaf into a node for an operation
+// that needs one.
+func (t *nodeTable) node(p string) *node {
+	if p == "" {
+		return t.root
+	}
+	dir, name := split(p)
+	if d := t.find(dir); d != nil {
+		return t.child(d, name)
+	}
+	return nil
 }
 
 // find resolves a path without allocating under the mutex.
