@@ -191,6 +191,7 @@ type layerRecord struct {
 	layer    *overlay.Layer
 	refs     int
 	portable bool
+	embedded bool // state.json carries the layer's metadata in place of its manifest file
 }
 
 // baseNotice carries a base's fault out of its locks before touching registry state.

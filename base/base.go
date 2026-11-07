@@ -36,6 +36,7 @@ type Meta struct {
 	Dir      string    `json:"dir"` // "" for a remote base
 	ForkTime time.Time `json:"fork_time"`
 	Tree     store.OID `json:"tree"`
+	ReuseKey string    `json:"reuse_key,omitempty"` // ordinary capture identity; empty disables reuse
 	Remote   *Remote   `json:"remote,omitempty"`
 }
 
@@ -118,31 +119,11 @@ func Create(ctx context.Context, c Config, o source.Options) (*Base, []string, e
 // paths still read the folder and other tracked content comes from git lazily.
 // Ordered takes replace only source paths and leave the captured index unchanged.
 func CreateRevision(ctx context.Context, c Config, o source.Options, revision *git.Revision, takes ...Take) (*Base, []string, error) {
-	if c.Store == nil {
-		return nil, nil, errors.New("base: missing store")
-	}
-	if err := os.MkdirAll(c.StateDir, 0o700); err != nil {
-		return nil, nil, err
-	}
 	fork := time.Now().UTC()
-	var warnings []string
-	lowerDev, err := volumeID(o.Root)
+	res, warnings, err := Capture(ctx, c, o)
 	if err != nil {
 		return nil, nil, err
 	}
-	stateDev, err := volumeID(c.StateDir)
-	if err != nil {
-		return nil, nil, err
-	}
-	if lowerDev != stateDev {
-		warnings = append(warnings, "source is on another volume than the state; pins and stored blobs are byte copies instead of clones")
-	}
-	o.Store, o.State = c.Store, c.StateDir
-	res, err := source.Capture(ctx, o)
-	if err != nil {
-		return nil, nil, err
-	}
-	warnings = append(warnings, res.Warnings...)
 	work := res
 	if revision != nil {
 		if err := reviseCapture(ctx, c, &res, revision); err != nil {
@@ -152,15 +133,49 @@ func CreateRevision(ctx context.Context, c Config, o source.Options, revision *g
 	if err := takeCapture(ctx, c, o.Rules, &res, work, takes); err != nil {
 		return nil, nil, err
 	}
-	if err := saveCapture(c.StateDir, &res); err != nil {
-		return nil, nil, err
+	key := ""
+	if revision == nil && len(takes) == 0 {
+		key = res.ReuseKey()
 	}
-	m := Meta{ID: c.ID, Dir: o.Root, ForkTime: fork, Tree: res.Tree}
-	b, err := load(c, m, &res)
+	b, err := CreateCaptured(c, res, fork, key)
+	return b, warnings, err
+}
+
+// Capture prepares a capture and private index copies without persisting capture metadata.
+func Capture(ctx context.Context, c Config, o source.Options) (source.Result, []string, error) {
+	if c.Store == nil {
+		return source.Result{}, nil, errors.New("base: missing store")
+	}
+	if err := os.MkdirAll(c.StateDir, 0o700); err != nil {
+		return source.Result{}, nil, err
+	}
+	lowerDev, err := volumeID(o.Root)
 	if err != nil {
-		return nil, nil, err
+		return source.Result{}, nil, err
 	}
-	return b, warnings, nil
+	stateDev, err := volumeID(c.StateDir)
+	if err != nil {
+		return source.Result{}, nil, err
+	}
+	var warnings []string
+	if lowerDev != stateDev {
+		warnings = append(warnings, "source is on another volume than the state; pins and stored blobs are byte copies instead of clones")
+	}
+	o.Store, o.State = c.Store, c.StateDir
+	res, err := source.Capture(ctx, o)
+	return res, append(warnings, res.Warnings...), err
+}
+
+// CreateCaptured persists a prepared capture; an empty reuseKey prevents later reuse.
+func CreateCaptured(c Config, res source.Result, fork time.Time, reuseKey string) (*Base, error) {
+	if c.Store == nil {
+		return nil, errors.New("base: missing store")
+	}
+	if err := saveCapture(c.StateDir, &res); err != nil {
+		return nil, err
+	}
+	m := Meta{ID: c.ID, Dir: res.Root, ForkTime: fork, Tree: res.Tree, ReuseKey: reuseKey}
+	return load(c, m, &res)
 }
 
 // Open rebuilds the captured-tree index while retaining every existing pin.

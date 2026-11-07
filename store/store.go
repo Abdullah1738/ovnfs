@@ -1,9 +1,10 @@
 // Package store keeps git-format objects (blobs and trees) content-addressed
 // under one directory, without git's "<type> <len>\x00" header. Objects up to
 // cloneFile bytes are appended, zstd-compressed where that shrinks them, to
-// pack files indexed in memory; larger ones stay loose and uncompressed, so a
-// loose blob file holds exactly the file's bytes and can be cloned into a
-// checkout instead of copied. Ids are git's SHA-1 ids, so a snapshot tree built
+// pack files indexed in memory. Larger blobs stay loose when reflinked, or
+// use content-defined packed chunks when copying; loose blobs contain exactly
+// the file's bytes and can be cloned into a checkout. Ids are Git SHA-1 ids,
+// so a snapshot tree built
 // here is byte-identical to the one git would write.
 //
 // On-disk layout:
@@ -86,8 +87,8 @@ func (id OID) Valid() bool {
 	return true
 }
 
-// Store keeps git-format objects under one directory: small ones packed and
-// compressed, large ones loose as raw content, so they can be cloned. One
+// Store keeps Git-format objects under one directory: small objects packed,
+// large cloned blobs loose, and large copied blobs in deduplicated chunks. One
 // process owns a store: Sweep coordinates with the store's other users through
 // memory, not the filesystem.
 type Store struct {
@@ -98,10 +99,20 @@ type Store struct {
 	// mu orders publication (rename or freshness touch) and root registration
 	// against Sweep's deletions: publishers hold it shared, Sweep exclusively.
 	mu sync.RWMutex
+	// publishMu prevents a concurrent loose clone and manifest from both
+	// publishing alternate representations of the same large blob.
+	publishMu sync.Mutex
 	// epoch names the period since objects were last removed; guarded by mu.
 	epoch string
 	// holds excludes Sweep while held shared by Hold.
 	holds sync.RWMutex
+	// ingest excludes Sweep's removals from a chunked ingest, held shared
+	// for the whole ingest, since its chunks are stored before the manifest
+	// that reaches them. Not mu: a Sweep waiting for mu would block every
+	// reader and publisher until a long ingest ends. Not holds: callers may
+	// already Hold, and a goroutine must not hold it shared twice. Sweep
+	// takes holds, then ingest, then mu.
+	ingest sync.RWMutex
 	// roots maps trees Build returned to when it did; Sweep keeps what they reach
 	// while they are newer than its cutoff, covering work not yet in a caller's roots.
 	roots   map[OID]time.Time
@@ -112,6 +123,8 @@ type Store struct {
 	treesMu sync.Mutex
 	// noReflink holds source devices whose files cannot be cloned into the store.
 	noReflink sync.Map
+	// reflink remembers successful clones, allowing dictionary deltas on that device.
+	reflink sync.Map
 	// staging holds this process's in-flight staging names so Sweep never
 	// removes a file another goroutine is still filling.
 	staging sync.Map
@@ -272,6 +285,9 @@ func (s *Store) Open(id OID) (Reader, error) {
 	if data, ok := s.cache.get(id); ok {
 		return memReader{bytes.NewReader(data)}, nil
 	}
+	if e, ok := s.packs.lookup(rawOf(id)); ok && e.flags&frameManifest != 0 {
+		return s.openChunks(rawOf(id))
+	}
 	data, ok, err := s.readPacked(rawOf(id))
 	if err != nil {
 		return nil, fmt.Errorf("open object %s: %w", id, err)
@@ -293,6 +309,20 @@ func (s *Store) Size(id OID) (int64, error) {
 		return 0, fmt.Errorf("size of object %q: malformed id", id)
 	}
 	if e, ok := s.packs.lookup(rawOf(id)); ok {
+		if e.flags&frameManifest != 0 {
+			current, frame, found, err := s.packs.frame(rawOf(id))
+			if err != nil {
+				return 0, err
+			}
+			if !found {
+				return 0, fs.ErrNotExist
+			}
+			if current.flags&frameManifest == 0 {
+				return int64(current.raw), nil
+			}
+			_, size, err := parseManifest(frame[frameHeader:])
+			return size, err
+		}
 		return int64(e.raw), nil
 	}
 	info, err := os.Lstat(s.objectPath(id))
@@ -334,6 +364,9 @@ func (s *Store) ReadBlob(id OID) ([]byte, error) {
 func (s *Store) CloneBlob(id OID, dst string, mode os.FileMode) error {
 	if !id.Valid() {
 		return fmt.Errorf("clone object %q: malformed id", id)
+	}
+	if e, ok := s.packs.lookup(rawOf(id)); ok && e.flags&frameManifest != 0 {
+		return s.cloneChunks(id, dst, mode)
 	}
 	data, ok, err := s.readPacked(rawOf(id))
 	if err != nil {
@@ -385,14 +418,20 @@ const cloneFile = 1 << 20
 
 // PutFile stores a regular file as a blob and returns its id and size. It opens
 // path once and reads a file of up to cloneFile bytes into memory, packing it
-// only if the object is new; a larger one is staged as a private loose copy: a
-// block-sharing clone, hashed afterwards, where the file's device can clone into
-// the store, else the bytes read once, written and hashed together. The stored
+// only if the object is new. Larger files use a block-sharing loose clone,
+// hashed afterwards, where supported; otherwise a private staged copy is
+// hashed and streamed into content-defined chunks. The stored
 // bytes are exactly the hashed bytes even if path changes concurrently; the size
 // returned is theirs, so it differs from the file's when the file changed while
 // it was read.
 // A symlink at path is refused rather than followed.
 func (s *Store) PutFile(path string) (OID, int64, error) {
+	return s.putFile(path, false)
+}
+
+// putFile preserves chunked history when chunks is true, even if a new source
+// happens to support reflinks; ordinary PutFile keeps its clone fast path.
+func (s *Store) putFile(path string, chunks bool) (OID, int64, error) {
 	in, size, dev, err := openRegular(path)
 	if err != nil {
 		return "", 0, fmt.Errorf("store %s: %w", path, err)
@@ -421,20 +460,29 @@ func (s *Store) PutFile(path string) (OID, int64, error) {
 	defer s.staging.Delete(stage)
 	var id OID
 	err = errors.ErrUnsupported
-	if _, no := s.noReflink.Load(dev); !no && size > cloneFile {
+	if _, no := s.noReflink.Load(dev); !chunks && !no && size > cloneFile {
 		id, size, err = stageClone(in, stage)
+		if err == nil {
+			s.reflink.Store(dev, struct{}{})
+		}
 		if errors.Is(err, errors.ErrUnsupported) {
 			s.noReflink.Store(dev, struct{}{})
 		}
 	}
-	if errors.Is(err, errors.ErrUnsupported) {
+	copied := errors.Is(err, errors.ErrUnsupported)
+	if copied {
 		id, size, err = stageCopy(in, size, stage)
 	}
 	if err != nil {
 		removeFile(stage)
 		return "", 0, fmt.Errorf("store %s: %w", path, err)
 	}
-	if err := s.publish(id, stage, nil, false); err != nil {
+	if copied && size > cloneFile {
+		err = s.chunkStage(id, stage)
+	} else {
+		err = s.publish(id, stage, nil, false)
+	}
+	if err != nil {
 		return "", 0, fmt.Errorf("store %s: %w", path, err)
 	}
 	return id, size, nil
@@ -564,7 +612,10 @@ func (s *Store) putObject(id OID, data, keep []byte, tree bool) error {
 		return nil
 	}
 	if len(data) <= cloneFile {
-		return s.putFrame(id, encodeFrame(rawOf(id), data, time.Now().UnixNano()), keep, tree)
+		return s.putFrame(id, encodeFrame(rawOf(id), data, time.Now().UnixNano(), 0), keep, tree)
+	}
+	if !tree {
+		return s.putChunks(id, bytes.NewReader(data))
 	}
 	stage := s.stageNear(id)
 	defer s.staging.Delete(stage)
@@ -629,6 +680,13 @@ func (s *Store) stageNear(id OID) string {
 func (s *Store) publish(id OID, stage string, keep []byte, tree bool) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	if s.packs.touch(rawOf(id), time.Now().UnixNano()) {
+		removeFile(stage)
+		s.stored(id, keep, tree)
+		return nil
+	}
 	dst := s.objectPath(id)
 	exists, err := renameNoReplace(stage, dst)
 	if err != nil {

@@ -17,6 +17,11 @@ this checked-out-branch update without writing.
 On a 49k-file repository, opening a checkout takes about a second and
 `git status` inside it under three.
 
+Repeated ordinary `new` calls share a captured base when the folder's fresh
+stat-backed capture, rules and git metadata still match. Each checkout still
+gets its own writable layer and private git state. `--rev`, `--take`, nested
+repositories and captures whose identity cannot be proved use a fresh base.
+
 A submodule absorbed into the repository's `.git/modules`, as `git submodule
 add` and `git submodule update --init` lay it out, gets a private git directory
 of its own, built the same way and placed below the checkout's at
@@ -92,8 +97,11 @@ first.
 
 `snap` renames the upper into an immutable layer in O(1) and hashes its source
 paths into a git-format tree in the background (`--wait` blocks); hashing
-touches only the changed paths, and the store keeps a changed file as a delta
-against its previous version, so a snapshot costs about what changed. `fork`
+touches only changed paths. Trees and small files can use deltas against their
+previous versions; large files share reflink blocks where supported, otherwise
+content-defined chunks. Copy-up and hashing still process the whole changed
+file. The metadata of a small snapshot (about 15 changed files) lives in the
+registry state instead of a manifest file of its own. `fork`
 snapshots a checkout and opens a second one on that snapshot; parent and child
 diverge. `new --from SNAP` opens a checkout on any snapshot. `rm` removes a
 checkout and keeps its snapshots; `drop` releases one. Nothing replaces the

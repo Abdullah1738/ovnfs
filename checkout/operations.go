@@ -163,7 +163,22 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	}
 	r.mu.Unlock()
 	config := r.baseConfig(id)
-	view, warnings, err := base.CreateRevision(ctx, config, source.Options{Root: root, Rules: m.Rules, Cache: r.statCachePath(root)}, revision, takes...)
+	options := source.Options{Root: root, Rules: m.Rules, Cache: r.statCachePath(root)}
+	var view *base.Base
+	var warnings []string
+	if revision == nil && len(takes) == 0 {
+		fork := time.Now().UTC()
+		var captured source.Result
+		if captured, warnings, err = base.Capture(ctx, config, options); err == nil {
+			key := captured.ReuseKey()
+			if b := r.retainReusable(root, key, m.Lock()); b != nil {
+				return r.publishReused(ctx, name, config.StateDir, b, captured.Stats, warnings)
+			}
+			view, err = base.CreateCaptured(config, captured, fork, key)
+		}
+	} else {
+		view, warnings, err = base.CreateRevision(ctx, config, options, revision, takes...)
+	}
 	if err != nil {
 		if errors.Is(err, base.ErrTake) {
 			err = failure("invalid", "%v", err)
@@ -171,15 +186,9 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		return api.NewReply{}, r.abortCreate(name, config.StateDir, err)
 	}
 	b := &baseRecord{view: view, lock: m.Lock(), rules: m.Rules}
-	gs := gitSource{rev: revision}
-	if repo := view.Domains().Repo(""); repo != nil {
-		gs.repo = repo
-		for _, rr := range view.Capture().Repos {
-			if rr.Path == "" {
-				gs.index = rr.Index
-			}
-		}
-		err = repo.PrepareObjects(r.objectsPath(id, ""))
+	gs := capturedGit(view, revision)
+	if gs.repo != nil {
+		err = gs.repo.PrepareObjects(r.objectsPath(id, ""))
 		if err == nil {
 			gs.modules, err = r.prepareModules(view, id)
 		}
@@ -196,6 +205,61 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		return api.NewReply{}, err
 	}
 	stats := view.Capture().Stats
+	reply.Capture, reply.Warnings = &stats, append([]string{}, warnings...)
+	return reply, nil
+}
+
+// capturedGit is the private git state a checkout opened on view at revision
+// starts from: the captured repository and index copy, when there is one.
+func capturedGit(view *base.Base, revision *git.Revision) gitSource {
+	gs := gitSource{rev: revision}
+	if gs.repo = view.Domains().Repo(""); gs.repo != nil {
+		for _, rr := range view.Capture().Repos {
+			if rr.Path == "" {
+				gs.index = rr.Index
+			}
+		}
+	}
+	return gs
+}
+
+// retainReusable retains and returns a base that an ordinary capture of root
+// with this reuse key and resolved manifest lock may share, or nil when the key
+// is empty or no base matches. Collection picks bases to remove under the same
+// lock, so a base it has picked is never returned.
+func (r *Registry) retainReusable(root, key string, lock manifest.Lock) *baseRecord {
+	if key == "" {
+		return nil
+	}
+	hash := lock.Hash()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, b := range r.bases {
+		meta := b.view.Meta()
+		if meta.Dir == root && meta.Remote == nil && meta.ReuseKey == key && b.lock.Hash() == hash {
+			r.retainLocked(b, nil)
+			return b
+		}
+	}
+	return nil
+}
+
+// publishReused opens the reserved checkout on a base from retainReusable,
+// discarding the state directory the new capture wrote; the retained reference
+// ends once the checkout holds its own.
+func (r *Registry) publishReused(ctx context.Context, name, stateDir string, b *baseRecord, stats api.Capture, warnings []string) (api.NewReply, error) {
+	defer func() {
+		r.mu.Lock()
+		r.releaseLocked(b, nil)
+		r.mu.Unlock()
+	}()
+	if err := os.RemoveAll(stateDir); err != nil {
+		return api.NewReply{}, r.abortCreate(name, stateDir, err)
+	}
+	reply, err := r.publishBase(ctx, name, b.view.Meta().ID, b, capturedGit(b.view, nil))
+	if err != nil {
+		return api.NewReply{}, err
+	}
 	reply.Capture, reply.Warnings = &stats, append([]string{}, warnings...)
 	return reply, nil
 }
@@ -229,7 +293,7 @@ func submodules(view *base.Base) []source.Repo {
 	return out
 }
 
-// publishBase registers a freshly created base and opens the reserved checkout on it.
+// publishBase registers a new or retained base and opens the reserved checkout on it.
 func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseRecord, gs gitSource) (api.NewReply, error) {
 	r.mu.Lock()
 	r.bases[id] = b

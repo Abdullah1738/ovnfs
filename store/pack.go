@@ -28,7 +28,7 @@ import (
 //
 //	0  CRC-32C (Castagnoli) of bytes 4 to the end of the frame
 //	4  object id, 20 raw bytes
-//	24 flags (frameZstd, frameDelta)
+//	24 flags (compression, typed delta, chunk, or manifest; see constants below)
 //	25 3 zero bytes
 //	28 content length, uint32
 //	32 payload length, uint32
@@ -36,12 +36,26 @@ import (
 //	44 payload: the content, zstd-compressed when frameZstd is set; with
 //	   frameDelta, the raw id of the base object followed by the content
 //	   compressed with the base's content as zstd raw dictionary
+//	   (frameTree selects Git tree rather than blob hash verification).
+//	   frameChunk selects the private chunk hash domain; frameManifest stores
+//	   a uint64 total followed by (20-byte id, uint64 length) references.
+//	   frameInternal selects private manifest nodes rather than blob roots.
+//	   A manifest's header content length is zero; its uint64 total supports
+//	   files larger than the pack header's uint32 length.
 const (
 	frameHeader = 44
 	// frameZstd marks a payload compressed as one zstd frame.
 	frameZstd = 1 << 0
 	// frameDelta marks a payload compressed against a base object (see delta.go).
 	frameDelta = 1 << 1
+	// frameTree gives delta verification the Git tree hash domain.
+	frameTree = 1 << 2
+	// frameChunk is a content-defined leaf in the private chunk hash domain.
+	frameChunk = 1 << 3
+	// frameManifest stores length-prefixed chunk references, not object bytes.
+	frameManifest = 1 << 4
+	// frameInternal distinguishes private manifest nodes from Git blob roots.
+	frameInternal = 1 << 5
 )
 
 // Pack index (<n>.idx) layout: one idxRecord-byte record per frame (id,
@@ -76,7 +90,7 @@ var encoder = sync.OnceValue(func() *zstd.Encoder {
 // decoder decompresses pack payloads; DecodeAll is safe for concurrent use and,
 // with the cap limit, never produces more than the content length a frame declares.
 var decoder = sync.OnceValue(func() *zstd.Decoder {
-	d, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecodeAllCapLimit(true))
+	d, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecodeAllCapLimit(true), zstd.WithDecoderMaxMemory(2*deltaMax))
 	if err != nil {
 		panic(err) // constant options
 	}
@@ -120,13 +134,13 @@ type packed struct {
 
 // encodeFrame returns data as a complete frame for id, fresh at at; the
 // payload is zstd-compressed when that makes it smaller.
-func encodeFrame(id rawID, data []byte, at int64) []byte {
+func encodeFrame(id rawID, data []byte, at int64, flags uint8) []byte {
 	buf := make([]byte, frameHeader, frameHeader+len(data))
 	buf = encoder().EncodeAll(data, buf)
-	flags := uint8(frameZstd)
 	if len(buf)-frameHeader >= len(data) {
 		buf = append(buf[:frameHeader], data...)
-		flags = 0
+	} else {
+		flags |= frameZstd
 	}
 	sealFrame(buf, id, flags, len(data), at)
 	return buf
@@ -155,12 +169,14 @@ func parseHeader(h []byte) (rawID, packed, bool) {
 	}
 	ok := h[25] == 0 && h[26] == 0 && h[27] == 0 && e.stored <= cloneFile
 	switch e.flags {
-	case 0:
-		ok = ok && e.stored == e.raw
-	case frameZstd:
+	case 0, frameChunk:
+		ok = ok && e.stored == e.raw && e.raw <= cloneFile
+	case frameZstd, frameZstd | frameChunk:
 		ok = ok && e.raw <= cloneFile
-	case frameZstd | frameDelta:
+	case frameZstd | frameDelta, frameZstd | frameDelta | frameTree:
 		ok = ok && e.raw <= deltaMax && e.stored >= uint32(len(rawID{}))
+	case frameManifest, frameManifest | frameInternal:
+		ok = ok && e.raw == 0 && e.stored >= manifestHeader && e.stored <= manifestHeader+manifestFanout*manifestRecord
 	default:
 		ok = false
 	}
@@ -222,7 +238,8 @@ type packSet struct {
 	// mu guards index, bases and files; readers hold it only to look up.
 	mu    sync.RWMutex
 	index map[rawID]packed
-	bases map[rawID]rawID // base of each indexed delta object
+	bases map[rawID]rawID   // base of each indexed delta object
+	links map[rawID][]rawID // dependencies of each indexed manifest
 	files map[uint32]*packFile
 	// appendMu serializes appends, sealing and rewrites and guards the fields below.
 	appendMu sync.Mutex
@@ -249,7 +266,7 @@ func openPacks(dir string) (*packSet, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	p := &packSet{dir: dir, limit: packLimit, index: map[rawID]packed{}, bases: map[rawID]rawID{}, files: map[uint32]*packFile{}}
+	p := &packSet{dir: dir, limit: packLimit, index: map[rawID]packed{}, bases: map[rawID]rawID{}, links: map[rawID][]rawID{}, files: map[uint32]*packFile{}}
 	names, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -288,7 +305,7 @@ func openPacks(dir string) (*packSet, error) {
 			f.Close()
 			return nil, err
 		}
-		if p.loadIdx(n, info.Size()) {
+		if p.loadIdx(pf, info.Size()) {
 			p.files[n] = pf
 			continue
 		}
@@ -357,14 +374,21 @@ func (p *packSet) scan(pf *packFile) (int64, error) {
 			if e.flags&frameDelta != 0 {
 				p.bases[id] = deltaBase(frame)
 			}
+			if e.flags&frameManifest != 0 {
+				if err := p.manifestLinks(id, frame); err != nil {
+					delete(p.index, id)
+					return off, nil
+				}
+			}
 		}
 		off += int64(len(frame))
 	}
 }
 
-// loadIdx indexes pack n of length size from its index file, reporting
+// loadIdx indexes pack pf of length size from its index file, reporting
 // whether that file was intact and matched the pack.
-func (p *packSet) loadIdx(n uint32, size int64) bool {
+func (p *packSet) loadIdx(pf *packFile, size int64) bool {
+	n := pf.n
 	data, err := os.ReadFile(p.idxPath(n))
 	if err != nil || len(data) < idxTrailer || (len(data)-idxTrailer)%idxRecord != 0 {
 		return false
@@ -374,6 +398,31 @@ func (p *packSet) loadIdx(n uint32, size int64) bool {
 		int(binary.LittleEndian.Uint32(trailer[8:])) != len(body)/idxRecord ||
 		binary.LittleEndian.Uint32(trailer[12:]) != crc32.Checksum(body, castagnoli) {
 		return false
+	}
+	// Validate bounds before indexing anything or allocating a frame from an
+	// index. A damaged index is discarded and recovered from the pack scan.
+	var h [frameHeader]byte
+	var frame []byte // a manifest's frame, read to index its links
+	for rec := range slices.Chunk(body, idxRecord) {
+		h[24] = rec[32]
+		copy(h[28:32], rec[28:32])
+		copy(h[32:36], rec[24:28])
+		_, e, ok := parseHeader(h[:])
+		if !ok || uint64(binary.LittleEndian.Uint32(rec[20:]))+frameHeader+uint64(e.stored) > uint64(size) {
+			return false
+		}
+		if e.flags&frameManifest != 0 {
+			if frame == nil {
+				frame = make([]byte, 0, frameHeader+manifestHeader+manifestFanout*manifestRecord)
+			}
+			frame = frame[:frameHeader+int(e.stored)]
+			_, err := pf.f.ReadAt(frame, int64(binary.LittleEndian.Uint32(rec[20:])))
+			var id rawID
+			copy(id[:], rec)
+			if err != nil || checkFrame(id, e, frame) != nil || p.manifestLinks(id, frame) != nil {
+				return false
+			}
+		}
 	}
 	for rec := range slices.Chunk(body, idxRecord) {
 		var id rawID
@@ -519,6 +568,9 @@ func (p *packSet) add(frame []byte) (bool, error) {
 	if e.flags&frameDelta != 0 {
 		p.bases[id] = deltaBase(frame)
 	}
+	if e.flags&frameManifest != 0 {
+		p.manifestLinks(id, frame)
+	}
 	p.mu.Unlock()
 	return false, nil
 }
@@ -527,38 +579,105 @@ func (p *packSet) add(frame []byte) (bool, error) {
 func (p *packSet) depth(id rawID) int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	n := 0
-	for {
+	for n := range deltaDepth + 1 {
 		base, ok := p.bases[id]
 		if !ok {
 			return n
 		}
 		id = base
-		n++
 	}
+	return deltaDepth + 1
 }
 
-// keepBases adds to live the delta bases, transitively, of every packed
-// object a Sweep with cutoff before keeps (live, or fresh at or after before),
-// so no kept delta loses its base.
+// keepBases adds to live the dependencies (delta bases, manifest pages and
+// chunks), transitively, of every packed object a Sweep with cutoff before
+// keeps (live, or fresh at or after before), so no kept object loses one.
+// Afterwards live is closed under dependencies.
 func (p *packSet) keepBases(live map[OID]struct{}, before int64) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	for id, base := range p.bases {
-		if p.index[id].at < before {
-			if _, ok := live[id.oid()]; !ok {
-				continue
-			}
-		}
-		for {
-			live[base.oid()] = struct{}{}
-			next, ok := p.bases[base]
-			if !ok {
-				break
-			}
-			base = next
+	var hexID [40]byte
+	isLive := func(id rawID) bool {
+		hex.Encode(hexID[:], id[:])
+		_, ok := live[OID(hexID[:])]
+		return ok
+	}
+	fresh := func(id rawID) bool {
+		e, ok := p.index[id]
+		return ok && e.at >= before
+	}
+	// Every kept object with dependencies is followed from here, so a
+	// dependency already live, or fresh, need not be followed again.
+	var stack []rawID
+	for id := range p.bases {
+		if fresh(id) || isLive(id) {
+			stack = append(stack, id)
 		}
 	}
+	for id := range p.links {
+		if fresh(id) || isLive(id) {
+			stack = append(stack, id)
+		}
+	}
+	p.follow(stack, func(dep rawID) bool {
+		if isLive(dep) {
+			return false
+		}
+		live[OID(hexID[:])] = struct{}{}
+		return !fresh(dep)
+	})
+}
+
+// manifestLinks validates and indexes a manifest's dependencies; p.mu is held
+// or the pack set is not yet shared.
+func (p *packSet) manifestLinks(id rawID, frame []byte) error {
+	data := frame[frameHeader:]
+	refs, _, err := parseManifest(data)
+	if err != nil || frame[24]&frameInternal != 0 && rawOf(HashBytes("manifest", data)) != id {
+		return errCorrupt
+	}
+	deps := make([]rawID, len(refs))
+	for i, ref := range refs {
+		deps[i] = ref.id
+	}
+	p.links[id] = deps
+	return nil
+}
+
+// follow pops objects off stack and passes each of their direct dependencies
+// (a delta's base, a manifest's references) to descend, pushing those it
+// reports should be followed in turn; descend must report each object at most
+// once, so corrupt cycles terminate. p.mu is held.
+func (p *packSet) follow(stack []rawID, descend func(rawID) bool) {
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if base, ok := p.bases[id]; ok {
+			if descend(base) {
+				stack = append(stack, base)
+			}
+			continue
+		}
+		for _, dep := range p.links[id] {
+			if descend(dep) {
+				stack = append(stack, dep)
+			}
+		}
+	}
+}
+
+// chainRoot returns the full object at the bottom of a bounded delta chain.
+func (p *packSet) chainRoot(id rawID) (rawID, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for range deltaDepth + 1 {
+		base, ok := p.bases[id]
+		if !ok {
+			return id, true
+		}
+		id = base
+	}
+	return rawID{}, false
 }
 
 // lookup returns the location of packed object id.
@@ -588,6 +707,10 @@ func (p *packSet) frame(id rawID) (packed, []byte, bool, error) {
 	var pf *packFile
 	if ok {
 		pf = p.files[e.pack]
+		if pf == nil || e.stored > cloneFile {
+			p.mu.RUnlock()
+			return e, nil, true, errCorrupt
+		}
 		pf.refs.Add(1)
 	}
 	p.mu.RUnlock()
@@ -614,7 +737,8 @@ const rewriteShare = 4
 // removals lists the packed objects a Sweep removes: those outside live whose
 // freshness predates before, but only from packs where they and frames no
 // longer indexed make up at least 1/rewriteShare of the pack. Dead objects
-// left in other packs stay stored, so their delta bases join live.
+// left in other packs stay stored, so their dependencies join live. live
+// must be closed under dependencies, as keepBases leaves it.
 func (p *packSet) removals(live map[OID]struct{}, before int64) ([]rawID, error) {
 	p.appendMu.Lock()
 	defer p.appendMu.Unlock()
@@ -633,7 +757,13 @@ func (p *packSet) removals(live map[OID]struct{}, before int64) ([]rawID, error)
 			dead[id] = e
 		}
 	}
+	isLive := func(id rawID) bool {
+		hex.Encode(hexID[:], id[:])
+		_, ok := live[OID(hexID[:])]
+		return ok
+	}
 	sizes := map[uint32]int64{}
+	var stack []rawID
 	for {
 		deadBytes := map[uint32]int64{}
 		for _, e := range dead {
@@ -656,29 +786,33 @@ func (p *packSet) removals(live map[OID]struct{}, before int64) ([]rawID, error)
 			}
 			victims[n] = (size-(indexed[n]-d))*rewriteShare >= size
 		}
-		// A dead delta left in place keeps its base chain, which may make
-		// other packs hold less garbage: repeat until nothing changes.
-		changed := false
+		// A dead object left in place keeps its dependencies, which may make
+		// other packs hold less garbage: repeat until nothing changes. Its
+		// pack only loses garbage from here on, so it stays in place and is
+		// followed once. Live and fresh dependencies are closed already.
+		stack = stack[:0]
 		for id, e := range dead {
-			if victims[e.pack] {
-				continue
-			}
-			for base, ok := p.bases[id]; ok; base, ok = p.bases[base] {
-				live[base.oid()] = struct{}{}
-				if _, isDead := dead[base]; isDead {
-					delete(dead, base)
-					changed = true
-				}
+			if !victims[e.pack] {
+				delete(dead, id)
+				stack = append(stack, id)
 			}
 		}
-		if !changed {
-			var remove []rawID
-			for id, e := range dead {
-				if victims[e.pack] {
-					remove = append(remove, id)
-				}
+		changed := false
+		p.follow(stack, func(dep rawID) bool {
+			if isLive(dep) {
+				return false
 			}
-			return remove, nil
+			live[OID(hexID[:])] = struct{}{}
+			if _, isDead := dead[dep]; isDead {
+				delete(dead, dep)
+				changed = true
+				return true
+			}
+			_, indexed := p.index[dep]
+			return !indexed
+		})
+		if !changed {
+			return slices.Collect(maps.Keys(dead)), nil
 		}
 	}
 }
@@ -697,6 +831,7 @@ func (p *packSet) remove(dead []rawID) error {
 			victims[e.pack] = true
 			delete(p.index, id)
 			delete(p.bases, id)
+			delete(p.links, id)
 		}
 	}
 	p.mu.Unlock()

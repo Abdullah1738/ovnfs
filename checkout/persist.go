@@ -9,10 +9,18 @@ import (
 
 	"github.com/stencil-hq/ovnfs/base"
 	"github.com/stencil-hq/ovnfs/internal/durable"
+	"github.com/stencil-hq/ovnfs/overlay"
 )
 
-// stateVersion is the only registry manifest layout this build reads.
-const stateVersion = 4
+// stateVersion is the registry manifest layout this build writes. Builds that
+// read only version 4 truncate store packs at frame kinds they do not know
+// (chunks, chunk manifests, tree deltas); version 5 makes them refuse the state
+// before they open the store.
+const stateVersion = 5
+
+// oldestStateVersion is the oldest layout this build reads; version 4 is a
+// subset of version 5, rewritten as 5 when the registry opens.
+const oldestStateVersion = 4
 
 // diskState is the versioned registry manifest; all referenced paths live below State.
 type diskState struct {
@@ -48,10 +56,24 @@ type diskSnapshot struct {
 	Git         string   `json:"git,omitempty"`
 }
 
-// diskLayer binds an indexed layer directory to its frozen base.
+// diskLayer binds a layer to its base. Metadata, when present, replaces the
+// stored layer's manifest file (see embedLimit).
 type diskLayer struct {
 	ID, Base string
-	Portable bool `json:"portable,omitempty"`
+	Portable bool   `json:"portable,omitempty"`
+	Metadata []byte `json:"metadata,omitempty"`
+}
+
+// embedLimit bounds the compressed metadata of a stored layer that state.json
+// carries instead of a manifest file. A small manifest would occupy a whole
+// filesystem block of its own, but every registry change rewrites state.json
+// with all embedded metadata, so larger manifests keep their file.
+const embedLimit = 1 << 10
+
+// embeddable reports whether a stored layer's metadata belongs in state.json.
+func embeddable(l *overlay.Layer) bool {
+	m := l.Metadata()
+	return m != nil && len(m) <= embedLimit
 }
 
 // diskIntent makes an interrupted multi-step filesystem mutation recoverable.
@@ -80,7 +102,11 @@ func (r *Registry) stateLocked() diskState {
 		d.Snapshots = append(d.Snapshots, disk)
 	}
 	for _, l := range r.layers {
-		d.Layers = append(d.Layers, diskLayer{ID: l.id, Base: l.base, Portable: l.portable})
+		disk := diskLayer{ID: l.id, Base: l.base, Portable: l.portable}
+		if l.embedded {
+			disk.Metadata = l.layer.Metadata()
+		}
+		d.Layers = append(d.Layers, disk)
 	}
 	for _, intent := range r.intents {
 		d.Intents = append(d.Intents, intent)

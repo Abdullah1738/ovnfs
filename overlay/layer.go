@@ -37,6 +37,7 @@ type Entry struct {
 	Kind   Kind
 	Opaque bool
 	Info   os.FileInfo
+	Origin string // path before this upper's renames; a delta-base hint, not file identity
 }
 
 // Layer is a frozen directory indexed once and safe for concurrent readers.
@@ -52,6 +53,7 @@ type Layer struct {
 	blobs    Blobs             // nil while every entry is raw
 	ids      map[string]string // path → blob id of a stored file's content or symlink's target
 	tree     string            // store tree reaching every stored blob; "" when none
+	metadata []byte            // immutable compressed metadata once stored
 }
 
 // IndexLayer indexes a frozen upper after its staging work directory is removed.
@@ -119,6 +121,9 @@ func indexLayer(dir string, live bool) (*Layer, error) {
 		}
 		return nil
 	})
+	if err == nil {
+		err = l.loadOrigins()
+	}
 	return l, err
 }
 
@@ -168,6 +173,9 @@ func entry(info os.FileInfo) Entry {
 
 // set updates a mutable upper's path and direct-child indexes together.
 func (l *Layer) set(p string, e Entry) {
+	if (e.Kind == KindFile || e.Kind == KindSymlink) && e.Origin == "" {
+		e.Origin = l.entries[p].Origin
+	}
 	l.entries[p] = e
 	if path.Base(p) == ".git" {
 		if l.gits == nil {

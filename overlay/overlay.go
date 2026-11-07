@@ -159,6 +159,13 @@ func (f *FS) Freeze(dir string) (*Layer, error) {
 		return nil, &fs.PathError{Op: "freeze", Path: root, Err: syscall.ENOTDIR}
 	}
 	l := f.index
+	if wrote, err := l.saveOrigins(root); err != nil {
+		return nil, err
+	} else if wrote {
+		if info, err = hostLstat(root); err != nil {
+			return nil, err
+		}
+	}
 	e := entry(info)
 	e.Opaque = l.entries[""].Opaque
 	l.set("", e)
@@ -934,6 +941,9 @@ func (f *FS) Rename(from, to string) error {
 	var move func(string, string)
 	move = func(a, b string) {
 		e := f.index.entries[a]
+		if (e.Kind == KindFile || e.Kind == KindSymlink) && e.Origin == "" {
+			e.Origin = a
+		}
 		f.index.set(b, e)
 		f.moveIdentity(a, b)
 		if m := f.files[a]; m != nil {

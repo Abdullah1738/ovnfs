@@ -60,6 +60,7 @@ type Result struct {
 	Warnings []string               `json:"-"`
 	BlobRepo map[string]string      `json:"blob_repo,omitempty"` // taken file -> root-relative object repository
 	Domains  *Domains               `json:"-"`
+	reuse    *reuseRecord           // set only by Capture; see ReuseKey
 }
 
 // Resolve returns the source root for dir: the repository's top level when dir is
@@ -89,7 +90,7 @@ func Resolve(dir string) (string, error) {
 // o.Store is nil); every other class is recorded as a root and never descended.
 func Capture(ctx context.Context, o Options) (Result, error) {
 	start := time.Now()
-	w := &walker{o: o, res: Result{Root: o.Root, Files: map[string]store.File{}, Info: map[string]Info{}, Roots: map[string]rules.Class{}}, cacheOut: map[string]statEntry{}, cacheReady: make(chan struct{}), verifiers: map[string]*verifier{}}
+	w := &walker{o: o, res: Result{Root: o.Root, Files: map[string]store.File{}, Info: map[string]Info{}, Roots: map[string]rules.Class{}}, cacheOut: map[string]statEntry{}, cacheReady: make(chan struct{}), verifiers: map[string]*verifier{}, identity: newReuseHash()}
 	var epoch string
 	if o.Store != nil {
 		// No object is removed until Build has made the tree's objects safe from Sweep,
@@ -120,6 +121,11 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 	}
 	w.domains = domains
 	w.res.Domains = domains
+	if info, err := os.Lstat(o.Root); err == nil {
+		w.identity.stat("", rules.Source, info, fileKey{})
+	} else {
+		w.unproven = true
+	}
 	w.startPool()
 	_, walkErr := w.dir(ctx, "")
 	if walkErr == nil {
@@ -142,6 +148,9 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 		}
 	}
 	w.res.Repos = domains.Repos()
+	if !w.unproven {
+		w.res.reuse = &reuseRecord{walk: w.identity.sum(), tree: w.res.Tree}
+	}
 	st := &w.res.Stats
 	st.Root = o.Root
 	for _, r := range w.res.Repos {
@@ -180,6 +189,8 @@ type walker struct {
 	verifiers   map[string]*verifier // by repository path; created before and during the walk, read after it
 	jobs        chan hashJob
 	workers     sync.WaitGroup
+	identity    *reuseHash // walked entries' stat data in walk order; walk goroutine only
+	unproven    bool       // an entry's stat data is missing from identity; walk goroutine only
 }
 
 // hashJob is one regular file whose content must be read.
@@ -253,6 +264,12 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 			// replaced by private git directories; any other nested repository's
 			// stays as a local copy-on-write root.
 			if (rel != "" || !w.domains.RootIsRepo()) && w.domains.Module(rel) == "" {
+				if info, err := e.Info(); err == nil {
+					info = hostfile.Linked(w.abs(p), info)
+					w.identity.stat(p, rules.Local, info, keyOf(info))
+				} else {
+					w.unproven = true
+				}
 				w.root(p, rules.Local, nil, fileKey{})
 			}
 			continue
@@ -273,14 +290,18 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 			class = rule.Class
 		}
 		if class != rules.Source {
+			w.identity.stat(p, class, info, key)
 			w.root(p, class, info, key)
 			continue
 		}
 		mode, ok := store.ModeOf(info.Mode())
 		if !ok {
+			w.identity.stat(p, rules.Hidden, info, key)
 			w.root(p, rules.Hidden, info, key)
 			continue
 		}
+		// Recorded before a directory is listed or a file read, so later changes alter the next walk's data.
+		w.identity.stat(p, rules.Source, info, key)
 		switch {
 		case info.IsDir():
 			has, err := w.dir(ctx, p)

@@ -72,8 +72,8 @@ func Open(c Config) (*Registry, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, coded(err)
 	}
-	if d.Version != stateVersion {
-		return nil, failure("unsupported", "state in %s has version %d, this ovnfs reads only version %d; move it aside or use another --state", c.State, d.Version, stateVersion)
+	if d.Version < oldestStateVersion || d.Version > stateVersion {
+		return nil, failure("unsupported", "state in %s has version %d, this ovnfs reads versions %d to %d; move it aside or use another --state", c.State, d.Version, oldestStateVersion, stateVersion)
 	}
 	if err = validateDisk(d); err != nil {
 		return nil, coded(err)
@@ -130,12 +130,21 @@ func Open(c Config) (*Registry, error) {
 			cleanup()
 			return nil, failure("io", "layer %s references missing base %s", disk.ID, disk.Base)
 		}
-		layer, openErr := overlay.OpenLayer(filepath.Join(c.State, "layers", disk.ID), blobFiles{st})
+		dir := filepath.Join(c.State, "layers", disk.ID)
+		var layer *overlay.Layer
+		var openErr error
+		if len(disk.Metadata) != 0 {
+			layer, openErr = overlay.RestoreLayer(dir, disk.Metadata, blobFiles{st})
+		} else {
+			layer, openErr = overlay.OpenLayer(dir, blobFiles{st})
+		}
 		if openErr != nil {
 			cleanup()
 			return nil, coded(openErr)
 		}
-		r.layers[disk.ID] = &layerRecord{id: disk.ID, base: disk.Base, layer: layer, portable: disk.Portable}
+		// A small manifest file left by a crash or an older build moves into state below.
+		embedded := len(disk.Metadata) != 0 || embeddable(layer)
+		r.layers[disk.ID] = &layerRecord{id: disk.ID, base: disk.Base, layer: layer, portable: disk.Portable, embedded: embedded}
 	}
 	for _, disk := range d.Checkouts {
 		b := r.bases[disk.Base]
@@ -198,6 +207,14 @@ func Open(c Config) (*Registry, error) {
 	if err = r.persistLocked(); err != nil {
 		cleanup()
 		return nil, coded(err)
+	}
+	for _, rec := range r.layers {
+		if rec.embedded {
+			if err = rec.layer.RemoveMetadata(); err != nil {
+				cleanup()
+				return nil, coded(err)
+			}
+		}
 	}
 	r.hasher = newHasher(r.storeLayers)
 	r.workers.Add(2)
@@ -609,8 +626,8 @@ func (r *Registry) collectGarbage() {
 				delete(r.layers, id)
 			}
 		}
-		// A zero-reference base cannot be reacquired: snapshot creates already retain
-		// it, and folder creates always capture a new base.
+		// Capture reuse acquires a reference under this lock, so a base selected
+		// for removal cannot be reacquired by a concurrent folder create.
 		for id, b := range r.bases {
 			if b.refs == 0 && !r.baseReservedLocked(id) {
 				deadBases[id] = b
@@ -719,6 +736,18 @@ func (r *Registry) storeLayers(kept layerBlobs) {
 			continue
 		}
 		err := storeLayer(r.store, l, ids)
+		if err == nil && embeddable(l) {
+			// The manifest file stays the recoverable copy until state.json carries it.
+			r.mu.Lock()
+			rec.embedded = true
+			if err = r.persistLocked(); err != nil {
+				rec.embedded = false
+			}
+			r.mu.Unlock()
+			if err == nil {
+				err = l.RemoveMetadata()
+			}
+		}
 		r.mu.Lock()
 		rec.refs--
 		if rec.refs == 0 {

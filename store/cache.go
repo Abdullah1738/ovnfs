@@ -127,7 +127,7 @@ func (s *Store) Cached(id OID) (data []byte, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if e, ok := s.packs.lookup(rawOf(id)); ok {
-		if !s.cache.fits(int64(e.raw)) {
+		if e.flags&(frameManifest|frameChunk) != 0 || !s.cache.fits(int64(e.raw)) {
 			return nil, false
 		}
 		data, ok, err := s.readPacked(rawOf(id))

@@ -459,9 +459,9 @@ func TestSnapshotKeepsNestedEmptyDirectories(t *testing.T) {
 	}
 }
 
-// TestSnapshotStoresEditAsDelta checks that a snapshot of a one-line edit to a
-// large file grows the store by about the edit, not by the file, and that the
-// snapshot still reads back exactly.
+// TestSnapshotStoresEditAsDelta bounds history growth across edits and renames,
+// including replaced destinations, directory moves whose source sorts first,
+// and saves that write a temporary file and rename it over the target.
 func TestSnapshotStoresEditAsDelta(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	var b strings.Builder
@@ -469,34 +469,84 @@ func TestSnapshotStoresEditAsDelta(t *testing.T) {
 		fmt.Fprintf(&b, "line %d %x\n", b.Len(), rng.Uint64())
 	}
 	original := b.String()
-	f := newFixture(t)
-	f.newCheckout(folder(t, map[string]string{"big.txt": original}), "c")
-	packs := func() int64 {
-		var n int64
-		entries, _ := os.ReadDir(filepath.Join(f.state, "store", "packs"))
-		for _, e := range entries {
-			if info, err := e.Info(); err == nil {
-				n += info.Size()
-			}
-		}
-		return n
-	}
-	before := packs()
 	edited := strings.Replace(original, "line 0 ", "line 0 edited ", 1)
-	f.put("c", "big.txt", edited)
-	reply, err := f.reg.Snap(context.Background(), api.SnapArgs{Checkout: "c", Wait: true})
+	for _, scenario := range []struct {
+		name  string
+		moves [][2]string
+		temp  string // the edit is saved here, then renamed to path
+		path  string
+	}{
+		{name: "edit", path: "a/big.txt"},
+		{name: "atomic save", temp: "a/.big.txt.tmp", path: "a/big.txt"},
+		{name: "rename", moves: [][2]string{{"a/big.txt", "z/big.txt"}}, path: "z/big.txt"},
+		{name: "rename chain", moves: [][2]string{{"a/big.txt", "mid.txt"}, {"mid.txt", "z/big.txt"}}, path: "z/big.txt"},
+		{name: "directory", moves: [][2]string{{"a", "renamed"}}, path: "renamed/big.txt"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.newCheckout(folder(t, map[string]string{"a/big.txt": original, "z/big.txt": "replaced"}), "c")
+			before := storeBytes(t, f.state)
+			rename := func(from, to string) {
+				t.Helper()
+				s, err := f.reg.Enter("c")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Done()
+				if err := s.FS.Rename(from, to); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, move := range scenario.moves {
+				rename(move[0], move[1])
+			}
+			if scenario.temp == "" {
+				f.put("c", scenario.path, edited)
+			} else {
+				f.put("c", scenario.temp, edited)
+				rename(scenario.temp, scenario.path)
+			}
+			reply, err := f.reg.Snap(context.Background(), api.SnapArgs{Checkout: "c", Wait: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if grew := storeBytes(t, f.state) - before; grew > 8<<10 {
+				t.Fatalf("an edit to a %d-byte file grew the store by %d bytes", len(original), grew)
+			}
+			if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: reply.Snapshot.ID, Name: "view"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.read("view", scenario.path); got != edited {
+				t.Fatalf("snapshot content differs: got %d bytes, want %d", len(got), len(edited))
+			}
+			if len(scenario.moves) != 0 && f.read("view", "a/big.txt") != "<absent>" {
+				t.Fatal("snapshot resurrected the rename source")
+			}
+			if scenario.temp != "" && f.read("view", scenario.temp) != "<absent>" {
+				t.Fatal("snapshot resurrected the temporary file")
+			}
+		})
+	}
+}
+
+// storeBytes accounts for stored history without depending on the store's layout.
+func storeBytes(t *testing.T, state string) int64 {
+	t.Helper()
+	var n int64
+	err := filepath.WalkDir(filepath.Join(state, "store"), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, err := d.Info()
+		if err == nil {
+			n += info.Size()
+		}
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if grew := packs() - before; grew > 8<<10 {
-		t.Fatalf("a one-line edit to a %d-byte file grew the store by %d bytes", len(original), grew)
-	}
-	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: reply.Snapshot.ID, Name: "view"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.read("view", "big.txt"); got != edited {
-		t.Fatalf("snapshot reads back %d bytes, want the %d edited bytes", len(got), len(edited))
-	}
+	return n
 }
 
 // snapLayer snapshots checkout name and returns the layer it froze, once
@@ -543,10 +593,8 @@ func hostFiles(t *testing.T, dir string) []string {
 	return out
 }
 
-// TestStoredLayerKeepsOnlyRawLeftovers checks that once a snapshot is hashed
-// its layer directory holds the manifest and the non-source files hashing did
-// not store, that every path still reads as before, and that a restart loads
-// the manifest.
+// TestStoredLayerKeepsOnlyRawLeftovers checks stored and non-source content,
+// metadata, and collection roots across restart.
 func TestStoredLayerKeepsOnlyRawLeftovers(t *testing.T) {
 	f := newFixture(t)
 	f.newCheckout(folder(t, map[string]string{"src/main.go": "package main", "gone": "x", "dir/old": "o"}), "c", "local *.log")
@@ -567,9 +615,6 @@ func TestStoredLayerKeepsOnlyRawLeftovers(t *testing.T) {
 	}
 	s.Done()
 	snap, layer := f.snapLayer("c")
-	if got := hostFiles(t, layer.Dir()); !slices.Equal(got, []string{".wh..wh.manifest", "debug.log"}) {
-		t.Fatalf("layer directory holds %v", got)
-	}
 	check := func() {
 		t.Helper()
 		for p, want := range map[string]string{"src/main.go": "package main // edited", "src/new.txt": "new", "debug.log": "local only", "gone": "<absent>", "dir/old": "<absent>", "link": "new"} {
@@ -637,11 +682,46 @@ func TestRestartStoresHashedRawLayers(t *testing.T) {
 	layer := f.reg.layers[id].layer
 	f.reg.mu.RUnlock()
 	eventually(t, "layer stored after restart", layer.Stored)
-	if got := hostFiles(t, layer.Dir()); !slices.Equal(got, []string{".wh..wh.manifest", "b.log"}) {
-		t.Fatalf("layer directory holds %v", got)
-	}
 	if got := f.read("c", "a"); got != "edited" {
 		t.Fatalf("a reads %q", got)
+	}
+}
+
+// TestRestartIndexesRenamedDirectoryWithDeletion reopens a raw layer whose
+// renamed directory carried the deletion of a source file: the registry opens
+// and the snapshot reads back with the deletion and the move intact.
+func TestRestartIndexesRenamedDirectoryWithDeletion(t *testing.T) {
+	f := newFixture(t)
+	f.newCheckout(folder(t, map[string]string{"d/x": "x", "d/y": "y"}), "c")
+	s, err := f.reg.Enter("c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FS.Remove("d/x"); err != nil {
+		s.Done()
+		t.Fatal(err)
+	}
+	if err := s.FS.Rename("d", "e"); err != nil {
+		s.Done()
+		t.Fatal(err)
+	}
+	s.Done()
+	f.reg.hasher.keep = nil // the stop comes before storing
+	reply, err := f.reg.Snap(context.Background(), api.SnapArgs{Checkout: "c", Wait: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.open()
+	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: reply.Snapshot.ID, Name: "view"}); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{"e/y": "y", "e/x": "<absent>", "d/y": "<absent>", "d/x": "<absent>"} {
+		if got := f.read("view", p); got != want {
+			t.Fatalf("%s reads %q, want %q", p, got, want)
+		}
 	}
 }
 
@@ -661,8 +741,8 @@ func TestCloseStoresPendingLayers(t *testing.T) {
 	if err := f.reg.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := os.Lstat(layer.Dir()); !layer.Stored() || err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("layer after close: stored %v, %v %v", layer.Stored(), info, err)
+	if !layer.Stored() {
+		t.Fatal("close left snapshot content unstored")
 	}
 	f.open()
 	if got := f.read("c", "a"); got != "edited" {
@@ -670,9 +750,8 @@ func TestCloseStoresPendingLayers(t *testing.T) {
 	}
 }
 
-// TestStoredLayerCopyUpAndDiff checks that a layer of source files only
-// becomes its manifest file, that writes over stored files copy their content
-// and metadata up, and that diffs read stored layers.
+// TestStoredLayerCopyUpAndDiff checks copy-up content and metadata, and diffs
+// against stored layers.
 func TestStoredLayerCopyUpAndDiff(t *testing.T) {
 	f := newFixture(t)
 	f.newCheckout(folder(t, map[string]string{"a": "base"}), "c")
@@ -690,10 +769,7 @@ func TestStoredLayerCopyUpAndDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, layer := f.snapLayer("c")
-	if info, err := os.Lstat(layer.Dir()); err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("fully stored layer %s is %v %v", layer.Dir(), info, err)
-	}
+	f.snapLayer("c")
 	diff, err := f.reg.Diff(context.Background(), api.DiffArgs{Checkout: "c", Patch: true})
 	if err != nil {
 		t.Fatal(err)

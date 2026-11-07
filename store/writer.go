@@ -11,7 +11,7 @@ import (
 // only if its content hashes to the expected id, so a store never holds an
 // object under the wrong name. A blob of up to cloneFile bytes is gathered in
 // memory and packed on commit (becoming resident in the cache where it fits);
-// a larger one is staged as a loose file.
+// a larger one is staged privately and committed as content-defined chunks.
 type BlobWriter struct {
 	s     *Store
 	stage string   // staging file of a loose blob, else ""
@@ -87,7 +87,7 @@ func (w *BlobWriter) Commit(id OID) error {
 		removeFile(w.stage)
 		return fmt.Errorf("blob %s: content hashes to %s", id, sumOID(w.h))
 	}
-	return w.s.publish(id, w.stage, nil, false)
+	return w.s.chunkStage(id, w.stage)
 }
 
 // Abort discards a partially received blob.

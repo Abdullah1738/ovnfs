@@ -231,6 +231,31 @@ func newFold(b *baseRecord, st *store.Store, view source.View, set leafSet) fold
 
 // apply folds one layer's entries, visited parents first, into the leaves.
 func (t *fold) apply(l *overlay.Layer) error {
+	if t.store != nil && !l.Stored() && t.kept[l] == nil {
+		t.kept[l] = make(map[string]string)
+	}
+	// Resolve rename bases before whiteouts or opaque directories remove them. An
+	// origin the parent lacks (a temporary file renamed over its target) or that
+	// is not a regular file keeps the same-path base.
+	var renamed map[string]store.File
+	if t.store != nil {
+		if err := l.Walk(func(p string, e overlay.Entry) error {
+			if e.Origin == "" {
+				return nil
+			}
+			prev, ok, err := t.set.leaf(e.Origin)
+			if err != nil || !ok || (prev.Mode != store.ModeFile && prev.Mode != store.ModeExec) {
+				return err
+			}
+			if renamed == nil {
+				renamed = make(map[string]store.File)
+			}
+			renamed[p] = prev
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 	return l.Walk(func(p string, e overlay.Entry) error {
 		if p == "" || hashExcluded(p) {
 			return nil
@@ -277,6 +302,9 @@ func (t *fold) apply(l *overlay.Layer) error {
 			prev, _, err := t.set.leaf(p)
 			if err != nil {
 				return err
+			}
+			if source, ok := renamed[p]; ok {
+				prev = source
 			}
 			if err := t.removeUnder(p); err != nil {
 				return err
@@ -693,7 +721,7 @@ func (t *snapTree) writeDir(w *store.TreeWriter, d *snapDir) (id store.OID, ok b
 	if len(entries) == 0 {
 		return "", false, nil
 	}
-	id, err = w.Put(entries)
+	id, err = w.PutLike(entries, d.id)
 	return id, err == nil, err
 }
 

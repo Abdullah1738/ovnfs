@@ -25,6 +25,33 @@ func readDisk(t *testing.T, state string) diskState {
 	return d
 }
 
+// TestOpenUpgradesVersion4State opens state an older build wrote and rewrites it
+// at once, so builds that read only version 4 refuse it from then on instead of
+// opening a store whose packs they would truncate.
+func TestOpenUpgradesVersion4State(t *testing.T) {
+	f := newFixture(t)
+	f.newCheckout(folder(t, map[string]string{"a": "base"}), "c")
+	f.put("c", "a", "edited")
+	if _, err := f.reg.Snap(context.Background(), api.SnapArgs{Checkout: "c", Wait: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d := readDisk(t, f.state)
+	d.Version = 4
+	if err := writeState(f.state, d); err != nil {
+		t.Fatal(err)
+	}
+	f.open()
+	if got := readDisk(t, f.state).Version; got <= 4 {
+		t.Fatalf("opened state still has version %d", got)
+	}
+	if got := f.read("c", "a"); got != "edited" {
+		t.Fatalf("a reads %q after the upgrade", got)
+	}
+}
+
 // TestCompactStateRebuildsStacks checks that the manifest is compact, that snapshot
 // and checkout records do not repeat layer stacks, and that every stack reopens.
 func TestCompactStateRebuildsStacks(t *testing.T) {
@@ -144,6 +171,23 @@ func intentState(d diskState, snapshot, layer string) diskState {
 	return d
 }
 
+// frozenChanges reconstructs the raw upper before asynchronous storage removed it.
+func frozenChanges(t *testing.T, dir, gitdir string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGitfile(dir, gitdir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestFreezeCrashRecovery reopens state left by a crash at each step of snap and fork:
 // before the upper moved (rolled back), after it moved (rolled forward, the forked
 // child discarded), and after the commit with the tree id unsynced (hashed again).
@@ -154,21 +198,10 @@ func TestFreezeCrashRecovery(t *testing.T) {
 		// The upper never moved: it still holds the change, and the layer does not exist.
 		// (Close stored the hashed layer, so it cannot simply be renamed back.)
 		upper := filepath.Join(f.state, "uppers", "app")
-		if err := os.RemoveAll(upper); err != nil {
-			t.Fatal(err)
-		}
 		if err := os.RemoveAll(filepath.Join(f.state, "layers", layer)); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.MkdirAll(upper, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(upper, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeGitfile(upper, f.reg.gitdirPath("app")); err != nil {
-			t.Fatal(err)
-		}
+		frozenChanges(t, upper, f.reg.gitdirPath("app"))
 		if err := writeState(f.state, intentState(d, snapshot, layer)); err != nil {
 			t.Fatal(err)
 		}
@@ -186,10 +219,11 @@ func TestFreezeCrashRecovery(t *testing.T) {
 	for _, fork := range []bool{false, true} {
 		t.Run(map[bool]string{false: "snap after rename", true: "fork after rename"}[fork], func(t *testing.T) {
 			f, dir, d, snapshot, layer, tree := frozenRepo(t, fork)
-			// The upper was renamed away and not yet recreated.
+			// The upper was renamed away and not yet recreated or hashed.
 			if err := os.RemoveAll(filepath.Join(f.state, "uppers", "app")); err != nil {
 				t.Fatal(err)
 			}
+			frozenChanges(t, filepath.Join(f.state, "layers", layer), f.reg.gitdirPath("app"))
 			if err := writeState(f.state, intentState(d, snapshot, layer)); err != nil {
 				t.Fatal(err)
 			}

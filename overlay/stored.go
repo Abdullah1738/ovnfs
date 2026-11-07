@@ -56,6 +56,7 @@ type manifestEntry struct {
 	Sys    []byte `json:"x,omitempty"` // native stat record, see encodeSys
 	Link   int    `json:"l,omitempty"` // 1 + index of the first entry naming the same host file
 	Blob   string `json:"b,omitempty"` // stored content; absent: the raw file stays in the directory
+	Origin string `json:"q,omitempty"` // rename's source path in the parent layer view
 }
 
 // storedInfo is metadata a manifest restores: exactly what the host reported
@@ -256,11 +257,15 @@ func (l *Layer) Store(ids map[string]string, tree string, blobs Blobs) error {
 	if err != nil {
 		return err
 	}
-	if err := writeManifest(l.dir, m); err != nil {
+	data, err := encodeManifest(m)
+	if err != nil {
+		return err
+	}
+	if err := writeManifest(l.dir, data); err != nil {
 		return err
 	}
 	l.mu.Lock()
-	l.blobs, l.ids, l.tree = blobs, ids, tree
+	l.blobs, l.ids, l.tree, l.metadata = blobs, ids, tree, data
 	l.mu.Unlock()
 	l.prune()
 	collapse(l.dir)
@@ -272,7 +277,7 @@ func (l *Layer) manifest(ids map[string]string, tree string) (manifest, error) {
 	m := manifest{Version: manifestVersion, Tree: tree}
 	first := make(map[inodeKey]int)
 	err := l.Walk(func(p string, e Entry) error {
-		me := manifestEntry{Path: p, Kind: e.Kind, Opaque: e.Opaque, Blob: ids[p]}
+		me := manifestEntry{Path: p, Kind: e.Kind, Opaque: e.Opaque, Blob: ids[p], Origin: e.Origin}
 		if e.Kind != KindWhiteout {
 			if p == "" {
 				me.Name = e.Info.Name()
@@ -305,26 +310,31 @@ func (l *Layer) manifest(ids map[string]string, tree string) (manifest, error) {
 	return m, err
 }
 
-// writeManifest atomically and durably publishes m in dir, compressed: the
-// native records of one layer's entries repeat most of their bytes.
-func writeManifest(dir string, m manifest) error {
+// encodeManifest compresses repeating native stat records with the layer metadata.
+func encodeManifest(m manifest) ([]byte, error) {
 	var data bytes.Buffer
 	w, err := flate.NewWriter(&data, flate.DefaultCompression)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := json.NewEncoder(w).Encode(m); err != nil {
-		return err
+		w.Close()
+		return nil, err
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return nil, err
 	}
+	return data.Bytes(), nil
+}
+
+// writeManifest atomically and durably publishes compressed metadata in dir.
+func writeManifest(dir string, data []byte) error {
 	tmp := filepath.Join(dir, manifestName+".tmp")
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(data.Bytes())
+	_, err = f.Write(data)
 	if err == nil {
 		err = durable.Sync(f)
 	}
@@ -422,18 +432,41 @@ func OpenLayer(dir string, blobs Blobs) (*Layer, error) {
 	if err != nil {
 		return nil, err
 	}
-	var m manifest
-	err = json.NewDecoder(flate.NewReader(f)).Decode(&m)
+	data, err := io.ReadAll(f)
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		return nil, fmt.Errorf("overlay: layer manifest %s: %w", at, err)
 	}
+	l, err := RestoreLayer(root, data, blobs)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		l.prune()
+		collapse(root)
+	}
+	return l, nil
+}
+
+// RestoreLayer loads compressed metadata persisted by the caller; raw entries
+// stay under dir, which need not exist when every entry is stored. It retains data.
+func RestoreLayer(dir string, data []byte, blobs Blobs) (*Layer, error) {
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	reader := flate.NewReader(bytes.NewReader(data))
+	defer reader.Close()
+	var m manifest
+	if err := json.NewDecoder(reader).Decode(&m); err != nil {
+		return nil, fmt.Errorf("overlay: layer manifest %s: %w", root, err)
+	}
 	if m.Version != manifestVersion {
 		return nil, fmt.Errorf("overlay: layer manifest in %s has version %d, want %d", root, m.Version, manifestVersion)
 	}
-	l := &Layer{dir: root, entries: make(map[string]Entry), children: make(map[string]map[string]Entry), blobs: blobs, ids: make(map[string]string), tree: m.Tree}
+	l := &Layer{dir: root, entries: make(map[string]Entry), children: make(map[string]map[string]Entry), blobs: blobs, ids: make(map[string]string), tree: m.Tree, metadata: data}
 	links := make(map[int]uint64)
 	for i, me := range m.Entries {
 		if err := l.load(i, me, links); err != nil {
@@ -443,11 +476,44 @@ func OpenLayer(dir string, blobs Blobs) (*Layer, error) {
 	if e, ok := l.entries[""]; !ok || e.Kind != KindDir {
 		return nil, fmt.Errorf("overlay: layer manifest in %s has no root directory", root)
 	}
+	return l, nil
+}
+
+// Metadata returns immutable compressed layer metadata, or nil before Store;
+// registries embed it in their shared durable state before removing its file.
+func (l *Layer) Metadata() []byte {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.metadata
+}
+
+// RemoveMetadata removes the standalone manifest after its caller durably
+// persisted Metadata elsewhere; raw entries and their directory remain.
+// A layer not yet stored is rejected without changing its files.
+func (l *Layer) RemoveMetadata() error {
+	if !l.Stored() {
+		return &fs.PathError{Op: "remove metadata", Path: l.dir, Err: fs.ErrInvalid}
+	}
+	info, err := os.Lstat(l.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	at := l.dir
 	if info.IsDir() {
 		l.prune()
-		collapse(root)
+		at = filepath.Join(l.dir, manifestName)
 	}
-	return l, nil
+	if err := os.Remove(at); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if info.IsDir() {
+		// Stored-only layers can have an empty directory after interrupted cleanup.
+		_ = os.Remove(l.dir)
+	}
+	return nil
 }
 
 // load indexes manifest entry i after its parent directory.
@@ -499,6 +565,9 @@ func (l *Layer) load(i int, me manifestEntry, links map[int]uint64) error {
 		l.ids[p] = me.Blob
 	}
 	e.Opaque = me.Opaque
+	if validOrigin(e.Kind, me.Origin) {
+		e.Origin = me.Origin
+	}
 	l.set(p, e)
 	return nil
 }
@@ -511,6 +580,8 @@ func (l *Layer) prune() {
 	l.mu.RLock()
 	ids := l.ids
 	l.mu.RUnlock()
+	_ = os.Remove(filepath.Join(l.dir, originsName))
+	_ = os.Remove(filepath.Join(l.dir, originsName+".tmp"))
 	var dirs []string
 	_ = l.Walk(func(p string, e Entry) error {
 		host := filepath.Join(l.dir, filepath.FromSlash(p))

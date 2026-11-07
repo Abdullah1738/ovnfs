@@ -61,7 +61,7 @@ func putLikeFile(t *testing.T, s *Store, data []byte, like OID) OID {
 // small file as deltas costing bytes proportional to the edit, keeps chains
 // within deltaDepth, and reads every version back, also after a reopen.
 func TestPutFileLikeDeltaChain(t *testing.T) {
-	for _, size := range []int{3 << 20, 200 << 10} {
+	for _, size := range []int{800 << 10, 200 << 10} {
 		s := openStoreCache(t, 0)
 		data := prose(uint64(size), size)
 		like := putLikeFile(t, s, data, "")
@@ -82,7 +82,7 @@ func TestPutFileLikeDeltaChain(t *testing.T) {
 			}
 			like = id
 		}
-		if deltas < deltaDepth {
+		if deltas != deltaDepth+3 {
 			t.Errorf("size %d: %d of %d versions stored as deltas", size, deltas, deltaDepth+3)
 		}
 		for _, st := range []*Store{s, reopen(t, s)} {
@@ -128,10 +128,28 @@ func TestSweepKeepsDeltaBases(t *testing.T) {
 	for _, size := range []int{200 << 10, 2 << 20} {
 		s := openStore(t)
 		baseData := prose(9, size)
-		base := putLikeFile(t, s, baseData, "")
-		middle := putLikeFile(t, s, edit(baseData, 1), base)
+		base := HashBytes("blob", baseData)
+		if size > cloneFile {
+			// A legacy loose base remains a valid dictionary on copy-only devices.
+			if err := writeExclusive(s.objectPath(base), baseData); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			var err error
+			base, err = s.PutBytes(baseData)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		middle, err := s.putLike(edit(baseData, 1), base)
+		if err != nil {
+			t.Fatal(err)
+		}
 		next := edit(edit(baseData, 1), 2)
-		delta := putLikeFile(t, s, next, middle)
+		delta, err := s.putLike(next, middle)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if s.packs.depth(rawOf(delta)) != 2 {
 			t.Fatal("edits not stored as a delta chain")
 		}

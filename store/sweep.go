@@ -16,15 +16,17 @@ import (
 // other frames copied as they are, and deleted once the copies are durable.
 // Elsewhere unreachable packed objects stay stored (and uncounted) until a
 // later sweep finds enough garbage beside them. The delta bases of every
-// object still stored are kept too.
+// object still stored are kept too, as are every manifest's transitive private
+// pages and content-defined chunks.
 // A missing root or subtree (other than EmptyTree) is an error and nothing is
 // removed, since its unknown children cannot be proven unreachable. Staging
 // files older than before that no goroutine of this process owns (leftovers of
 // a crash) are removed too but not counted. Objects published or re-stored
 // during the sweep carry a fresh mtime and survive when before precedes the
 // sweep, and so does everything reachable from a tree Build returned at or
-// after before. Sweep waits for every Hold to be released, and a new epoch
-// begins before the first object is removed.
+// after before. Sweep waits for every Hold to be released, then, once
+// marking ends, for chunked ingests in flight, and a new epoch begins before
+// the first object is removed.
 func (s *Store) Sweep(roots []OID, before time.Time) (int, error) {
 	s.holds.Lock()
 	defer s.holds.Unlock()
@@ -34,6 +36,8 @@ func (s *Store) Sweep(roots []OID, before time.Time) (int, error) {
 			return 0, fmt.Errorf("sweep: %w", err)
 		}
 	}
+	s.ingest.Lock()
+	defer s.ingest.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Builds register under s.mu, so every root registered so far is seen here.

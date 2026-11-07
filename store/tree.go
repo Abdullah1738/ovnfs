@@ -99,9 +99,17 @@ func (s *Store) ReadTree(id OID) ([]Entry, error) {
 	if id == EmptyTree {
 		return nil, nil
 	}
+	if id.Valid() {
+		if e, ok := s.packs.lookup(rawOf(id)); ok && e.flags&(frameChunk|frameManifest) != 0 {
+			return nil, fmt.Errorf("read tree %s: %w", id, errCorrupt)
+		}
+	}
 	data, err := s.ReadBlob(id)
 	if err != nil {
 		return nil, fmt.Errorf("read tree: %w", err)
+	}
+	if HashBytes("tree", data) != id {
+		return nil, fmt.Errorf("read tree %s: %w", id, errCorrupt)
 	}
 	entries, err := parseTree(data)
 	if err != nil {
@@ -249,6 +257,11 @@ func (s *Store) NewTreeWriter() *TreeWriter { return &TreeWriter{s: s, epoch: s.
 // Put stores the directory holding entries (validated as by PutTree) and
 // returns its id; a tree already known stored in this epoch is not written again.
 func (w *TreeWriter) Put(entries []Entry) (OID, error) {
+	return w.PutLike(entries, "")
+}
+
+// PutLike stores entries, using the same-path parent tree like as a delta base when beneficial.
+func (w *TreeWriter) PutLike(entries []Entry, like OID) (OID, error) {
 	data, err := encodeTree(entries)
 	if err != nil {
 		return "", err
@@ -257,7 +270,7 @@ func (w *TreeWriter) Put(entries []Entry) (OID, error) {
 	if w.s.knownTree(id) {
 		return id, nil
 	}
-	if _, err := w.s.putData("tree", id, data); err != nil {
+	if _, err := w.s.putLikeKind("tree", data, like); err != nil {
 		return "", fmt.Errorf("put tree: %w", err)
 	}
 	return id, nil
