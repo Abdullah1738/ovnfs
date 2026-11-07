@@ -125,7 +125,9 @@ func TestDerivedIDsResolveAfterRestart(t *testing.T) {
 				t.Fatalf("crash=%v: %x → %q, want %q", crash, id, got, p)
 			}
 		}
-		// Looking a path up first must find the same id as resolution.
+		// Looking a path up first must find the same id as resolution. Close
+		// first, as a restart would: Windows cannot replace an open log.
+		closeLogged(t, nt)
 		nt = openLogged(t, reopen, ns)
 		for p, id := range ids {
 			if got := nt.id(p); got != id {
