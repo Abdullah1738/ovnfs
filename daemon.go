@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -192,30 +193,28 @@ func runStart(c *cli, args []string) error {
 }
 
 // stopDaemon asks the running daemon to exit and waits until its socket stops
-// accepting. It fails when the daemon refuses or outlives daemonWait.
-func stopDaemon(c *cli) error {
+// accepting, returning the stop reply (nil when the daemon closed the
+// connection first). It fails when the daemon refuses or outlives daemonWait.
+func stopDaemon(c *cli) (json.RawMessage, error) {
 	raw, err := c.call("stop", struct{}{})
 	if _, ok := errors.AsType[*admin.RemoteError](err); ok {
-		return err
+		return nil, err
 	}
 	// Any other error is the daemon closing the connection while it exits.
-	if err == nil && c.json {
-		fmt.Println(string(raw))
-	}
 	c.close()
 	c.conn = nil
 	deadline := time.Now().Add(daemonWait)
 	for accepting(c.state) {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("ovnfs still accepting connections at %s after %s", socketPath(c.state), daemonWait)
+			return nil, fmt.Errorf("ovnfs still accepting connections at %s after %s", socketPath(c.state), daemonWait)
 		}
 		select {
 		case <-c.ctx.Done():
-			return c.ctx.Err()
+			return nil, c.ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return nil
+	return raw, nil
 }
 
 // runStop asks the daemon to exit and waits until its socket stops accepting.
@@ -227,8 +226,12 @@ func runStop(c *cli, args []string) error {
 		fmt.Fprintln(os.Stderr, "not running")
 		return nil
 	}
-	if err := stopDaemon(c); err != nil {
+	raw, err := stopDaemon(c)
+	if err != nil {
 		return err
+	}
+	if c.json && raw != nil {
+		fmt.Println(string(raw))
 	}
 	fmt.Fprintln(os.Stderr, "stopped ovnfs")
 	return nil
@@ -243,7 +246,7 @@ func runRestart(c *cli, args []string) error {
 		return err
 	}
 	if accepting(c.state) {
-		if err := stopDaemon(c); err != nil {
+		if _, err := stopDaemon(c); err != nil {
 			return err
 		}
 	}
@@ -252,6 +255,10 @@ func runRestart(c *cli, args []string) error {
 		return err
 	}
 	c.conn = client
+	if c.json {
+		_, err := call[api.Status](c, "status", struct{}{})
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "restarted ovnfs (pid %d, log %s)\n", pid, logPath(c.state))
 	return nil
 }
@@ -270,7 +277,12 @@ func runStatus(c *cli, args []string) error {
 		return err
 	}
 	if !accepting(c.state) {
-		fmt.Println("not running")
+		// Under --json stdout carries only JSON; the exit status says it all.
+		out := os.Stdout
+		if c.json {
+			out = os.Stderr
+		}
+		fmt.Fprintln(out, "not running")
 		return exitCode(1)
 	}
 	st, err := call[api.Status](c, "status", struct{}{})

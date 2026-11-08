@@ -66,9 +66,10 @@ func commands() []command {
 		{"link", "", "relay an attach session from ssh into this machine's daemon (run by attach)", true, runLink},
 		{"subscribe", "", "stream daemon events as JSON lines until interrupted", true, runSubscribe},
 		{"stop", "", "stop the daemon", false, runStop},
-		{"restart", "", "stop the daemon and start a new one from this binary", false, runRestart},
+		{"restart", "[--json]", "stop the daemon and start a new one from this binary; --json prints the new one's status", false, runRestart},
 		{"start", "[--json]", "make sure the daemon runs (starting it in the background); --json prints its status and socket", false, runStart},
 		{"ctl", "OP ['JSON']", "send one raw admin request and print the raw reply", true, runCtl},
+		{"version", "[--json]", "print the version and toolchain this binary was built from", false, runVersion},
 	}
 }
 

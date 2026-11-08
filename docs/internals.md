@@ -31,7 +31,9 @@ workers finish cleanup before returning, closing files, unmapping buffers and
 releasing the checkout's shared freeze lock.
 
 `ovnfs ctl OP 'JSON'` sends one raw request; `--json` makes any verb print the
-raw reply. Only the socket owner's uid (on Windows, the same user SID) may
+raw reply, `restart` the new daemon's status and `version` its build
+(`{"version", "go", "os", "arch"}`); `run` keeps stdout for its command. Only
+the socket owner's uid (on Windows, the same user SID) may
 connect, on this socket and on the link socket.
 
 `grep` and `glob` use the shapes in [`api/search.go`](../api/search.go).
