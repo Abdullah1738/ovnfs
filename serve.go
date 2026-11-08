@@ -93,6 +93,7 @@ func serveDefaults() kong.Option {
 	return kong.Vars{
 		"default_proto":      defaultProto(),
 		"memory_default":     cmp.Or(os.Getenv("OVNFS_MEMORY"), "1G"),
+		"fsync_default":      cmp.Or(os.Getenv("OVNFS_FSYNC"), "false"),
 		"blob_cache_default": cmp.Or(os.Getenv("OVNFS_BLOB_CACHE"), "512M"),
 		"atime_default":      cmp.Or(os.Getenv("OVNFS_ATIME"), "false"),
 	}
@@ -103,6 +104,7 @@ type serveCmd struct {
 	Proto     string   `help:"File server protocol: nfs, smb, fuse or winfsp." default:"${default_proto}" enum:"nfs,smb,fuse,winfsp"`
 	Listen    string   `help:"File server address; defaults to a free local port or a Unix socket for NFS on macOS."`
 	Memory    byteSize `help:"Memory budget for small written files; 0 writes every file to disk." default:"${memory_default}"`
+	Fsync     bool     `help:"Spill and sync memory files on fsync (NFS does not forward fsync)." default:"${fsync_default}"`
 	BlobCache byteSize `help:"Memory budget for small content-addressed blobs; 0 disables." default:"${blob_cache_default}"`
 	Atime     bool     `help:"Allow access time updates on the mount." default:"${atime_default}"`
 }
@@ -160,6 +162,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 	var mem *overlay.Memory
 	if cmd.Memory > 0 {
 		mem = overlay.NewMemory(int64(cmd.Memory), memoryFileMax, memoryIdle)
+		mem.SyncOnFsync = cmd.Fsync
 	}
 	state, err := filepath.Abs(c.state)
 	if err != nil {

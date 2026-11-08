@@ -48,9 +48,13 @@ func init() { memInodes.Store(1 << 62) }
 // files need the budget (least recently used first), before an operation that
 // needs a host file (hard link, chown, lock), and at [FS.Flush]. Short-lived
 // files never reach the disk. Directories, symlinks and whiteouts always live
-// on disk. Memory contents do not survive a crash; pass no Memory to [New] for
-// uppers that must.
+// on disk. Memory contents do not survive a crash unless synced with
+// SyncOnFsync enabled; pass no Memory to [New] to write all files to disk.
 type Memory struct {
+	// SyncOnFsync spills and syncs a named memory file when its handle is
+	// synced. Set before sharing the budget with any overlay.
+	SyncOnFsync bool
+
 	limit, fileMax int64
 	idle           time.Duration
 
@@ -819,11 +823,16 @@ func (h *memHandle) Stat() (os.FileInfo, error) {
 	return h.m.info(path.Base(h.name)), nil
 }
 
-// Sync spills the file into its upper and syncs it there, so data the caller
-// fsyncs survives a daemon crash or power loss, as on any filesystem. Files
-// nobody syncs keep the memory tier's speed. An unlinked file has no host
-// file; syncing it succeeds trivially.
+// Sync spills and syncs a named file when configured, otherwise it succeeds
+// without I/O. An unlinked memory file has no host file to sync.
 func (h *memHandle) Sync() error {
+	if !h.fs.mem.SyncOnFsync {
+		if d := h.rlock(); d != nil {
+			return d.Sync()
+		}
+		defer h.fs.mu.RUnlock()
+		return h.check("sync", nil)
+	}
 	if d := h.lock(); d != nil {
 		return d.Sync()
 	}

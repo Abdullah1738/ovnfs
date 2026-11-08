@@ -26,6 +26,11 @@ width.
 `serve --memory SIZE` (`OVNFS_MEMORY`, default `1G`) and `serve --blob-cache
 SIZE` (`OVNFS_BLOB_CACHE`, default `512M`) size the memory tiers described in
 [internals](internals.md#memory-tiers); `start` passes the environment on.
+`serve --fsync` (or `OVNFS_FSYNC=1`) makes a sync of a named memory-backed
+file spill it to the upper and sync its host file. It is off by default: sync
+on a memory-backed file otherwise does not write it to disk. NFS does not
+forward application fsync calls, so this option cannot provide that guarantee
+over NFS. It does not sync parent directories or make snapshots durable.
 `serve --atime` (`OVNFS_ATIME=1`) lets the mount update access times; by
 default it is mounted `noatime`, since the macOS NFS client otherwise sends a
 SETATTR for every exec of a checkout binary. A restart applies the setting to

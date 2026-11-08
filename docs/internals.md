@@ -220,7 +220,10 @@ untouched for 2 s, when it outgrows 1 MiB, when newer files need the budget
 (least recently used first), before a hard link, `chown` or lock, and before
 `snap`, `fork`, `diff` and a planned stop, which therefore cost one host create
 per file written in the last 2 s; files deleted sooner never reach the disk.
-Directories, symlinks and whiteouts always live in the upper.
+Directories, symlinks and whiteouts always live in the upper. With
+`--fsync` enabled, syncing a named memory file also spills and syncs it;
+the default leaves it in memory. NFS does not forward application fsync calls.
+This sync does not include the parent directory or snapshot data.
 
 Small store blobs (at most 1 MiB) are served from a second budget
 (`--blob-cache`) instead of their object files. `ovnfs status` shows both. A

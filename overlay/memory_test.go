@@ -357,6 +357,83 @@ func mergedTree(t *testing.T, f *FS) map[string]string {
 	return out
 }
 
+func TestMemorySync(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
+			upper := filepath.Join(t.TempDir(), "upper")
+			mem := NewMemory(1<<20, 64<<10, 0)
+			mem.SyncOnFsync = enabled
+			f, err := New(upper, nil, dirBottom{tree(t, map[string]string{"d/lower": "data"})}, mem)
+			must(t, err)
+			for _, name := range []string{"d/new", "d/lower"} {
+				h, err := f.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+				must(t, err)
+				other, err := f.OpenFile(name, os.O_RDWR, 0)
+				must(t, err)
+				_, err = h.Write([]byte("synced"))
+				must(t, err)
+				if _, err := os.Stat(filepath.Join(upper, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("file present before sync: %v", err)
+				}
+				must(t, h.(interface{ Sync() error }).Sync())
+				if enabled {
+					b, err := os.ReadFile(filepath.Join(upper, name))
+					if err != nil || string(b) != "synced" {
+						t.Fatalf("after sync: %q, %v", b, err)
+					}
+				} else if _, err := os.Stat(filepath.Join(upper, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("disabled sync spilled file: %v", err)
+				}
+				_, err = other.(io.WriterAt).WriteAt([]byte("S"), 0)
+				must(t, err)
+				_, err = h.Write([]byte(" more"))
+				must(t, err)
+				if got := read(t, f, name); got != "Synced more" {
+					t.Fatalf("handles after sync: %q", got)
+				}
+				must(t, other.Close())
+				must(t, h.Close())
+			}
+			if f.Unflushed() == enabled {
+				t.Fatalf("unflushed = %v, enabled = %v", f.Unflushed(), enabled)
+			}
+		})
+	}
+}
+
+func TestMemorySyncFailureAndHandleStates(t *testing.T) {
+	mem := NewMemory(1<<20, 64<<10, 0)
+	mem.SyncOnFsync = true
+	f, err := New(t.TempDir(), nil, nil, mem)
+	must(t, err)
+	h, err := f.OpenFile("file", os.O_CREATE|os.O_RDWR, 0o644)
+	must(t, err)
+	_, err = h.Write([]byte("data"))
+	must(t, err)
+	must(t, os.RemoveAll(f.work))
+	if err := h.(interface{ Sync() error }).Sync(); err == nil {
+		t.Fatal("sync succeeded despite failed spill")
+	}
+	if got := read(t, f, "file"); got != "data" || !f.Unflushed() {
+		t.Fatalf("failed spill lost memory data: %q", got)
+	}
+	must(t, os.Mkdir(f.work, 0o700))
+	must(t, h.(interface{ Sync() error }).Sync())
+	must(t, h.Close())
+	if err := h.(interface{ Sync() error }).Sync(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("sync after close: %v", err)
+	}
+
+	unlinked, err := f.OpenFile("unlinked", os.O_CREATE|os.O_RDWR, 0o644)
+	must(t, err)
+	must(t, f.Remove("unlinked"))
+	must(t, unlinked.(interface{ Sync() error }).Sync())
+	must(t, unlinked.Close())
+	if err := unlinked.(interface{ Sync() error }).Sync(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("sync closed unlinked file: %v", err)
+	}
+}
+
 // upperTree describes a host upper (markers included, staging excluded) by
 // kind, permissions and content.
 func upperTree(t *testing.T, dir string) map[string]string {
@@ -385,36 +462,4 @@ func upperTree(t *testing.T, dir string) map[string]string {
 		return nil
 	}))
 	return out
-}
-
-// TestMemorySyncReachesDisk makes fsync mean what it does on any filesystem:
-// a synced memory file is in its upper on disk, with the bytes written so far,
-// so a daemon killed right after loses none of it. Later writes through the
-// same handle go to that host file.
-func TestMemorySyncReachesDisk(t *testing.T) {
-	upper := filepath.Join(t.TempDir(), "u")
-	f, err := New(upper, nil, dirBottom{tree(t, map[string]string{"d/lower": "data"})}, NewMemory(1<<20, 64<<10, 0))
-	must(t, err)
-	for _, name := range []string{"d/new", "d/lower"} {
-		h, err := f.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
-		must(t, err)
-		_, err = h.Write([]byte("synced"))
-		must(t, err)
-		if _, err := os.Stat(filepath.Join(upper, name)); err == nil {
-			t.Fatalf("%s reached the upper before sync; the test needs it in memory", name)
-		}
-		must(t, h.(interface{ Sync() error }).Sync())
-		if b, err := os.ReadFile(filepath.Join(upper, name)); err != nil || string(b) != "synced" {
-			t.Fatalf("%s after sync: upper holds %q, %v", name, b, err)
-		}
-		_, err = h.Write([]byte(" more"))
-		must(t, err)
-		must(t, h.Close())
-		if b, err := os.ReadFile(filepath.Join(upper, name)); err != nil || string(b) != "synced more" {
-			t.Fatalf("%s after a later write: upper holds %q, %v", name, b, err)
-		}
-	}
-	if f.Unflushed() {
-		t.Fatal("a synced file stayed in memory")
-	}
 }
