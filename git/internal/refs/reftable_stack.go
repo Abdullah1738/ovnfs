@@ -44,7 +44,7 @@ func loadStack(gitDir string, format object.Format) ([]*table, error) {
 
 // readTablesList returns the table names listed in dir/tables.list.
 func readTablesList(dir string) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "tables.list"))
+	data, err := readFile(filepath.Join(dir, "tables.list"))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || isNotDir(err) {
 			return nil, nil
@@ -66,7 +66,7 @@ func readTables(dir string, names []string, format object.Format) ([]*table, err
 		if strings.ContainsAny(name, `/\`) {
 			return nil, fmt.Errorf("refs: tables.list names %q outside the stack", name)
 		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		data, err := readFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}

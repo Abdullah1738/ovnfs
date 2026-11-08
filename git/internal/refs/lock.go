@@ -32,7 +32,7 @@ func createLock(target string, opts lockOptions) (*lockFile, error) {
 			return nil, err
 		}
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+	f, err := createExclusive(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return nil, fmt.Errorf("refs: unable to create %s: %w", path, ErrLocked)
@@ -66,7 +66,7 @@ func (l *lockFile) commit() error {
 	if err := l.close(); err != nil {
 		return err
 	}
-	if err := os.Rename(l.path, l.target); err != nil {
+	if err := replaceFile(l.path, l.target); err != nil {
 		return err
 	}
 	l.done = true

@@ -73,7 +73,7 @@ func (filesBackend) list(loc location, prefix string, keep func(string) bool) ([
 }
 
 func (filesBackend) reflog(loc location, name string) ([]ReflogEntry, error) {
-	data, err := os.ReadFile(filepath.Join(loc.dir, "logs", filepath.FromSlash(name)))
+	data, err := readFile(filepath.Join(loc.dir, "logs", filepath.FromSlash(name)))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || isNotDir(err) {
 			return nil, fmt.Errorf("refs: no reflog for %s: %w", name, os.ErrNotExist)
@@ -102,7 +102,7 @@ func readLoose(dir, name string, format object.Format) (Ref, error) {
 			return Ref{Name: name, Target: target}, nil
 		}
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || isNotDir(err) || isDir(path) {
 			return Ref{}, notExist(name)
@@ -197,7 +197,7 @@ func listLoose(dir, prefix string, format object.Format) ([]Ref, error) {
 // readPackedRefs parses dir/packed-refs into name-sorted refs. A missing
 // file is an empty list. Peeled ('^') lines set the preceding ref's Peeled.
 func readPackedRefs(path string, format object.Format) ([]Ref, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
