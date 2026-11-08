@@ -376,7 +376,7 @@ func TestRouterRemovedHandlesStayClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Rm(context.Background(), api.RmArgs{Checkout: "alpha"}); err != nil {
+	if err := reg.Rm(context.Background(), api.RmArgs{Checkout: "alpha", StickySnapshots: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reg.New(context.Background(), api.NewArgs{Snapshot: cp.Snapshot.ID, Name: "alpha"}); err != nil {

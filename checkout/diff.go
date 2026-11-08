@@ -525,6 +525,11 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.App
 			return api.ApplyReply{}, err
 		}
 	}
+	// Unix would fail each path with ENOTDIR, but Windows reports them absent,
+	// which would turn every path into a deletion conflict.
+	if info, err := os.Stat(root); err == nil && !info.IsDir() {
+		return api.ApplyReply{}, failure("invalid", "source %s is not a directory", root)
+	}
 	st := h.base.view.Store()
 	from, err := st.Flatten(h.base.view.Meta().Tree)
 	if err != nil {
