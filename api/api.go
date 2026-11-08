@@ -127,10 +127,13 @@ type SnapReply struct {
 }
 
 // DiffArgs compares a checkout's current state with a snapshot (default: its base).
+// Binary makes Patch the patch git diff --binary writes, which git apply takes
+// whole: git headers, full blob ids, modes and binary content.
 type DiffArgs struct {
 	Checkout string `json:"checkout"`
 	From     string `json:"from,omitempty"` // snapshot id; default: the checkout's base capture
 	Patch    bool   `json:"patch,omitempty"`
+	Binary   bool   `json:"binary,omitempty"`
 }
 
 // Change is one source-class path that differs; Status is A, M, D or T (type change).
@@ -139,11 +142,13 @@ type Change struct {
 	Status string `json:"status"`
 }
 
-// DiffReply lists changed source paths; Patch is a unified diff when requested.
+// DiffReply lists changed source paths; Patch is a unified diff when requested,
+// a git patch when Binary says so (a daemon that knows DiffArgs.Binary sets it).
 type DiffReply struct {
 	From    string   `json:"from"` // snapshot id or "base"
 	Changes []Change `json:"changes"`
 	Patch   string   `json:"patch,omitempty"`
+	Binary  bool     `json:"binary,omitempty"`
 }
 
 // ApplyArgs merges a checkout's source changes back into the folder it came from.

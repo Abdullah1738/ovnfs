@@ -1,8 +1,14 @@
 package checkout
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/stencil-hq/ovnfs/api"
 )
 
 // TestUnifiedMatchesGNUDiff compares edge cases with `diff -u --label` output
@@ -30,5 +36,51 @@ func TestUnifiedMatchesGNUDiff(t *testing.T) {
 		if w.String() != test.want {
 			t.Errorf("%s:\n%s\nwant:\n%s", test.name, w.String(), test.want)
 		}
+	}
+}
+
+// TestBinaryPatchAppliesWithGit applies a checkout's --binary patch to the folder
+// it came from with git apply and finds the folder then holding what the checkout
+// does: edited, added and deleted text, binary files added and changed, and names
+// git has to quote.
+func TestBinaryPatchAppliesWithGit(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"a.txt": "one\ntwo\n", "gone.txt": "bye\n", "blob.bin": "\x00\x01old"})
+	gitRun(t, dir, "init", "-q", "-b", "main")
+	gitRun(t, dir, "config", "core.autocrlf", "false")
+	gitRun(t, dir, "add", "--all")
+	gitRun(t, dir, "commit", "-qm", "init")
+	f.newCheckout(dir, "app")
+	want := map[string]string{
+		"a.txt":          "one\n2\nthree",
+		"blob.bin":       "\x00\x01new\xff",
+		"new.bin":        strings.Repeat("\x00\x7f\xfe", 300),
+		"spaced name.md": "x\n",
+	}
+	if runtime.GOOS != "windows" { // no double quote in Windows names
+		want[`quo"te.txt`] = "q\n"
+	}
+	for p, data := range want {
+		f.put("app", p, data)
+	}
+	f.remove("app", "gone.txt")
+	reply, err := f.reg.Diff(context.Background(), api.DiffArgs{Checkout: "app", Binary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := filepath.Join(t.TempDir(), "app.patch")
+	if err := os.WriteFile(patch, []byte(reply.Patch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "apply", "--check", patch)
+	gitRun(t, dir, "apply", patch)
+	for p, data := range want {
+		got, err := os.ReadFile(filepath.Join(dir, p))
+		if err != nil || string(got) != data {
+			t.Errorf("%s after git apply = %q, %v; want %q\npatch:\n%s", p, got, err, data, reply.Patch)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "gone.txt")); !os.IsNotExist(err) {
+		t.Errorf("gone.txt survived git apply: %v", err)
 	}
 }

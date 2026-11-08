@@ -176,7 +176,9 @@ result limits, narrower patterns or grep's column limit to reduce the reply.
 ## Diff and apply
 
 `diff CHECKOUT [SNAP] [-p]` compares the checkout now with its base capture (or
-a snapshot). `apply CHECKOUT` snapshots the checkout and merges each changed
+a snapshot); `--binary` prints the patch as `git diff --binary` does, with git
+headers, full blob ids, modes and binary content, so `git apply` takes it whole.
+`apply CHECKOUT` snapshots the checkout and merges each changed
 source path into the folder against the base: a path the user left alone takes
 the checkout's version, and a text file changed on both sides is merged with
 `git merge-file`.

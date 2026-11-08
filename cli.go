@@ -47,7 +47,7 @@ func commands() []command {
 		{"run", "[DIR] [--rev REV] [--take SRC:PATH]... [--keep] [--on HOST] -- CMD...", "run a command in a disposable checkout (also --name, --rule, --remote-bin)", true, runRun},
 		{"fork", "CHECKOUT [--name N] [-m LABEL]", "snapshot a checkout and open a second checkout on it", true, runFork},
 		{"snap", "CHECKOUT [-m LABEL] [--wait]", "freeze a checkout's changes into a snapshot", true, runSnap},
-		{"diff", "CHECKOUT [SNAP] [-p|--patch]", "list source changes since a snapshot (default: the base)", true, runDiff},
+		{"diff", "CHECKOUT [SNAP] [-p|--patch] [--binary]", "list source changes since a snapshot (default: the base)", true, runDiff},
 		{"grep", "PATTERN [DIR|CHECKOUT] [--glob GLOB] [-F] [-i] [-C N] [--max-count N]", "search contents in the daemon, bypassing the checkout mount", true, runGrep},
 		{"glob", "PATTERN [DIR|CHECKOUT] [--type file|dir|symlink] [--limit N] [--mtime]", "list matching paths in the daemon, bypassing the checkout mount", true, runGlob},
 		{"apply", "CHECKOUT [--dry-run] [--branch B]", "merge a checkout's source changes back into its folder", true, runApply},
@@ -324,6 +324,7 @@ func runDiff(c *cli, args []string) error {
 	var a api.DiffArgs
 	fs.BoolVar(&a.Patch, "p", false, "print a unified diff")
 	fs.BoolVar(&a.Patch, "patch", false, "print a unified diff")
+	fs.BoolVar(&a.Binary, "binary", false, "print the patch as git diff --binary does, for git apply")
 	pos, err := c.parse(fs, args, 1, 2)
 	if err != nil {
 		return err

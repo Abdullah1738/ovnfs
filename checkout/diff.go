@@ -108,7 +108,7 @@ func (r *Registry) Diff(ctx context.Context, args api.DiffArgs) (api.DiffReply, 
 	if reply.From == "" {
 		reply.From = "base"
 	}
-	if args.Patch {
+	if args.Patch || args.Binary {
 		var patch strings.Builder
 		for _, c := range reply.Changes {
 			old, err := r.content(h, c.Path, from[c.Path], nil)
@@ -119,9 +119,13 @@ func (r *Registry) Diff(ctx context.Context, args api.DiffArgs) (api.DiffReply, 
 			if err != nil {
 				return api.DiffReply{}, coded(err)
 			}
-			unified(&patch, c.Path, old, cur)
+			if args.Binary {
+				gitPatch(&patch, c.Path, from[c.Path], now.files[c.Path], old, cur)
+			} else {
+				unified(&patch, c.Path, old, cur)
+			}
 		}
-		reply.Patch = patch.String()
+		reply.Patch, reply.Binary = patch.String(), args.Binary
 	}
 	return reply, nil
 }
@@ -184,8 +188,6 @@ func unified(w *strings.Builder, p string, old, cur []byte) {
 		fmt.Fprintf(w, "Binary files a/%s and b/%s differ\n", p, p)
 		return
 	}
-	a, b := splitLines(old), splitLines(cur)
-	script := lineDiff(a, b)
 	labelA, labelB := "a/"+p, "b/"+p
 	if old == nil {
 		labelA = "/dev/null"
@@ -193,38 +195,7 @@ func unified(w *strings.Builder, p string, old, cur []byte) {
 	if cur == nil {
 		labelB = "/dev/null"
 	}
-	header := false
-	for i := 0; i < len(script); {
-		if script[i] == opEqual {
-			i++
-			continue
-		}
-		// A hunk spans changes separated by at most 2*diffContext equal lines,
-		// padded with diffContext equal lines on either side.
-		start := max(0, i-diffContext)
-		end := i
-		for end < len(script) {
-			if script[end] != opEqual {
-				end++
-				continue
-			}
-			run := end
-			for run < len(script) && script[run] == opEqual {
-				run++
-			}
-			if run == len(script) || run-end > 2*diffContext {
-				end = min(run, end+diffContext)
-				break
-			}
-			end = run
-		}
-		if !header {
-			fmt.Fprintf(w, "--- %s\n+++ %s\n", labelA, labelB)
-			header = true
-		}
-		writeHunk(w, script, start, end, a, b)
-		i = end
-	}
+	unifiedHunks(w, labelA, labelB, old, cur)
 }
 
 // diffContext is the number of unchanged lines around each change, as diff -u.
