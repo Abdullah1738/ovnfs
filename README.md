@@ -15,14 +15,34 @@ extension beyond WinFsp where you install it.
 
 ## Install
 
+Linux and macOS:
+
+```sh
+curl -fsSL https://stencil.so/ovnfs.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://stencil.so/ovnfs.ps1 | iex
+```
+
+The installers download the latest release binary (Linux, macOS and Windows on
+amd64 and arm64) from `build.stencil.so`, check its SHA-256 and put it in
+`~/.local/bin`, or on Windows in `%LOCALAPPDATA%\Programs\ovnfs`, added to the
+user PATH. `OVNFS_INSTALL_DIR` picks another folder, `--version v0.2.3`
+(`-Version` on Windows) another release. With Go (see `go.mod`):
+
 ```sh
 go install github.com/stencil-hq/ovnfs@latest
 ```
 
-needs Go (see `go.mod`). [Releases](https://github.com/stencil-hq/ovnfs/releases)
-have prebuilt binaries for Linux, macOS and Windows on amd64 and arm64, and
 `go build -o bin/ovnfs .` builds a clone. ovnfs runs git, and on Linux needs
-`fusermount3` (the `fuse3` package). `ovnfs version` prints the build.
+`fusermount3` (the `fuse3` package). `ovnfs version` prints the build;
+`ovnfs update` replaces it with the latest, through `go install` when that
+built it, and `ovnfs restart` then moves the daemon onto it.
+[GitHub releases](https://github.com/stencil-hq/ovnfs/releases) carry the same
+binaries as archives.
 
 ## Quick start
 

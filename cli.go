@@ -71,6 +71,7 @@ func commands() []command {
 		{"start", "[--json]", "make sure the daemon runs (starting it in the background); --json prints its status and socket", false, runStart},
 		{"ctl", "OP ['JSON']", "send one raw admin request and print the raw reply", true, runCtl},
 		{"version", "[--json]", "print the version and toolchain this binary was built from", false, runVersion},
+		{"update", "", "replace this binary with the latest ovnfs, by go install if it built it, else from the latest release", false, runUpdate},
 	}
 }
 
