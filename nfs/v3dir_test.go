@@ -247,8 +247,9 @@ func TestV3ReaddirCookies(t *testing.T) {
 // TestV3ReaddirChangesMidListing checks that a directory changing between
 // pages neither skips nor repeats entries, that a continuation whose
 // snapshot was evicted carries on while the directory is unchanged, and
-// fails BAD_COOKIE once it changed. READDIRPLUS continuations describe
-// entries as they are now, so they leave out one removed meanwhile.
+// lists the directory again, numbered after its cookie, once it changed.
+// READDIRPLUS continuations describe entries as they are now, so they leave
+// out one removed meanwhile.
 func TestV3ReaddirChangesMidListing(t *testing.T) {
 	fs := newTestFS(t)
 	files := dirFixture(t, fs, 30)
@@ -302,7 +303,8 @@ func TestV3ReaddirChangesMidListing(t *testing.T) {
 	}
 	s.dirs = dirCache{}
 	fs.write(t, "d/zz-new", "")
-	if pg := readdir3(t, call, true, dir, cookie, first.verf, 4096, 4096); pg.st != stBadCookie || pg.failLen != 4 {
-		t.Fatalf("evicted continuation of a changed directory: %d, want BAD_COOKIE", pg.st)
+	pg := readdir3(t, call, true, dir, cookie, first.verf, 4096, 4096)
+	if pg.st != stOK || len(pg.entries) == 0 || pg.entries[0].name != files[0] || pg.entries[0].cookie != cookie+1 {
+		t.Fatalf("evicted continuation of a changed directory: %+v, want the directory again, numbered after cookie %d", pg, cookie)
 	}
 }
