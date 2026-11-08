@@ -3,22 +3,32 @@
 package main
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"runtime"
 	"strconv"
 )
 
-// mountCmd builds the native client command for a localhost server.
+// mountCmd builds the native client command for the localhost server at addr.
 // NFS mounts use v3 with client-local locks and normal attribute caching;
 // refreshRoot makes checkout additions and removals visible immediately.
+// A Unix socket address is an NFS socket for macOS's mount_nfs, which takes
+// a path as port (netid ticotsord; undocumented, see Apple's mount_nfs.c).
 // extra holds generic mount(8) options, such as [atimeOption]'s.
 // SMB uses NTLM credentials when configured, otherwise an unsigned guest.
 // Linux cifs mounts belong to the daemon's user: the kernel gives a file it
 // has just created the mount's owner and file_mode rather than the POSIX
 // reply's, so a root-owned mount refuses `>` redirects into new files.
-func mountCmd(proto string, port int, dir, extra, share, user, password string) []string {
-	p := strconv.Itoa(port)
+func mountCmd(proto string, addr net.Addr, dir, extra, share, user, password string) []string {
+	if sock, ok := addr.(*net.UnixAddr); ok {
+		o := "vers=3,port=" + sock.Name + ",mountport=" + sock.Name + ",locallocks,nobrowse,intr,rwsize=1048576"
+		if extra != "" {
+			o += "," + extra
+		}
+		return []string{"mount_nfs", "-o", o, "<" + sock.Name + ">:/", dir}
+	}
+	p := strconv.Itoa(addr.(*net.TCPAddr).Port)
 	if proto == "smb" {
 		if runtime.GOOS == "darwin" {
 			u := url.User("guest").String()

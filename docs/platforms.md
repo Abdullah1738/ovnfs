@@ -11,10 +11,14 @@ One daemon serves every checkout as a folder of a single mount.
 ## NFS
 
 NFS is served by the `nfs` package: NFSv3 with its MOUNT protocol, and
-NFSv4.0, on one port. File handles are the export's stable node ids, so they
-survive renames and daemon restarts. Automatic mounts use NFSv3 with
-client-local locks. The macOS mount uses
-`noresvport,locallocks,nobrowse,intr,rwsize=1048576`, `noatime` unless
+NFSv4.0, on one port or Unix socket. File handles are the export's stable node
+ids, so they survive renames and daemon restarts. Automatic mounts use NFSv3
+with client-local locks. On macOS the server listens on `nfs.sock` in the state
+directory, which only its user can open, and `mount_nfs` dials that socket
+(`port=` a path, netid `ticotsord`: undocumented, but in Apple's
+`mount_nfs.c`). When that mount fails, or `serve -listen` names a TCP address,
+it serves `127.0.0.1` on a free port and mounts with `noresvport`. The macOS
+mount uses `locallocks,nobrowse,intr,rwsize=1048576`, `noatime` unless
 [`serve -atime`](configuration.md#where-the-daemon-lives), and normal
 attribute caching (the client's default timeouts are 5 to 60 s).
 After creating or removing a checkout the daemon `statfs`es its own mount,
@@ -23,7 +27,7 @@ immediately. The export root is read-only; cross-checkout rename returns EXDEV
 so `mv` copies. It also holds an empty, unlisted `.metadata_never_index`, the
 file macOS checks for on every new volume to keep Spotlight from indexing it.
 
-The server also accepts NFSv4.0 clients on the same port. These may receive
+The server also accepts NFSv4.0 clients on the same socket or port. These may receive
 read delegations, recalled on changes through another protocol, `pull`,
 reattach, checkout removal, and folder edits in cache and local paths reported
 by the folder watcher (FSEvents on macOS, inotify on Linux,

@@ -154,8 +154,9 @@ object ids without checking the store only while that epoch is unchanged. A
 pack is rewritten, its live frames copied without recompressing, only once a
 quarter of it is garbage.
 
-On restart the server binds its persisted port and serves before touching the
-mount path, so hard-mounted NFS I/O resumes with existing handles and cwd.
+On restart the server binds its persisted port, or the NFS socket a macOS mount
+dials, and serves before touching the mount path, so hard-mounted NFS I/O
+resumes with existing handles and cwd.
 `restart` therefore leaves an NFS or SMB mount in place (`stop` with
 `keep_mount`): the old daemon cuts its file connections before it closes the
 export, and the client retries until the new one serves. From the cut on the

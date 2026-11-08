@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -74,11 +75,11 @@ const (
 
 // mountServer maps mount's drive to the daemon's SMB share as user; Windows has
 // no NFS client mount, and a mapped drive has no access-time option.
-func mountServer(proto string, port int, mount, user, password string, _ bool) error {
+func mountServer(proto string, addr net.Addr, mount, user, password string, _ bool) error {
 	if proto != "smb" {
 		return fmt.Errorf("NFS mounts unsupported on Windows; use -proto smb")
 	}
-	return mapDrive(filepath.VolumeName(mount), smbRemote, port, user, password)
+	return mapDrive(filepath.VolumeName(mount), smbRemote, addr.(*net.TCPAddr).Port, user, password)
 }
 
 // mapDrive maps drive (such as "O:") to remote for this logon session as

@@ -157,7 +157,7 @@ func serve(args []string) error {
 	state := flags.String("state", defaultState, "persistent state directory")
 	mount := flags.String("mount", defaultMount, "folder where checkouts appear")
 	proto := flags.String("proto", defaultProto(), "nfs, smb, fuse (Linux) or winfsp (Windows)")
-	address := flags.String("listen", net.JoinHostPort("127.0.0.1", strconv.Itoa(smbClientPort())), "file server address (nfs, smb)")
+	address := flags.String("listen", "", "file server TCP address (nfs, smb); default 127.0.0.1 on a free port, or for NFS on macOS a Unix socket in the state directory")
 	memory, err := sizeFlag(flags, "memory", "OVNFS_MEMORY", 1<<30, "bytes of small written files kept in memory until they spill to disk; 0 writes every file to disk, surviving a crash")
 	if err != nil {
 		return err
@@ -271,6 +271,7 @@ func serve(args []string) error {
 			return err
 		}
 		files.Store(l)
+		defer l.Close() // removes the NFS socket, once: a keep-mount cut already has
 	}
 	log.Printf("mounted at %s", *mount)
 	adminListener, err := admin.Listen(filepath.Join(*state, "admin.sock"))
@@ -456,18 +457,30 @@ func mountInProcess(proto string, e *export.Export, mount string, atime bool) (i
 	return srv, nil
 }
 
-// listenAndMount serves NFS or SMB on the persisted port and mounts it at mount
-// with the system client, unless a previous run's mount is still there, which
-// it brings to the access-time setting instead (see [matchAtime]). An SMB
-// client that dials one port only pins it, overriding an earlier run's port.
-// SMB authenticates with the state directory's account where the OS has one
-// (smbAccount), otherwise as guest. It returns the port and the listener
-// whose connections the system client holds.
+// listenAndMount serves NFS or SMB and mounts it at mount with the system
+// client (see [attach]). A mount a previous run left keeps dialing what it was
+// made with: the persisted port, or the state directory's NFS socket
+// ([mountLocal]). A new NFS mount on macOS gets the socket unless address asks
+// for TCP, and falls back to TCP when the socket mount fails. An SMB client
+// that dials one port only pins it, overriding an earlier run's port. SMB
+// authenticates with the state directory's account where the OS has one
+// (smbAccount), otherwise as guest. It returns the TCP port, 0 on the socket,
+// and the listener whose connections the system client holds.
 func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, state, mount string, atime bool, served chan<- error, smbStarted func(*smb.Server)) (int, *fileListener, error) {
 	savedProto, savedPort := reg.Listen()
-	if savedPort != 0 && savedProto != proto {
+	remount := mounted(mount)
+	socket := savedProto == "nfs" && savedPort == 0 // the previous run served the NFS socket
+	if savedProto != proto && (savedPort != 0 || remount && socket) {
 		return 0, nil, fmt.Errorf("listen: state uses %s; restart with -proto %s", savedProto, savedProto)
 	}
+	if proto == "nfs" && runtime.GOOS == "darwin" && (remount && socket || !remount && address == "") {
+		files, err := mountLocal(reg, e, state, mount, atime, served)
+		if err == nil || remount {
+			return 0, files, err
+		}
+		log.Printf("NFS over %s failed, using TCP: %v", nfsSocket(state), err)
+	}
+	address = cmp.Or(address, net.JoinHostPort("127.0.0.1", strconv.Itoa(smbClientPort())))
 	pinned := 0
 	var user, password string
 	if proto == "smb" {
@@ -522,15 +535,50 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, st
 	} else {
 		go func() { served <- fmt.Errorf("nfs serve: %w", serveNFS(files, e)) }()
 	}
-	if !mounted(mount) {
-		if err = makeMountPoint(mount); err != nil {
-			return 0, nil, fmt.Errorf("mount directory: %w", err)
-		}
-		if err = mountServer(proto, port, mount, user, password, atime); err != nil {
-			return 0, nil, fmt.Errorf("mount: %w", err)
-		}
-	} else if err := matchAtime(mount, atime); err != nil {
-		log.Printf("%s keeps its access-time setting: %v", mount, err)
+	if err = attach(proto, listener.Addr(), mount, user, password, atime); err != nil {
+		return 0, nil, err
 	}
 	return port, files, nil
+}
+
+// mountLocal serves NFS on the state directory's Unix socket and mounts it at
+// mount; mount_nfs dials such a socket only on macOS. A failed mount stops
+// the server again, leaving the caller free to fall back to TCP.
+func mountLocal(reg *checkout.Registry, e *export.Export, state, mount string, atime bool, served chan<- error) (*fileListener, error) {
+	l, err := admin.Listen(nfsSocket(state))
+	if err != nil {
+		return nil, fmt.Errorf("listen: %w", err)
+	}
+	files := &fileListener{Listener: l, conns: map[*fileConn]struct{}{}}
+	if err = reg.SetListen("nfs", 0); err != nil {
+		l.Close()
+		return nil, fmt.Errorf("persist listen: %w", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- serveNFS(files, e) }()
+	if err = attach("nfs", l.Addr(), mount, "", "", atime); err != nil {
+		files.cut()
+		<-stopped
+		return nil, err
+	}
+	go func() { served <- fmt.Errorf("nfs serve: %w", <-stopped) }()
+	return files, nil
+}
+
+// attach mounts the server at addr on mount with the system client, or brings
+// a mount a previous run left there to the access-time setting (see [matchAtime]).
+func attach(proto string, addr net.Addr, mount, user, password string, atime bool) error {
+	if mounted(mount) {
+		if err := matchAtime(mount, atime); err != nil {
+			log.Printf("%s keeps its access-time setting: %v", mount, err)
+		}
+		return nil
+	}
+	if err := makeMountPoint(mount); err != nil {
+		return fmt.Errorf("mount directory: %w", err)
+	}
+	if err := mountServer(proto, addr, mount, user, password, atime); err != nil {
+		return fmt.Errorf("mount: %w", err)
+	}
+	return nil
 }

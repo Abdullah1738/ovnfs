@@ -30,6 +30,9 @@ const startLock = "start.lock"
 // socketPath is the daemon's admin socket inside a state directory.
 func socketPath(state string) string { return filepath.Join(state, "admin.sock") }
 
+// nfsSocket is where a macOS daemon serves NFS to its mount (see mountLocal).
+func nfsSocket(state string) string { return filepath.Join(state, "nfs.sock") }
+
 // logPath is where a background daemon's output is appended.
 func logPath(state string) string { return filepath.Join(state, "serve.log") }
 
@@ -339,10 +342,14 @@ func runStatus(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
+	transport := st.Proto + ":" + fmt.Sprint(st.Port) // protocol and file-server port, not a dialable address
+	if st.Proto == "nfs" && st.Port == 0 {
+		transport = st.Proto + ":" + nfsSocket(st.State)
+	}
 	rows := [][2]string{
 		{"pid", fmt.Sprint(st.PID)},
 		{"uptime", (time.Duration(st.Uptime * float64(time.Second))).Round(time.Second).String()},
-		{"proto", st.Proto + ":" + fmt.Sprint(st.Port)}, // protocol and file-server port, not a dialable address
+		{"proto", transport},
 		{"mount", st.Mount},
 		{"state", st.State},
 		{"socket", st.Socket},
