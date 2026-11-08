@@ -11,8 +11,8 @@ import (
 
 // Unix files hold their mode natively; see mode_windows.go for hosts that cannot.
 
-// sameFile is [os.SameFile].
-func sameFile(a, b os.FileInfo) bool { return os.SameFile(a, b) }
+// sameFile is [os.SameFile] for metadata that may carry an alias name.
+func sameFile(a, b os.FileInfo) bool { return os.SameFile(unalias(a), unalias(b)) }
 
 // hostLstat is [os.Lstat].
 func hostLstat(name string) (os.FileInfo, error) { return os.Lstat(name) }

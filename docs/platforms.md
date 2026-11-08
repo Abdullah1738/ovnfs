@@ -14,13 +14,14 @@ NFS is served by the `nfs` package: NFSv3 with its MOUNT protocol, and
 NFSv4.0, on one port. File handles are the export's stable node ids, so they
 survive renames and daemon restarts. Automatic mounts use NFSv3 with
 client-local locks. The macOS mount uses
-`noresvport,locallocks,nobrowse,intr,rwsize=1048576` and normal attribute
-caching (the client's default timeouts are 5 to 60 s). After creating or
-removing a checkout the daemon `statfs`es its own mount, making the client
-revalidate the export root so new checkouts show up immediately. The export
-root is read-only; cross-checkout rename returns EXDEV so `mv` copies. It also
-holds an empty, unlisted `.metadata_never_index`, the file macOS checks for on
-every new volume to keep Spotlight from indexing it.
+`noresvport,locallocks,nobrowse,intr,noatime,rwsize=1048576` and normal
+attribute caching (the client's default timeouts are 5 to 60 s); without
+`noatime` the client sends a SETATTR for every exec of a checkout binary.
+After creating or removing a checkout the daemon `statfs`es its own mount,
+making the client revalidate the export root so new checkouts show up
+immediately. The export root is read-only; cross-checkout rename returns EXDEV
+so `mv` copies. It also holds an empty, unlisted `.metadata_never_index`, the
+file macOS checks for on every new volume to keep Spotlight from indexing it.
 
 The server also accepts NFSv4.0 clients on the same port. These may receive
 read delegations, recalled on changes through another protocol, `pull`,

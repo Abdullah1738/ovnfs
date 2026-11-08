@@ -31,15 +31,16 @@ type modeInfo struct {
 // Mode returns the stored Unix mode with the host's type bits.
 func (i modeInfo) Mode() os.FileMode { return i.mode }
 
-// rawInfo returns the host's own metadata beneath a stored mode.
+// rawInfo returns the host's own metadata beneath an alias name and a stored mode.
 func rawInfo(info os.FileInfo) os.FileInfo {
+	info = unalias(info)
 	if m, ok := info.(modeInfo); ok {
 		return m.FileInfo
 	}
 	return info
 }
 
-// sameFile is [os.SameFile] for metadata that may carry a stored mode.
+// sameFile is [os.SameFile] for metadata that may carry an alias name or a stored mode.
 func sameFile(a, b os.FileInfo) bool { return os.SameFile(rawInfo(a), rawInfo(b)) }
 
 // hostLstat is [os.Lstat] with the stored mode of an upper or layer file.

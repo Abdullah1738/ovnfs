@@ -117,18 +117,10 @@ func (f *FS) moveIdentity(from, to string) {
 	}
 }
 
-// restat re-reads p's metadata and its other hard-link names' after a
-// descriptor changed the inode's content or attributes; the inode, and so the
-// identity bookkeeping, is unchanged.
+// restat re-reads p's metadata after a descriptor changed the inode's content
+// or attributes and shares it with p's other hard-link names; the inode, and
+// so the identity bookkeeping, is unchanged.
 func (f *FS) restat(p string) error {
-	if err := f.cacheAlias(p); err != nil {
-		return err
-	}
-	return f.cacheAliases(p)
-}
-
-// cacheAlias re-reads one upper name's metadata from the host.
-func (f *FS) cacheAlias(p string) error {
 	info, err := hostLstat(f.up(p))
 	if err != nil {
 		return err
@@ -136,43 +128,63 @@ func (f *FS) cacheAlias(p string) error {
 	if err := primeInfo(info); err != nil {
 		return err
 	}
-	e := entry(info)
-	e.Opaque = f.index.entries[p].Opaque
-	f.index.set(p, e)
+	f.setInfo(p, info)
+	f.cacheAliases(p, info)
 	return nil
 }
 
-// cacheInfo stores a fresh snapshot and refreshes other names of the same inode.
-func (f *FS) cacheInfo(p string, info os.FileInfo) error {
+// setInfo indexes upper name p's metadata, keeping its opacity.
+func (f *FS) setInfo(p string, info os.FileInfo) {
 	e := entry(info)
 	e.Opaque = f.index.entries[p].Opaque
 	f.index.set(p, e)
+}
+
+// cacheInfo stores a fresh snapshot and shares it with other names of the same inode.
+func (f *FS) cacheInfo(p string, info os.FileInfo) error {
+	f.setInfo(p, info)
 	if err := f.track(p, info); err != nil {
 		return err
 	}
-	return f.cacheAliases(p)
+	f.cacheAliases(p, info)
+	return nil
 }
 
-// cacheAliases re-reads p's other hard-link names, which share its inode metadata.
-func (f *FS) cacheAliases(p string) error {
+// cacheAliases gives p's other hard-link names info, p's fresh metadata. The
+// names share one inode, so only the name differs; re-reading each would cost
+// a host lstat per link on every metadata change.
+func (f *FS) cacheAliases(p string, info os.FileInfo) {
 	key, ok := f.pathIDs[p]
 	if !ok {
-		return nil
+		return
 	}
 	names := f.aliases[key]
 	if names.first != p {
-		if err := f.cacheAlias(names.first); err != nil {
-			return err
-		}
+		f.setInfo(names.first, aliasInfo{FileInfo: info, name: path.Base(names.first)})
 	}
 	for other := range names.others {
 		if other != p {
-			if err := f.cacheAlias(other); err != nil {
-				return err
-			}
+			f.setInfo(other, aliasInfo{FileInfo: info, name: path.Base(other)})
 		}
 	}
-	return nil
+}
+
+// aliasInfo is a hard link's metadata read through another of its names.
+type aliasInfo struct {
+	os.FileInfo
+	name string
+}
+
+// Name returns the alias's own base name.
+func (i aliasInfo) Name() string { return i.name }
+
+// unalias returns the host metadata beneath an [aliasInfo], whose own type
+// [os.SameFile] requires.
+func unalias(info os.FileInfo) os.FileInfo {
+	if a, ok := info.(aliasInfo); ok {
+		return a.FileInfo
+	}
+	return info
 }
 
 // bind associates an open descriptor with its inode, not its current name; a

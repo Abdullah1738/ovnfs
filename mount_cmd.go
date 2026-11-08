@@ -12,6 +12,8 @@ import (
 // mountCmd builds the native client command for a localhost server.
 // NFS mounts use v3 with client-local locks and normal attribute caching;
 // refreshRoot makes checkout additions and removals visible immediately.
+// macOS mounts noatime, as the Linux FUSE mount does: otherwise its client
+// sends a SETATTR for the access time on every exec of a checkout binary.
 // SMB uses NTLM credentials when configured, otherwise an unsigned guest.
 // Linux cifs mounts belong to the daemon's user: the kernel gives a file it
 // has just created the mount's owner and file_mode rather than the POSIX
@@ -45,7 +47,7 @@ func mountCmd(proto string, port int, dir, extra, share, user, password string) 
 	var o string
 	var cmd []string
 	if runtime.GOOS == "darwin" {
-		o = "vers=3,tcp,port=" + p + ",mountport=" + p + ",noresvport,locallocks,nobrowse,intr,rwsize=1048576"
+		o = "vers=3,tcp,port=" + p + ",mountport=" + p + ",noresvport,locallocks,nobrowse,intr,noatime,rwsize=1048576"
 		cmd = []string{"mount_nfs"}
 	} else {
 		o = "vers=3,tcp,port=" + p + ",mountport=" + p + ",nolock"
