@@ -185,11 +185,11 @@ func serve(args []string) error {
 	var checkoutShares *shares
 	userHome, _ := os.UserHomeDir()
 	lk := newLinks(hub.emit)
-	md, err := openMesh(*state, lk)
+	node, err := loadNode(*state)
 	if err != nil {
-		return fmt.Errorf("mesh: %w", err)
+		return fmt.Errorf("node id: %w", err)
 	}
-	reg, err := checkout.Open(checkout.Config{State: *state, Mount: *mount, UserHome: userHome, Node: md.key.ID().String(), Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
+	reg, err := checkout.Open(checkout.Config{State: *state, Mount: *mount, UserHome: userHome, Node: node, Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
 		Memory: mem, BlobCache: int64(*blobCache),
 		Retire: func(name string) {
 			if checkoutShares != nil {
@@ -221,7 +221,6 @@ func serve(args []string) error {
 	}
 	defer reg.Close()
 	lk.reg = reg
-	lk.mesh = md
 	defer lk.close()
 	e, err = export.New(export.NewRouter(reg), filepath.Join(*state, "nodes.log"), *state)
 	if err != nil {
@@ -264,11 +263,9 @@ func serve(args []string) error {
 	}
 	defer linkListener.Close()
 	go lk.listen(linkListener)
-	md.resume()
-	defer md.stop()
 	stopRequests := make(chan struct{}, 1)
 	welcome := admin.Welcome{Version: protocolVersion, Ops: api.Ops, Features: api.Features, Proto: *proto, Port: port, Mount: *mount, State: *state}
-	handler := &opsHandler{reg: reg, shares: checkoutShares, links: lk, mesh: md, welcome: welcome, started: time.Now(), stop: func() {
+	handler := &opsHandler{reg: reg, shares: checkoutShares, links: lk, welcome: welcome, started: time.Now(), stop: func() {
 		select {
 		case stopRequests <- struct{}{}:
 		default:

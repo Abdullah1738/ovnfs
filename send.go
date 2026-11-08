@@ -3,14 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"runtime/debug"
-	"slices"
 	"strings"
 
 	"github.com/stencil-hq/ovnfs/api"
@@ -19,9 +17,8 @@ import (
 )
 
 // runSend attaches a folder or checkout to a machine reached by ssh, preparing
-// that machine first: it installs ovnfs there from a GitHub release when it has
-// none, joins it to this machine's mesh unless it is a member, attaches over the
-// mesh, and points PATH there at the attached checkout.
+// that machine first: it installs ovnfs there from a release when it has none,
+// attaches over ssh, and points PATH there at the attached checkout.
 func runSend(c *cli, args []string) error {
 	fs := c.flags("send")
 	name := fs.String("name", "", "checkout name on the remote machine (default: the folder's name)")
@@ -58,9 +55,7 @@ func runSend(c *cli, args []string) error {
 			return err
 		}
 	}
-	if a.To, err = r.join(c); err != nil {
-		return err
-	}
+	a.To, a.RemoteBin = host, r.bin
 	reply, err := call[api.AttachReply](c, "attach", a)
 	if err != nil {
 		return err
@@ -80,18 +75,16 @@ func runSend(c *cli, args []string) error {
 
 // remote is a machine send prepares over ssh.
 type remote struct {
-	host            string   // ssh destination
-	kernel, machine string   // uname -s and -m there
-	home            string   // $HOME there
-	bin             string   // ovnfs there; "" until installed
-	mesh            api.Mesh // its mesh status, read once bin runs
+	host            string // ssh destination
+	kernel, machine string // uname -s and -m there
+	home            string // $HOME there
+	bin             string // ovnfs there; "" until installed
 }
 
 // probeScript refuses a link path $2 that exists as anything but a symlink, then
 // prints the machine's kernel, architecture, home and ovnfs ($1, else on the
-// PATH, else ~/.local/bin/ovnfs, else empty), then the mesh status that ovnfs
-// reads, starting its daemon.
-const probeScript = `[ -z "$2" ] || [ -L "$2" ] || [ ! -e "$2" ] || { echo "$2 exists and is not a symlink" >&2; exit 1; }; b=$1; [ -n "$b" ] || b=$(command -v ovnfs) || [ ! -x "$HOME/.local/bin/ovnfs" ] || b=$HOME/.local/bin/ovnfs; uname -s; uname -m; printf '%s\n' "$HOME" "$b"; [ -z "$b" ] || exec "$b" --json mesh ls`
+// PATH, else ~/.local/bin/ovnfs, else empty), one per line.
+const probeScript = `[ -z "$2" ] || [ -L "$2" ] || [ ! -e "$2" ] || { echo "$2 exists and is not a symlink" >&2; exit 1; }; b=$1; [ -n "$b" ] || b=$(command -v ovnfs) || [ ! -x "$HOME/.local/bin/ovnfs" ] || b=$HOME/.local/bin/ovnfs; uname -s; uname -m; printf '%s\n' "$HOME" "$b"`
 
 // probe asks host what send needs to know, refusing an unusable link path before
 // anything is attached; bin names ovnfs there ("" to look for it) and at the
@@ -101,22 +94,15 @@ func probe(host, bin, at string) (*remote, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := strings.SplitN(string(out), "\n", 5)
-	if len(f) < 5 {
+	f := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(f) != 4 {
 		return nil, fmt.Errorf("%s answered the probe with %q", host, out)
 	}
-	r := &remote{host: host, kernel: f[0], machine: f[1], home: f[2], bin: f[3]}
-	if r.bin != "" {
-		if err := json.Unmarshal([]byte(f[4]), &r.mesh); err != nil {
-			return nil, fmt.Errorf("%s: reading the mesh status from %s: %w", host, r.bin, err)
-		}
-	}
-	return r, nil
+	return &remote{host: host, kernel: f[0], machine: f[1], home: f[2], bin: f[3]}, nil
 }
 
-// installScript stores the binary on stdin as $1/ovnfs once it runs there, then
-// prints the mesh status it reads, starting its daemon.
-const installScript = `set -e; mkdir -p "$1"; t="$1/.ovnfs.$$"; trap 'rm -f "$t"' EXIT; cat >"$t"; chmod 755 "$t"; "$t" version >/dev/null; mv -f "$t" "$1/ovnfs"; exec "$1/ovnfs" --json mesh ls`
+// installScript stores the binary on stdin as $1/ovnfs once it runs there.
+const installScript = `set -e; mkdir -p "$1"; t="$1/.ovnfs.$$"; trap 'rm -f "$t"' EXIT; cat >"$t"; chmod 755 "$t"; "$t" version >/dev/null; mv -f "$t" "$1/ovnfs"`
 
 // install puts the release ovnfs into ~/.local/bin on the machine. The binary is
 // downloaded here and streamed over ssh, so the machine needs no network access
@@ -136,14 +122,10 @@ func (r *remote) install(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	out, err := sshScript(r.host, bytes.NewReader(exe), installScript, dir)
-	if err != nil {
+	if _, err := sshScript(r.host, bytes.NewReader(exe), installScript, dir); err != nil {
 		return err
 	}
 	r.bin = dir + "/ovnfs"
-	if err := json.Unmarshal(out, &r.mesh); err != nil {
-		return fmt.Errorf("%s: reading the mesh status from %s: %w", r.host, r.bin, err)
-	}
 	return nil
 }
 
@@ -175,53 +157,6 @@ func sendTag() string {
 		return bi.Main.Version
 	}
 	return ""
-}
-
-// join makes the machine a member of this machine's mesh, which mesh.setup
-// starts when there is none, and returns the name attach reaches it by.
-func (r *remote) join(c *cli) (string, error) {
-	local, err := quietCall[api.Mesh](c, "mesh.ls", struct{}{})
-	if err != nil {
-		return "", err
-	}
-	if r.mesh.Node == local.Node {
-		return "", fmt.Errorf("%s runs this machine's ovnfs node %s", r.host, abbrev(local.Node, 10))
-	}
-	member := slices.ContainsFunc(local.Members, func(m api.MeshMember) bool { return m.Node == r.mesh.Node })
-	if !member || r.mesh.Mesh != local.Mesh {
-		inv, err := quietCall[api.MeshInvite](c, "mesh.setup", api.MeshSetupArgs{})
-		if err != nil {
-			return "", err
-		}
-		out, err := sshScript(r.host, nil, `exec "$1" --json mesh join "$2"`, r.bin, inv.Token)
-		if err != nil {
-			return "", err
-		}
-		if err := json.Unmarshal(out, &r.mesh); err != nil {
-			return "", fmt.Errorf("%s: reading the mesh status from %s: %w", r.host, r.bin, err)
-		}
-		if local, err = quietCall[api.Mesh](c, "mesh.ls", struct{}{}); err != nil {
-			return "", err
-		}
-		fmt.Fprintf(os.Stderr, "joined %s to mesh %s\n", r.host, local.Mesh)
-	}
-	return memberName(local, r.mesh.Node)
-}
-
-// memberName is how attach --to reaches node in mesh m: by its name, unless
-// another member shares it, else by its id.
-func memberName(m api.Mesh, node string) (string, error) {
-	i := slices.IndexFunc(m.Members, func(mem api.MeshMember) bool { return mem.Node == node })
-	if i < 0 {
-		return "", fmt.Errorf("node %s is not in mesh %s", abbrev(node, 10), m.Mesh)
-	}
-	name := m.Members[i].Name
-	for _, mem := range m.Members {
-		if mem.Node != node && !mem.Self && strings.EqualFold(mem.Name, name) {
-			return node, nil
-		}
-	}
-	return name, nil
 }
 
 // linkScript points $1 at $2, replacing a symlink there but nothing else.

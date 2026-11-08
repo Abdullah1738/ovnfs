@@ -58,13 +58,12 @@ func commands() []command {
 		{"drop", "SNAP", "release a snapshot", true, runDrop},
 		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", true, runExplain},
 		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", true, runPlan},
-		{"attach", "[DIR|CHECKOUT] --to MEMBER|HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine (a mesh member, else over ssh); content moves on first read", true, runAttach},
-		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there and joining the mesh as needed; PATH there links to the checkout", true, runSend},
+		{"attach", "[DIR|CHECKOUT] --to HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine over ssh; content moves on first read", true, runAttach},
+		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there if missing; PATH there links to the checkout", true, runSend},
 		{"pull", "CHECKOUT [--from HOST] [--dry-run]", "merge attached remote source changes into the local checkout", true, runPull},
 		{"push", "[CHECKOUT] [--to HOST]", "have attached machines fetch all content they still read from this one, so they work without it", true, runPush},
 		{"share", "CHECKOUT [--rw]", "serve a checkout over remote-fs for a VM (vmon --remote-fs TAG:SOCK[:rw]) or a peer", true, runShare},
-		{"mesh", "setup|join TOKEN|ls|rm MEMBER|leave", "join machines into a mesh; attach --to a member then runs over it", true, runMesh},
-		{"link", "", "relay an attach session from ssh into this machine's daemon (run by attach)", true, runLink},
+		{"link", "", "pipe an attach session from ssh into this machine's daemon (run by attach)", true, runLink},
 		{"subscribe", "", "stream daemon events as JSON lines until interrupted", true, runSubscribe},
 		{"stop", "", "stop the daemon", false, runStop},
 		{"restart", "[--json]", "stop the daemon and start a new one from this binary; --json prints the new one's status", false, runRestart},
@@ -166,13 +165,6 @@ func call[T any](c *cli, op string, args any) (T, error) {
 	if err == nil && c.json {
 		fmt.Println(string(raw))
 	}
-	return decodeReply[T](op, raw, err)
-}
-
-// quietCall performs op and decodes its reply without printing it under --json,
-// for the intermediate steps of a verb that prints one final reply.
-func quietCall[T any](c *cli, op string, args any) (T, error) {
-	raw, err := c.call(op, args)
 	return decodeReply[T](op, raw, err)
 }
 
@@ -563,7 +555,7 @@ func runRm(c *cli, args []string) error {
 // runAttach offers a folder or checkout to another machine and prints where it appeared.
 func runAttach(c *cli, args []string) error {
 	fs := c.flags("attach")
-	to := fs.String("to", "", "mesh member or ssh destination of the remote machine")
+	to := fs.String("to", "", "ssh destination of the remote machine")
 	name := fs.String("name", "", "checkout name on the remote machine")
 	bin := fs.String("remote-bin", "", "path of ovnfs on the remote machine (default: ovnfs on its PATH)")
 	pos, err := c.parse(fs, args, 0, 1)
@@ -571,7 +563,7 @@ func runAttach(c *cli, args []string) error {
 		return err
 	}
 	if *to == "" {
-		return fmt.Errorf("attach needs --to MEMBER|HOST")
+		return fmt.Errorf("attach needs --to HOST")
 	}
 	target := "."
 	if len(pos) == 1 {

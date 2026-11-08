@@ -2,12 +2,12 @@
 
 ## Attach
 
-`ovnfs attach CHECKOUT|DIR --to MEMBER|HOST` snapshots the checkout (a folder
-is captured first) and opens a link to the other machine: a QUIC stream over
-the [mesh](#mesh) when `--to` names a member, otherwise `ssh HOST ovnfs link`,
-which relays the session into HOST's daemon, starting it if needed. Over the
-mesh the offer must come from the node the connection proved. `--remote-bin`
-names ovnfs on hosts where it is not on the PATH.
+`ovnfs attach CHECKOUT|DIR --to HOST` snapshots the checkout (a folder is
+captured first) and opens a link to the other machine: `ssh HOST ovnfs link`,
+which pipes the session into HOST's daemon, starting it if needed. `--remote-bin`
+names ovnfs on hosts where it is not on the PATH. ssh runs in batch mode, so
+HOST must accept a key without prompting; whatever reaches HOST by ssh works,
+including `ProxyJump` and other `~/.ssh/config` settings.
 
 The remote rebuilds the snapshot's tree from the offered entries, checks it
 hashes to the offered id, and shows the checkout at once: listing and stat
@@ -74,18 +74,14 @@ ovnfs send . devbox:src/app    # devbox:~/src/app now shows this folder
    access of its own.
    The release is this binary's own, so both ends speak the same protocols,
    or the latest one when this is a development build.
-2. It starts HOST's daemon and, unless HOST is already a member, joins it to
-   this machine's [mesh](#mesh), setting one up here first if this machine is
-   in none. The two machines must then reach each other directly or through
-   the relay.
-3. It attaches over the mesh. The remote name defaults to the folder's name,
-   as for `run --on`, so repeated sends keep one lane name.
-4. With `:PATH`, it points a symlink at PATH on HOST (relative to its home;
+2. It attaches over ssh with that binary, which starts HOST's daemon. The
+   remote name defaults to the folder's name, as for `run --on`, so repeated
+   sends keep one lane name.
+3. With `:PATH`, it points a symlink at PATH on HOST (relative to its home;
    `~/` expands there) to the attached checkout, replacing one from an earlier
    send. Anything else at PATH stops send before it attaches.
 
-ssh runs in batch mode, so HOST must accept a key without prompting, and the
-scripts send runs there need a POSIX `sh`.
+The scripts send runs on HOST need a POSIX `sh`.
 
 ## Pull
 
@@ -135,33 +131,3 @@ checkouts show; edits made here after the attach still need another `attach`.
 `ovnfs share CHECKOUT [--rw]` serves a checkout over remote-fs on a Unix
 socket, the protocol a vibevmm VM's `home` device speaks
 (`vmon --remote-fs home:SOCK[:rw]`).
-
-## Mesh
-
-Machines that reach each other by key:
-
-```sh
-ovnfs mesh setup               # on the first machine: prints o2://join?mesh=…&node=…&s=…
-ovnfs mesh join 'o2://…'       # on another: joins; both sides pin each other's key
-ovnfs mesh ls                  # members, their node ids and ways
-ovnfs attach app --to devbox   # now over the mesh
-```
-
-A node is its Ed25519 key (`<state>/mesh/node_key`, PKCS#8, and a self-signed
-`node_cert.der`), the same identity and certificate format as Stencil's Rust
-`stencil-net`, which `mesh/` ports to Go on quic-go. Connections are QUIC with
-mutual TLS 1.3, each side pinning the other's key: a member is reached over a
-direct UDP way (port 8377, Tailscale and private addresses first, raced 250 ms
-apart) or, when none answers, through the Stencil relay (`my.omp.sh/node`,
-`stencil-relay.v2`), which sees only QUIC packets. One connection carries one
-protocol: `o2-mesh/1` for membership and `ovnfs-link/1` for attach links.
-
-`mesh setup` starts a mesh on its first run (`--relay URL` picks another relay,
-`--relay off` none) and mints a ticket each time: 32 random bytes, single use,
-valid ten minutes, kept only as a hash. `mesh join` dials the token's node with
-its key pinned, redeems the ticket and receives the roster. The roster lives in
-every member's `<state>/mesh/roster.json`; each entry is a last-writer-wins
-register per node, removals are tombstones, and members push it to each other
-when it changes. Only members get past admission, except to redeem a ticket.
-`mesh rm MEMBER` removes another machine (which leaves once told), `mesh leave`
-this one.

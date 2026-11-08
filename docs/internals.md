@@ -90,6 +90,7 @@ a crash forgets the writes since.
 | `sources/` | each source folder's stat cache: which files still match the blob ids of its last capture's tree |
 | `nodes.log` | stable node ids (NFS handles, inode numbers); survive restarts and follow renames. A file's id is derived from its directory and name, so reading a tree logs only its directories; moved files and the rare name-hash collision are logged too. Ids stay below 2^53 so JavaScript runtimes see exact inode numbers |
 | `mirror.git/` | shallow commits fetched from git upstreams of attached checkouts (see [remote](remote.md#committed-content-from-the-git-upstream)) |
+| `node_id` | this daemon's random id; attach offers carry it so the remote tells this daemon's folders apart from other machines' |
 
 Repeated ordinary `new` captures share an existing base when a fresh,
 stat-cache-backed capture matches its tree, file/directory metadata, rules,

@@ -104,7 +104,7 @@ type Event struct {
 type Config struct {
 	State, Mount string
 	UserHome     string // folder holding the user-wide ~/.o2/ovnfs.yml; "" ignores it
-	// Node is this daemon's node id (its mesh key), by which remote machines
+	// Node is this daemon's stable node id, by which remote machines
 	// know its offers; "" means this registry cannot offer checkouts.
 	Node string
 	// Fetch asks the link currently connected for key (see LinkKey) for blobs a

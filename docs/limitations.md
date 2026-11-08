@@ -10,15 +10,8 @@
   their edits back with `pull` on the source machine, then `apply` the local
   checkout to its folder. `fstat` on a lazily fetched open file reports the
   cached blob's metadata; path-based stat is exact.
-- A link is one stream per checkout (QUIC over the mesh, or ssh); cold reads of
-  many files are bound by its throughput.
-- The mesh does not move a relayed connection to a direct path in place (the
-  Rust nodes do that with noq's multipath and NAT-traversal extensions, which
-  quic-go lacks): it races direct ways first when it connects and re-dials
-  when a connection ends or stalls (three seconds without hearing the peer).
-  Two machines that can only see each other through NAT stay on the relay.
-- Membership sync is push on change plus one round at daemon start; a member
-  offline during a change learns it at its next start or the next change.
+- A link is one ssh session per checkout; cold reads of many files are bound by
+  its throughput.
 - NFSv3 locks are client-local. Explicit NFSv4 clients use byte-range locks
   held in the daemon's memory, lost when it restarts. SMB has no hard links
   and no durable handles.

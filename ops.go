@@ -22,7 +22,6 @@ type opsHandler struct {
 	reg     *checkout.Registry
 	shares  *shares
 	links   *links
-	mesh    *meshd
 	welcome admin.Welcome
 	started time.Time
 	stop    func() // asks the server to unmount and exit
@@ -101,16 +100,6 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 		return dispatch(ctx, raw, h.links.push)
 	case "share":
 		return dispatch(ctx, raw, h.shares.Share)
-	case "mesh.setup":
-		return dispatch(ctx, raw, h.mesh.setup)
-	case "mesh.join":
-		return dispatch(ctx, raw, h.mesh.join)
-	case "mesh.ls":
-		return dispatch(ctx, raw, func(context.Context, struct{}) (api.Mesh, error) { return h.mesh.status(), nil })
-	case "mesh.rm":
-		return dispatch(ctx, raw, h.mesh.rm)
-	case "mesh.leave":
-		return dispatch(ctx, raw, h.mesh.leave)
 	case "subscribe":
 		return dispatch(ctx, raw, func(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil })
 	case "stop":

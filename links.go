@@ -3,9 +3,11 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -26,16 +28,18 @@ import (
 	"github.com/stencil-hq/ovnfs/store"
 )
 
-// linkSocket is where `ovnfs link` relays an incoming ssh session into the daemon.
+// linkSocket is where `ovnfs link` pipes an incoming ssh session into the daemon.
 const linkSocket = "link.sock"
 
+// nodeFile holds this daemon's node id under its state directory.
+const nodeFile = "node_id"
+
 // links runs both ends of attach: outbound links this daemon serves as a source
-// (one session per attached checkout and machine, over the mesh or ssh, reconnected
-// until stopped), and inbound sessions other machines opened to attach checkouts here.
+// (one ssh session per attached checkout and machine, reconnected until
+// stopped), and inbound sessions other machines opened to attach checkouts here.
 type links struct {
 	reg      *checkout.Registry
 	emit     func(checkout.Event) // admin events, such as push progress; nil drops them
-	mesh     *meshd               // set once the mesh is open
 	ctx      context.Context
 	cancel   context.CancelFunc
 	mu       sync.Mutex
@@ -90,7 +94,7 @@ func peerWants(wants []base.Want) []peer.Want {
 	return pw
 }
 
-// listen accepts link connections ssh relayed to <state>/link.sock by this
+// listen accepts link connections `ovnfs link` piped to <state>/link.sock for this
 // daemon's user until the listener closes.
 func (l *links) listen(ln net.Listener) {
 	l.wg.Add(1)
@@ -106,24 +110,17 @@ func (l *links) listen(ln net.Listener) {
 				conn.Close()
 				return
 			}
-			l.inbound(conn, "")
+			l.inbound(conn)
 		})
 	}
 }
 
 // inbound attaches the offered checkout and serves its reads for the session's life.
-// from is the node a mesh connection proved ("" over ssh, which proves nothing);
-// an offer must then come from that node.
-func (l *links) inbound(conn io.ReadWriteCloser, from string) {
+func (l *links) inbound(conn io.ReadWriteCloser) {
 	s, offer, err := peer.Accept(conn, l.reg.Store())
 	if err != nil {
 		log.Printf("link: %v", err)
 		conn.Close()
-		return
-	}
-	if from != "" && offer.Node != from {
-		log.Printf("link from %s: offer claims node %s", from, offer.Node)
-		s.Refuse(fmt.Errorf("the offer names node %s but the link comes from %s", offer.Node, from))
 		return
 	}
 	h, err := l.reg.AttachRemote(l.ctx, offer)
@@ -187,7 +184,7 @@ func (l *links) attach(ctx context.Context, args api.AttachArgs) (api.AttachRepl
 	if old := l.out[key]; old != nil {
 		old.cancel()
 	}
-	o := newOutLink(l.ctx, name, args.To, l.opener(args.To, args.RemoteBin), offer, blobs)
+	o := newOutLink(l.ctx, name, args.To, cmp.Or(args.RemoteBin, "ovnfs"), offer, blobs)
 	l.out[key] = o
 	l.mu.Unlock()
 	l.wg.Go(func() {
@@ -330,30 +327,6 @@ func (l *links) close() {
 	l.wg.Wait()
 }
 
-// opener starts one session's connection to the machine a link serves.
-type opener func(ctx context.Context) (io.ReadWriteCloser, error)
-
-// dialTimeout bounds reaching a member before a session starts.
-const dialTimeout = 30 * time.Second
-
-// opener picks the link's transport: the mesh when to names a member, else ssh
-// to run bin (default ovnfs) there.
-func (l *links) opener(to, bin string) opener {
-	if l.mesh != nil {
-		if mem, err := l.mesh.book.Find(to); err == nil {
-			return func(ctx context.Context) (io.ReadWriteCloser, error) {
-				dctx, cancel := context.WithTimeout(ctx, dialTimeout)
-				defer cancel()
-				return l.mesh.openLink(dctx, mem.Node)
-			}
-		}
-	}
-	if bin == "" {
-		bin = "ovnfs"
-	}
-	return func(ctx context.Context) (io.ReadWriteCloser, error) { return sshOpen(ctx, to, bin) }
-}
-
 // outLink is one attached checkout served to one machine.
 type outLink struct {
 	mu       sync.Mutex
@@ -361,18 +334,19 @@ type outLink struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	checkout string // the local checkout offered
-	to       string
-	open     opener
+	to       string // ssh destination
+	bin      string // ovnfs on the machine
 	offer    peer.Offer
 	blobs    peer.Blobs
 	accepted chan peer.Accepted // the first acceptance only
 	failed   chan error         // the first attempt's failure only
 }
 
-// newOutLink prepares a link offering the checkout name to the machine to; run starts it.
-func newOutLink(parent context.Context, name, to string, open opener, offer peer.Offer, blobs peer.Blobs) *outLink {
+// newOutLink prepares a link offering the checkout name to the machine to,
+// whose ovnfs is bin; run starts it.
+func newOutLink(parent context.Context, name, to, bin string, offer peer.Offer, blobs peer.Blobs) *outLink {
 	ctx, cancel := context.WithCancel(parent)
-	return &outLink{ctx: ctx, cancel: cancel, checkout: name, to: to, open: open, offer: offer, blobs: blobs, accepted: make(chan peer.Accepted, 1), failed: make(chan error, 1)}
+	return &outLink{ctx: ctx, cancel: cancel, checkout: name, to: to, bin: bin, offer: offer, blobs: blobs, accepted: make(chan peer.Accepted, 1), failed: make(chan error, 1)}
 }
 
 // remote is the connected session's handle, nil while the link is down.
@@ -441,7 +415,7 @@ func (o *outLink) run() {
 
 // session opens one connection to the machine and serves the offer over it.
 func (o *outLink) session(accepted func(peer.Accepted)) error {
-	conn, err := o.open(o.ctx)
+	conn, err := sshOpen(o.ctx, o.to, o.bin)
 	if err != nil {
 		return err
 	}
@@ -468,8 +442,8 @@ func (o *outLink) session(accepted func(peer.Accepted)) error {
 	return err
 }
 
-// sshOpen runs `bin link` on host over ssh, whose stdio relays into that
-// machine's daemon.
+// sshOpen runs `bin link` on host over ssh, whose stdio pipes into that
+// machine's daemon, starting it if needed.
 func sshOpen(ctx context.Context, host, bin string) (io.ReadWriteCloser, error) {
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", host, bin, "link")
 	stdin, err := cmd.StdinPipe()
@@ -494,18 +468,24 @@ type sshConn struct {
 	io.WriteCloser
 	cmd    *exec.Cmd
 	stderr tailBuffer
+	closed sync.Once
+	err    error // what Close returns
 }
 
 // Close closes the child's stdin and stops it; what ssh printed comes back as
-// the error, to explain a failed session.
+// the error, to explain a failed session. The link closes its connection from
+// several goroutines: later calls wait for the first and return its result,
+// since concurrent cmd.Wait calls would block forever.
 func (c *sshConn) Close() error {
-	c.WriteCloser.Close()
-	c.cmd.Process.Kill()
-	c.cmd.Wait()
-	if s := c.stderr.String(); s != "" {
-		return errors.New(s)
-	}
-	return nil
+	c.closed.Do(func() {
+		c.WriteCloser.Close()
+		c.cmd.Process.Kill()
+		c.cmd.Wait()
+		if s := c.stderr.String(); s != "" {
+			c.err = errors.New(s)
+		}
+	})
+	return c.err
 }
 
 // tailBuffer keeps the last few KB a child wrote to stderr, for error messages.
@@ -535,4 +515,27 @@ func (b *tailBuffer) String() string {
 // linkListen opens the daemon's private link socket, replacing only a stale one.
 func linkListen(state string) (net.Listener, error) {
 	return admin.Listen(filepath.Join(state, linkSocket))
+}
+
+// loadNode returns this daemon's node id, creating a random one on first start.
+// Its offers carry the id so the machines they reach tell its sources apart
+// from other daemons' (see checkout.LinkKey).
+func loadNode(state string) (string, error) {
+	path := filepath.Join(state, nodeFile)
+	b, err := os.ReadFile(path)
+	switch {
+	case err == nil && len(b) > 0:
+		return string(b), nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return "", err
+	}
+	id := rand.Text()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(id), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", err
+	}
+	return id, nil
 }

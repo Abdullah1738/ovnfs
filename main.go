@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
-	"strings"
 	"syscall"
 	"text/tabwriter"
 
@@ -74,6 +73,15 @@ func main() {
 	}
 }
 
+// meshRemoved answers the removed `ovnfs mesh` verb, pointing at the ssh links
+// that replaced it; it stays out of help.
+const meshRemoved = `ovnfs mesh is deprecated and was removed: machines now connect over ssh, with no setup or join step.
+  ovnfs attach DIR --to HOST        make DIR appear on HOST; content moves on first read
+  ovnfs send DIR HOST[:PATH]        the same, installing ovnfs on HOST first if missing; PATH there links to it
+  ovnfs push [CHECKOUT]             have attached machines fetch everything, before this one goes offline
+HOST is any ssh destination (~/.ssh/config, ProxyJump and the like apply); it must accept a key without prompting.
+The old mesh state in <state>/mesh can be deleted.`
+
 // run resolves global options, then hands the verb its remaining arguments.
 func run(args []string) error {
 	c := &cli{}
@@ -98,6 +106,8 @@ func run(args []string) error {
 		// version reads no configuration, so it runs where none parses.
 		c.cmd, _ = lookupCommand(verb)
 		return c.cmd.run(c, rest)
+	case "mesh":
+		return errors.New(meshRemoved)
 	}
 	if err := c.resolveDirs(); err != nil {
 		return err
@@ -164,7 +174,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	cmds := slices.Clone(commands())
 	rank := func(name string) int {
-		if i := slices.IndexFunc(api.Ops, func(op string) bool { return op == name || strings.HasPrefix(op, name+".") }); i >= 0 {
+		if i := slices.Index(api.Ops, name); i >= 0 {
 			return i
 		}
 		return len(api.Ops)

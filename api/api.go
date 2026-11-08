@@ -1,15 +1,14 @@
 // Package api defines the admin operations shared by the daemon and the CLI.
 //
-// Every CLI verb is exactly one operation with the same name (a subverb joins
-// with a dot: `ovnfs mesh join T` sends `mesh.join`), and its flags map 1:1
-// onto the argument struct below: `ovnfs fork app --name b` sends `fork` with
-// ForkArgs{Checkout: "app", Name: "b"} and prints a ForkReply.
+// Every CLI verb is exactly one operation with the same name, and its flags
+// map 1:1 onto the argument struct below: `ovnfs fork app --name b` sends
+// `fork` with ForkArgs{Checkout: "app", Name: "b"} and prints a ForkReply.
 package api
 
 import "time"
 
 // Ops lists every operation the daemon serves, in CLI help order.
-var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "attach", "pull", "push", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
+var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "attach", "pull", "push", "share", "subscribe", "stop"}
 
 // Features names optional request fields this daemon honors, so clients can rely on
 // them without a new protocol generation: "new.base" (NewArgs.Base),
@@ -252,14 +251,14 @@ type ExplainReply struct {
 
 // AttachArgs makes a checkout (or a folder, captured now) appear on another machine.
 // Names, sizes and modes are there at once; content moves on first read and
-// stays cached there. The link runs over the mesh when To names a member, else
-// over ssh, and reconnects until this daemon stops.
+// stays cached there. The link is `ssh To RemoteBin link`, reconnected until
+// this daemon stops.
 type AttachArgs struct {
 	Checkout  string `json:"checkout,omitempty"` // exactly one of Checkout and Dir
 	Dir       string `json:"dir,omitempty"`
-	To        string `json:"to"`                   // mesh member (name or node id prefix) or ssh destination, e.g. "devbox" or "me@host"
+	To        string `json:"to"`                   // ssh destination, e.g. "devbox" or "me@host"
 	Name      string `json:"name,omitempty"`       // checkout name on the remote machine
-	RemoteBin string `json:"remote_bin,omitempty"` // ovnfs on the remote machine over ssh; default "ovnfs"
+	RemoteBin string `json:"remote_bin,omitempty"` // ovnfs on the remote machine; default "ovnfs"
 }
 
 // AttachReply says where the checkout appeared.
@@ -306,46 +305,6 @@ type Pushed struct {
 	TotalBlobs int64  `json:"total_blobs"`
 	TotalBytes int64  `json:"total_bytes"`
 	Error      string `json:"error,omitempty"` // set when the push failed; blobs fetched before stay
-}
-
-// Mesh is this machine's mesh: the machines that reach each other by node key,
-// directly or through the relay. An empty Mesh id means it is in none.
-type Mesh struct {
-	Mesh    string       `json:"mesh"`
-	Node    string       `json:"node"`            // this machine's node id (64 hex, its Ed25519 key)
-	Relay   string       `json:"relay,omitempty"` // relay URL in use; "" = none
-	RelayUp bool         `json:"relay_up"`        // the relay link is up
-	Members []MeshMember `json:"members"`
-}
-
-// MeshMember is one machine of the mesh.
-type MeshMember struct {
-	Node string   `json:"node"` // node id, 64 hex
-	Name string   `json:"name"`
-	Ways []string `json:"ways,omitempty"` // where it last said it listens, e.g. "udp:10.0.0.5:8377", "relay"
-	Self bool     `json:"self,omitempty"`
-}
-
-// MeshSetupArgs starts a mesh on this machine if it is in none, and invites one more.
-type MeshSetupArgs struct {
-	Relay string `json:"relay,omitempty"` // for a new mesh: relay URL, "off" for none; default production
-}
-
-// MeshInvite is a single-use join token for one more machine.
-type MeshInvite struct {
-	Mesh    Mesh      `json:"mesh"`
-	Token   string    `json:"token"` // o2://join?…, for `ovnfs mesh join` on the other machine
-	Expires time.Time `json:"expires"`
-}
-
-// MeshJoinArgs joins the mesh a token invites to.
-type MeshJoinArgs struct {
-	Token string `json:"token"`
-}
-
-// MeshRmArgs removes another machine from the mesh.
-type MeshRmArgs struct {
-	Member string `json:"member"` // name or node id prefix
 }
 
 // ShareArgs serves one checkout over remote-fs on a Unix socket, for a VM's `home`

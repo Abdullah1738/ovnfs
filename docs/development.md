@@ -6,10 +6,7 @@ go test ./...
 ```
 
 `go test ./...` runs the package and in-process protocol checks; on Windows
-with WinFsp installed it also mounts real WinFsp drives. The mesh relay
-integration tests in `mesh/node` and `mesh/relay` build and run Stencil's relay
-service from source: set `OVNFS_RELAY_SRC` to its directory, or they skip.
-`OVNFS_RELAY_LIVE=1` also runs one against the production relay.
+with WinFsp installed it also mounts real WinFsp drives.
 
 ## CI and releases
 
