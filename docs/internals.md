@@ -12,7 +12,7 @@ On it, frames are JSON objects behind a little-endian u32 length:
 1. the client sends `{"hello": {"client": "…"}}`;
 2. the daemon replies `{"welcome": {"version": 5, "ops": […], "features": […], …}}`,
    where `features` names optional request fields it honors (`api.Features`:
-   `new.base`, `diff.binary`);
+   `new.base`, `diff.binary`, `ls.select`, `stop.keep_mount`);
 3. each request is `{"id": N, "<op>": {args}}`, answered by
    `{"id": N, "ok": reply}` or `{"id": N, "error": {"code", "message"}}`.
 
@@ -150,6 +150,11 @@ quarter of it is garbage.
 
 On restart the server binds its persisted port and serves before touching the
 mount path, so hard-mounted NFS I/O resumes with existing handles and cwd.
+`restart` therefore leaves an NFS or SMB mount in place (`stop` with
+`keep_mount`): the old daemon cuts its file connections before it closes the
+export, and the client retries until the new one serves. A plain `stop`
+unmounts before it replies; while the mount is busy it fails and the daemon
+keeps running, and the next `stop` forces the unmount.
 Metadata uses `fsync(2)`, not `F_FULLFSYNC`: it survives server crashes, not
 power loss. `state.json` is synced after its rename, so a kernel crash during
 that sync can leave it empty on filesystems that do not order data before

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // smbClientPort is 0: mount_smbfs and mount.cifs dial any port.
@@ -42,7 +43,7 @@ func unmount(dir string, force bool) error {
 	}
 	out, err := exec.Command("umount", args...).CombinedOutput()
 	if err != nil {
-		return errors.New(string(out))
+		return errors.New(strings.TrimSpace(string(out)))
 	}
 	return nil
 }

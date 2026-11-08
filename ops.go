@@ -24,7 +24,7 @@ type opsHandler struct {
 	links   *links
 	welcome admin.Welcome
 	started time.Time
-	stop    func() // asks the server to unmount and exit
+	stop    func(context.Context, api.StopArgs) error // unmounts as asked, then has the server exit
 }
 
 // decodeArgs rejects malformed or unknown request fields.
@@ -103,11 +103,7 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 	case "subscribe":
 		return dispatch(ctx, raw, func(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil })
 	case "stop":
-		return dispatch(ctx, raw, func(context.Context, struct{}) (struct{}, error) {
-			// Reply first; the server unmounts and exits once the reply is written.
-			time.AfterFunc(100*time.Millisecond, h.stop)
-			return struct{}{}, nil
-		})
+		return dispatch(ctx, raw, done(h.stop))
 	default:
 		return nil, &checkout.Error{Code: "unsupported", Message: fmt.Sprintf("unsupported operation %q", op)}
 	}

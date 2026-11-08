@@ -235,6 +235,7 @@ func serve(args []string) error {
 	served := make(chan error, 2)
 	port := 0
 	release := func(force bool) error { return unmount(*mount, force) }
+	var files *fileListener // the system client's connections; nil for in-process mounts
 	if *proto == "fuse" || *proto == "winfsp" {
 		srv, mountErr := mountInProcess(*proto, e, *mount)
 		if mountErr != nil {
@@ -246,7 +247,7 @@ func serve(args []string) error {
 			_ = release(true)
 			return fmt.Errorf("persist listen: %w", err)
 		}
-	} else if port, err = listenAndMount(reg, e, *proto, *address, *state, *mount, served, func(s *smb.Server) { smbServer = s }); err != nil {
+	} else if port, files, err = listenAndMount(reg, e, *proto, *address, *state, *mount, served, func(s *smb.Server) { smbServer = s }); err != nil {
 		return err
 	}
 	log.Printf("mounted at %s", *mount)
@@ -263,12 +264,15 @@ func serve(args []string) error {
 	}
 	defer linkListener.Close()
 	go lk.listen(linkListener)
-	stopRequests := make(chan struct{}, 1)
+	stops := make(chan stopRequest)
 	welcome := admin.Welcome{Version: protocolVersion, Ops: api.Ops, Features: api.Features, Proto: *proto, Port: port, Mount: *mount, State: *state}
-	handler := &opsHandler{reg: reg, shares: checkoutShares, links: lk, welcome: welcome, started: time.Now(), stop: func() {
+	handler := &opsHandler{reg: reg, shares: checkoutShares, links: lk, welcome: welcome, started: time.Now(), stop: func(ctx context.Context, a api.StopArgs) error {
+		done := make(chan error, 1)
 		select {
-		case stopRequests <- struct{}{}:
-		default:
+		case stops <- stopRequest{keepMount: a.KeepMount, done: done}:
+			return <-done
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}}
 	go func() {
@@ -279,20 +283,93 @@ func serve(args []string) error {
 	defer signal.Stop(sigs)
 	force := false
 	for {
+		var req stopRequest
 		select {
 		case err = <-served:
 			_ = release(true)
 			return err
-		case <-stopRequests:
+		case req = <-stops:
 		case <-sigs:
 		}
-		if err = release(force); err != nil {
-			log.Printf("unmount: %v; stop again to force", err)
-			force = true
-			continue
+		if req.keepMount && files != nil {
+			// Cut before the export closes, which would answer the kernel
+			// client "not found": it retries the cut connections instead, until
+			// the next daemon serves this port.
+			files.cut()
+			log.Printf("left %s mounted for the next daemon", *mount)
+			req.done <- nil
+			return nil
 		}
-		return nil
+		if err = release(force); err != nil {
+			err = fmt.Errorf("unmount: %w; stop again to force", err)
+			log.Print(err)
+			force = true
+		}
+		if req.done != nil {
+			req.done <- err
+		}
+		if err == nil {
+			return nil
+		}
 	}
+}
+
+// stopRequest is a stop op awaiting serve's answer on done: nil once the
+// daemon exits, the unmount error while it keeps running.
+type stopRequest struct {
+	keepMount bool
+	done      chan<- error
+}
+
+// fileListener tracks the connections a system NFS or SMB client makes, so a
+// stop that keeps the mount can cut them all at once.
+type fileListener struct {
+	net.Listener
+	mu    sync.Mutex
+	conns map[*fileConn]struct{} // nil once cut
+}
+
+// Accept tracks the connection, or refuses it once the listener is cut.
+func (l *fileListener) Accept() (net.Conn, error) {
+	nc, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	c := &fileConn{Conn: nc, l: l}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.conns == nil {
+		nc.Close()
+		return nil, net.ErrClosed
+	}
+	l.conns[c] = struct{}{}
+	return c, nil
+}
+
+// cut closes the listener and every connection it accepted.
+func (l *fileListener) cut() {
+	l.mu.Lock()
+	conns := l.conns
+	l.conns = nil
+	l.mu.Unlock()
+	l.Listener.Close()
+	for c := range conns {
+		c.Conn.Close()
+	}
+}
+
+// fileConn is a connection fileListener forgets once it closes.
+type fileConn struct {
+	net.Conn
+	l *fileListener
+}
+
+// Close forgets and closes the connection.
+func (c *fileConn) Close() error {
+	c.l.mu.Lock()
+	delete(c.l.conns, c)
+	c.l.mu.Unlock()
+	return c.Conn.Close()
 }
 
 // defaultProto picks the frontend an unprivileged user can mount on this OS.
@@ -342,11 +419,12 @@ func mountInProcess(proto string, e *export.Export, mount string) (inProcessMoun
 // with the system client, unless a previous run's mount is still there. An SMB
 // client that dials one port only pins it, overriding an earlier run's port.
 // SMB authenticates with the state directory's account where the OS has one
-// (smbAccount), otherwise as guest.
-func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, state, mount string, served chan<- error, smbStarted func(*smb.Server)) (int, error) {
+// (smbAccount), otherwise as guest. It returns the port and the listener
+// whose connections the system client holds.
+func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, state, mount string, served chan<- error, smbStarted func(*smb.Server)) (int, *fileListener, error) {
 	savedProto, savedPort := reg.Listen()
 	if savedPort != 0 && savedProto != proto {
-		return 0, fmt.Errorf("listen: state uses %s; restart with -proto %s", savedProto, savedProto)
+		return 0, nil, fmt.Errorf("listen: state uses %s; restart with -proto %s", savedProto, savedProto)
 	}
 	pinned := 0
 	var user, password string
@@ -354,33 +432,34 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, st
 		pinned = smbClientPort()
 		var err error
 		if user, password, err = smbAccount(state); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
 	if want := cmp.Or(pinned, savedPort); want != 0 {
 		host, _, splitErr := net.SplitHostPort(address)
 		if splitErr != nil {
-			return 0, fmt.Errorf("listen address: %w", splitErr)
+			return 0, nil, fmt.Errorf("listen address: %w", splitErr)
 		}
 		address = net.JoinHostPort(host, strconv.Itoa(want))
 	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		if pinned != 0 {
-			return 0, fmt.Errorf("listen %s: %w; this Windows SMB client dials only port %d (Windows 11 24H2 and later dial any port), "+
+			return 0, nil, fmt.Errorf("listen %s: %w; this Windows SMB client dials only port %d (Windows 11 24H2 and later dial any port), "+
 				"which the Server service (LanmanServer) normally holds: install WinFsp (https://winfsp.dev), which ovnfs then mounts instead, "+
 				"or from an elevated prompt run \"sc config LanmanServer start= disabled\" and \"net stop LanmanServer /y\" (this ends local file and printer sharing), then start ovnfs again",
 				address, err, pinned)
 		}
 		if savedPort != 0 {
-			return 0, fmt.Errorf("listen: cannot bind persisted %s port %d at %s (existing mounts require this port): %w", proto, savedPort, address, err)
+			return 0, nil, fmt.Errorf("listen: cannot bind persisted %s port %d at %s (existing mounts require this port): %w", proto, savedPort, address, err)
 		}
-		return 0, fmt.Errorf("listen %s: %w", address, err)
+		return 0, nil, fmt.Errorf("listen %s: %w", address, err)
 	}
+	files := &fileListener{Listener: listener, conns: map[*fileConn]struct{}{}}
 	port := listener.Addr().(*net.TCPAddr).Port
 	if err = reg.SetListen(proto, port); err != nil {
 		listener.Close()
-		return 0, fmt.Errorf("persist listen: %w", err)
+		return 0, nil, fmt.Errorf("persist listen: %w", err)
 	}
 	if proto == "smb" {
 		s := &smb.Server{FS: e.SMB(), Share: "ovnfs", MountRoots: mountRoots(mount)}
@@ -397,17 +476,17 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, st
 			s.Logf = log.Printf
 		}
 		smbStarted(s)
-		go func() { served <- fmt.Errorf("smb serve: %w", s.Serve(listener)) }()
+		go func() { served <- fmt.Errorf("smb serve: %w", s.Serve(files)) }()
 	} else {
-		go func() { served <- fmt.Errorf("nfs serve: %w", serveNFS(listener, e)) }()
+		go func() { served <- fmt.Errorf("nfs serve: %w", serveNFS(files, e)) }()
 	}
 	if !mounted(mount) {
 		if err = makeMountPoint(mount); err != nil {
-			return 0, fmt.Errorf("mount directory: %w", err)
+			return 0, nil, fmt.Errorf("mount directory: %w", err)
 		}
 		if err = mountServer(proto, port, mount, user, password); err != nil {
-			return 0, fmt.Errorf("mount: %w", err)
+			return 0, nil, fmt.Errorf("mount: %w", err)
 		}
 	}
-	return port, nil
+	return port, files, nil
 }

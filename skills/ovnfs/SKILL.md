@@ -39,7 +39,8 @@ ovnfs rm fix-auth                   # remove the checkout; its snapshots stay
   to preview.
 - Any verb starts the daemon if it isn't running. `ovnfs status` and
   `ovnfs stop` manage it, and `ovnfs restart` replaces it with one from the
-  current binary; its log is `serve.log` in the state directory.
+  current binary without unmounting (NFS, SMB), so shells inside checkouts
+  carry on; its log is `serve.log` in the state directory.
 
 ## Choosing what the checkout starts from
 

@@ -12,8 +12,9 @@ var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob"
 
 // Features names optional request fields this daemon honors, so clients can rely on
 // them without a new protocol generation: "new.base" (NewArgs.Base),
-// "diff.binary" (DiffArgs.Binary) and "ls.select" (LsArgs.Select).
-var Features = []string{"new.base", "diff.binary", "ls.select"}
+// "diff.binary" (DiffArgs.Binary), "ls.select" (LsArgs.Select) and
+// "stop.keep_mount" (StopArgs.KeepMount).
+var Features = []string{"new.base", "diff.binary", "ls.select", "stop.keep_mount"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
@@ -366,4 +367,13 @@ type PlanReply struct {
 	Local    PlanSet     `json:"local"`
 	Hidden   PlanSet     `json:"hidden"`
 	Warnings []string    `json:"warnings"`
+}
+
+// StopArgs ends the daemon. It unmounts first and fails, leaving the daemon
+// running, when the mount is busy; the next stop then forces the unmount.
+type StopArgs struct {
+	// KeepMount leaves an NFS or SMB mount for the next daemon, which serves
+	// the same port and file handles, so restart keeps open files and working
+	// directories inside it. FUSE and WinFsp mounts end with the daemon anyway.
+	KeepMount bool `json:"keep_mount,omitempty"`
 }

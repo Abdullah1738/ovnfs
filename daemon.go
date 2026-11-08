@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -194,9 +195,10 @@ func runStart(c *cli, args []string) error {
 
 // stopDaemon asks the running daemon to exit and waits until its socket stops
 // accepting, returning the stop reply (nil when the daemon closed the
-// connection first). It fails when the daemon refuses or outlives daemonWait.
-func stopDaemon(c *cli) (json.RawMessage, error) {
-	raw, err := c.call("stop", struct{}{})
+// connection first). It fails when the daemon refuses, as it does while its
+// mount is busy, or outlives daemonWait.
+func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
+	raw, err := c.call("stop", args)
 	if _, ok := errors.AsType[*admin.RemoteError](err); ok {
 		return nil, err
 	}
@@ -226,7 +228,7 @@ func runStop(c *cli, args []string) error {
 		fmt.Fprintln(os.Stderr, "not running")
 		return nil
 	}
-	raw, err := stopDaemon(c)
+	raw, err := stopDaemon(c, api.StopArgs{})
 	if err != nil {
 		return err
 	}
@@ -238,15 +240,22 @@ func runStop(c *cli, args []string) error {
 }
 
 // runRestart replaces the running daemon with a fresh one spawned from this
-// invocation's binary, which is how a rebuilt or upgraded ovnfs takes over. It
-// starts the daemon when none runs, and leaves the old one untouched if it
-// refuses to stop.
+// invocation's binary, which is how a rebuilt or upgraded ovnfs takes over. An
+// NFS or SMB mount stays, so processes inside it carry on once the new daemon
+// serves. It starts the daemon when none runs, and leaves the old one
+// untouched if it refuses to stop.
 func runRestart(c *cli, args []string) error {
 	if _, err := c.parse(c.flags("restart"), args, 0, 0); err != nil {
 		return err
 	}
 	if accepting(c.state) {
-		if _, err := stopDaemon(c); err != nil {
+		client, err := c.client()
+		if err != nil {
+			return err
+		}
+		// Daemons that predate the feature reject unknown fields.
+		keep := slices.Contains(client.Welcome().Features, "stop.keep_mount")
+		if _, err := stopDaemon(c, api.StopArgs{KeepMount: keep}); err != nil {
 			return err
 		}
 	}

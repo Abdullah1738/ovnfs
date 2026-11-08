@@ -74,7 +74,9 @@ ovnfs prune . --idle 7d        # remove those untouched for a week (--dry-run fi
 
 `ovnfs help` lists every verb. Verbs start the daemon when none is running;
 `start`, `stop`, `restart` and `status` manage it, `serve` runs it in the
-foreground. `restart` swaps in the daemon of the binary you run, e.g. after an upgrade.
+foreground. `restart` swaps in the daemon of the binary you run, e.g. after an
+upgrade, leaving an NFS or SMB mount and the shells inside it in place. `stop`
+fails while something uses the mount; a second `stop` forces the unmount.
 
 ## How it works
 
