@@ -1,6 +1,7 @@
 package rev
 
 import (
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,10 +53,28 @@ func TestParseDateMatchesGit(t *testing.T) {
 	g := newGit(t)
 	dir := t.TempDir()
 	g.run(dir, "init", "-q")
-	for _, zone := range []string{"America/New_York", "UTC", "Asia/Kolkata", "Australia/Sydney"} {
-		loc, err := time.LoadLocation(zone)
+	// zones maps the TZ git gets to the equivalent location ParseDate gets.
+	zones := [][2]string{
+		{"America/New_York", "America/New_York"},
+		{"UTC", "UTC"},
+		{"Asia/Kolkata", "Asia/Kolkata"},
+		{"Australia/Sydney", "Australia/Sydney"},
+	}
+	if runtime.GOOS == "windows" {
+		// The Windows C runtime reads TZ only as a 3-letter name, an offset
+		// and an optional 3-letter DST name that always follows US rules.
+		zones = [][2]string{
+			{"EST5EDT", "America/New_York"},
+			{"UTC", "UTC"},
+			{"IST-5:30", "Asia/Kolkata"},
+			{"AES-10", "Etc/GMT-10"},
+		}
+	}
+	for _, z := range zones {
+		zone := z[0]
+		loc, err := time.LoadLocation(z[1])
 		if err != nil {
-			t.Logf("skipping zone %s: %v", zone, err)
+			t.Logf("skipping zone %s: %v", z[1], err)
 			continue
 		}
 		var args []string
@@ -79,6 +98,11 @@ func TestParseDateMatchesGit(t *testing.T) {
 			want := int64(u)
 			lo := ParseDate(in, before.In(loc)).Unix()
 			hi := ParseDate(in, after.In(loc)).Unix()
+			// Windows' mktime fails (-1) before the epoch, so git cannot be
+			// the oracle there.
+			if runtime.GOOS == "windows" && want == -1 && max(lo, hi) < 0 {
+				continue
+			}
 			if want < min(lo, hi) || want > max(lo, hi) {
 				t.Errorf("%s: ParseDate(%q) = %d..%d, git %d (diff %+d s)", zone, in, lo, hi, want, lo-want)
 			}
