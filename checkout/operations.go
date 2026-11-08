@@ -510,7 +510,7 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 // without registering it. It reads registry state only for gitfiles the layers
 // carry (installGitfiles), so with an empty stack it runs without r.mu while the
 // name is reserved; owners are lineageCheckoutsLocked's for parent. An empty name
-// prepares a checkout to be named later (see markPrepared): its git directory is
+// prepares a checkout to be named later (see namePrepared): its git directory is
 // not marked yet.
 func (r *Registry) prepareCheckout(name, dir string, b *baseRecord, layers []*overlay.Layer, stack []string, parent *string, gs gitSource, owners map[string]bool) (*checkoutRecord, error) {
 	upper := r.upperPath(dir)
