@@ -700,7 +700,9 @@ func modeOf(f store.File) os.FileMode {
 	return 0o644
 }
 
-// writeAtomic creates content at a temporary name beside dst and renames it over dst.
+// writeAtomic creates content at a temporary name beside dst and renames it over dst
+// with [hostfile.Rename], which replaces dst even when it is read-only or, on
+// Windows, held open by a process that shares delete access.
 func writeAtomic(dst string, write func(tmp string) error) error {
 	tmp := filepath.Join(filepath.Dir(dst), ".ovnfs-apply-"+filepath.Base(dst))
 	_ = os.Remove(tmp)
@@ -708,7 +710,7 @@ func writeAtomic(dst string, write func(tmp string) error) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := hostfile.Rename(tmp, dst); err != nil {
 		os.Remove(tmp)
 		return err
 	}

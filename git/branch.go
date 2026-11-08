@@ -16,6 +16,7 @@ import (
 	"github.com/stencil-hq/ovnfs/git/internal/refs"
 	"github.com/stencil-hq/ovnfs/git/internal/repo"
 	"github.com/stencil-hq/ovnfs/git/internal/rev"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 // ErrBranchConflict identifies a branch or index that cannot be advanced safely.
@@ -267,7 +268,8 @@ func (r *Repo) FetchBranch(ctx context.Context, gitdir, branch string, dryRun bo
 			return "", nil, err
 		}
 	}
-	if err := os.Rename(candidatePath, r.IndexPath()); err != nil {
+	// Editors and git itself keep the index open; a POSIX rename replaces it anyway.
+	if err := hostfile.Rename(candidatePath, r.IndexPath()); err != nil {
 		return "", nil, err
 	}
 	// Once the index is installed, only a cancellation noticed before the ref
@@ -281,7 +283,7 @@ func (r *Repo) FetchBranch(ctx context.Context, gitdir, branch string, dryRun bo
 		if missing {
 			rollback = os.Remove(r.IndexPath())
 		} else {
-			rollback = os.Rename(backup.Name(), r.IndexPath())
+			rollback = hostfile.Rename(backup.Name(), r.IndexPath())
 		}
 		if rollback != nil {
 			return "", nil, fmt.Errorf("%w; restoring index: %v", refErr, rollback)

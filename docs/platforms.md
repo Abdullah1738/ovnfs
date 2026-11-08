@@ -92,7 +92,11 @@ The daemon opens host files with delete sharing and renames with POSIX
 semantics, so clients can rename, replace and delete files other handles hold
 open, as on Unix; because Windows never renames a directory while a file below
 it is open, `snap`, `fork` and `rm` first close the checkout's upper
-descriptors, which reopen in the next generation.
+descriptors, which reopen in the next generation. `apply` replaces source
+folder files, and `apply --branch` the folder's git index, the same way, so
+read-only files and files other processes hold open with delete sharing are
+overwritten; a holder that refuses delete sharing fails the apply with a
+sharing violation.
 
 Served on loopback, files are owned by the daemon's user and primary group,
 as on the WinFsp drive, so Git's ownership check accepts checkouts with no

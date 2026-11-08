@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 func branchCheckout(t *testing.T, r *Repo) (string, string) {
@@ -93,6 +95,33 @@ func TestFetchCheckedOutBranch(t *testing.T) {
 		}
 		testGit(t, r.Top, "fsck", "--strict")
 	})
+}
+
+// TestFetchCheckedOutBranchReplacesHeldIndex checks that the index is replaced
+// while another process, such as an editor's git integration, holds it open
+// sharing delete access, which Windows' plain rename refuses.
+func TestFetchCheckedOutBranchReplacesHeldIndex(t *testing.T) {
+	r := testRepo(t)
+	testWrite(t, filepath.Join(r.Top, "a.go"), "base\n")
+	testGit(t, r.Top, "add", "--all")
+	testGit(t, r.Top, "commit", "-qm", "files")
+	gitdir, work := branchCheckout(t, r)
+	testWrite(t, filepath.Join(work, "a.go"), "agent\n")
+	testGit(t, work, "commit", "-qam", "agent a")
+	want := testGit(t, work, "rev-parse", "HEAD")
+	held, err := hostfile.Open(r.IndexPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	commit, changes, err := r.FetchBranch(context.Background(), gitdir, "main", false)
+	if err != nil || commit != want || len(changes) != 1 {
+		t.Fatalf("apply = %s %+v %v", commit, changes, err)
+	}
+	if got := testGit(t, r.Top, "status", "--porcelain"); got != "M a.go" {
+		t.Fatalf("status = %q, want the working tree's old a.go against the new index", got)
+	}
 }
 
 // TestFetchCheckedOutBranchKeepsRacyEdits covers a same-size edit made in the

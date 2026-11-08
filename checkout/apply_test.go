@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stencil-hq/ovnfs/api"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 // TestApplyConcurrentKeepsEveryEdit checks that checkouts of one folder that
@@ -95,6 +96,35 @@ func TestApplyDryRunKeepsNoSnapshot(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(data) != "edit" {
 		t.Errorf("source after apply = %q, %v; want edit", data, err)
+	}
+}
+
+// TestApplyReplacesHeldAndReadOnlyFiles checks that apply overwrites folder
+// files as a Unix rename does, where Windows' plain rename refuses a read-only
+// file or one another process holds open sharing delete access.
+func TestApplyReplacesHeldAndReadOnlyFiles(t *testing.T) {
+	isolateGit(t)
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"held.txt": "old", "readonly.txt": "old"})
+	f.newCheckout(dir, "c")
+	f.put("c", "held.txt", "new")
+	f.put("c", "readonly.txt", "new")
+	if err := os.Chmod(filepath.Join(dir, "readonly.txt"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	held, err := hostfile.Open(filepath.Join(dir, "held.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	if _, err := f.reg.Apply(context.Background(), api.ApplyArgs{Checkout: "c"}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	for _, name := range []string{"held.txt", "readonly.txt"} {
+		if data, err := os.ReadFile(filepath.Join(dir, name)); err != nil || string(data) != "new" {
+			t.Errorf("%s after apply = %q, %v; want new", name, data, err)
+		}
 	}
 }
 

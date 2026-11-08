@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/stencil-hq/ovnfs/internal/clone"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 // A checkout of a repository gets a private git directory instead of a worktree of
@@ -248,7 +249,8 @@ func rewriteConfig(gitdir string, edit func(string) string) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	// The copy keeps a read-only config's mode, which Windows' plain rename refuses to replace.
+	return hostfile.Rename(tmp, path)
 }
 
 // configEntry is one variable a config edit sets.
