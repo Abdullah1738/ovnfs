@@ -128,13 +128,15 @@ is always pruned.
 | Class | In the checkout | Seen by `diff`/`apply`/snapshots |
 | --- | --- | --- |
 | `source` | as captured at open | yes |
-| `cache` (ignored dirs, `node_modules`, `.venv`, ...) | the live folder; writes go to the checkout only | no |
-| `local` (ignored files, secrets, files over 100 MB) | the live folder; writes go to the checkout only | no |
+| `cache` (ignored dirs, `node_modules`, `.venv`, ...) | the live folder until the checkout writes there; writes go to the checkout only | no |
+| `local` (ignored files, secrets, files over 100 MB) | the live folder until the checkout writes there; writes go to the checkout only | no |
 | `hidden` (`.DS_Store`, ...) | absent | no |
 
 - Build outputs and dependency installs inside a checkout never reach the
   folder, and `apply` never carries them back. To keep a generated file, make
-  it `source`.
+  it `source`. A checkout that built or installed keeps its own copy of every
+  path it wrote or deleted, so it no longer sees the folder's later builds or
+  installs there.
 - Files the user adds to the folder after you open the checkout do not
   appear in it. Open a new checkout to see them.
 - `ovnfs explain PATH` names the rule that decided a path's class, with its
