@@ -169,6 +169,7 @@ type Registry struct {
 	rootsMu      sync.Mutex
 	roots        map[string]string        // rootsMu: folders a create named, by their resolved source root
 	resolving    map[string]chan struct{} // rootsMu: folders being resolved, closed when done
+	applying     folderLocks              // source folders an apply is reading and writing
 	mirror       *mirror                  // git upstream content of attached checkouts
 	commits      stateCommits             // durable state commits requested outside r.mu
 	writes       stateWrites              // orders state.json writes

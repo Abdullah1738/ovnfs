@@ -222,4 +222,5 @@ alone. Once resolved, the checkout's later edits to that file merge against the
 version that was marked, so the resolution is kept, across daemon restarts too.
 Anything else (deletion against an edit, binary or symlink changes on both
 sides) is reported as a conflict and left untouched. Applying twice is a no-op.
-`--dry-run` writes nothing.
+`--dry-run` writes nothing. Applies of several checkouts into one folder take
+turns, each merging against what the previous one wrote.

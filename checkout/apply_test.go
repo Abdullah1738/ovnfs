@@ -3,10 +3,59 @@ package checkout
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stencil-hq/ovnfs/api"
 )
+
+// TestApplyConcurrentKeepsEveryEdit checks that checkouts of one folder that
+// edit different lines of one file and apply at once all land: each apply
+// merges against the folder as the others left it, not the same old content.
+func TestApplyConcurrentKeepsEveryEdit(t *testing.T) {
+	isolateGit(t)
+	f := newFixture(t)
+	const n = 8
+	lines := make([]string, n*10)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	dir := folder(t, map[string]string{"shared.txt": strings.Join(lines, "\n") + "\n"})
+	for i := range n {
+		edited := slices.Clone(lines)
+		edited[10*i+5] = fmt.Sprintf("edit by %d", i)
+		f.newCheckout(dir, fmt.Sprint("c", i))
+		f.put(fmt.Sprint("c", i), "shared.txt", strings.Join(edited, "\n")+"\n")
+	}
+
+	var wg sync.WaitGroup
+	replies := make([]api.ApplyReply, n)
+	errs := make([]error, n)
+	for i := range n {
+		wg.Go(func() { replies[i], errs[i] = f.reg.Apply(context.Background(), api.ApplyArgs{Checkout: fmt.Sprint("c", i)}) })
+	}
+	wg.Wait()
+
+	for i := range n {
+		if errs[i] != nil || len(replies[i].Conflicts) != 0 {
+			t.Errorf("apply c%d = %+v, %v", i, replies[i], errs[i])
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "shared.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		if !strings.Contains(string(data), fmt.Sprintf("\nedit by %d\n", i)) {
+			t.Errorf("edit by c%d lost; folder has:\n%s", i, data)
+		}
+	}
+}
 
 // TestApplyDryRunKeepsNoSnapshot checks that a dry run reports the same changes
 // as a real apply but leaves no snapshot behind to hold the checkout's layers.
