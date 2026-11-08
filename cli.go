@@ -58,6 +58,7 @@ func commands() []command {
 		{"drop", "SNAP", "release a snapshot", true, runDrop},
 		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", true, runExplain},
 		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", true, runPlan},
+		{"profile", "[KIND] [--seconds D] [-o FILE]", "capture a runtime profile from the daemon (cpu, heap, allocs, goroutine, block, mutex, threadcreate)", true, runProfile},
 		{"attach", "[DIR|CHECKOUT] --to HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine over ssh; content moves on first read", true, runAttach},
 		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there if missing; PATH there links to the checkout", true, runSend},
 		{"pull", "CHECKOUT [--from HOST] [--dry-run]", "merge attached remote source changes into the local checkout", true, runPull},

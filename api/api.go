@@ -8,7 +8,7 @@ package api
 import "time"
 
 // Ops lists every operation the daemon serves, in CLI help order.
-var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "attach", "pull", "push", "share", "subscribe", "stop"}
+var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "profile", "attach", "pull", "push", "share", "subscribe", "stop"}
 
 // Features names optional request fields this daemon honors, so clients can rely on
 // them without a new protocol generation: "new.base" (NewArgs.Base),
@@ -376,4 +376,23 @@ type StopArgs struct {
 	// the same port and file handles, so restart keeps open files and working
 	// directories inside it. FUSE and WinFsp mounts end with the daemon anyway.
 	KeepMount bool `json:"keep_mount,omitempty"`
+}
+
+// ProfileArgs captures one Go runtime profile from the running daemon.
+type ProfileArgs struct {
+	// Kind names the profile: "cpu" (default), "heap", "allocs", "goroutine",
+	// "block", "mutex" or "threadcreate". cpu, block and mutex sample over a
+	// window and report nothing accumulated outside it; the rest are snapshots.
+	Kind string `json:"kind,omitempty"`
+	// Seconds bounds a sampling profile's window; snapshots ignore it.
+	Seconds float64 `json:"seconds,omitempty"`
+}
+
+// ProfileReply is a pprof profile: gzip-compressed protobuf, base64 so it fits a
+// JSON reply. `go tool pprof` reads the decoded bytes.
+type ProfileReply struct {
+	Kind    string  `json:"kind"`    // the profile captured
+	Seconds float64 `json:"seconds"` // sampling window; 0 for a snapshot
+	Bytes   int     `json:"bytes"`   // decoded profile size
+	Data    string  `json:"data"`    // base64 pprof bytes
 }

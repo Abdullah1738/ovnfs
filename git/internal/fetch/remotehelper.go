@@ -34,7 +34,7 @@ type remoteHelper struct {
 // helper fetches through git-remote-<transport>: over the upload-pack
 // stream of its connect or stateless-connect command when it offers one,
 // else with its fetch command, which stores the objects in the target
-// itself, and, without depth support, with all their history.
+// itself with all their history (Options.Depth is not passed on).
 func (f *fetcher) helper(ctx context.Context, ep *endpoint) (Result, error) {
 	if f.opts.GitDir == "" {
 		return Result{}, fmt.Errorf("fetch: remote helper '%s' needs the target's git directory", ep.transport)

@@ -92,6 +92,8 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 		return dispatch(ctx, raw, h.reg.Explain)
 	case "plan":
 		return dispatch(ctx, raw, h.reg.Plan)
+	case "profile":
+		return dispatch(ctx, raw, captureProfile)
 	case "attach":
 		return dispatch(ctx, raw, h.links.attach)
 	case "pull":

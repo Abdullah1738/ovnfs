@@ -48,6 +48,12 @@ registry lock, so a slow file call or search stalls only its own checkout.
 Searches through the daemon skip AppleDouble `._` sidecars, which the mount
 does not list.
 
+`profile` captures one Go runtime profile from the daemon (`cpu`, `heap`,
+`allocs`, `goroutine`, `block`, `mutex` or `threadcreate`) and returns it as
+base64 pprof bytes in its reply; `cpu`, `block` and `mutex` sample over a window
+(`--seconds`, default 30), the rest are snapshots. `ovnfs profile cpu -o cpu.pb.gz`
+writes the decoded bytes, which `go tool pprof cpu.pb.gz` reads.
+
 Frames are limited to 16 MiB. An oversized reply returns error code
 `too_large` without closing the connection; search clients can reduce their
 result count, file filters or reported line width.
