@@ -71,6 +71,30 @@ func (c *cli) client() (*admin.Client, error) {
 // completes a handshake. Starts on one state directory take turns; the pid is 0
 // when an earlier start's daemon answers instead.
 func startDaemon(ctx context.Context, state, mount string) (*admin.Client, int, error) {
+	lock, err := lockDaemon(state)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer lock.Close()
+	return spawnDaemon(ctx, state, mount)
+}
+
+// lockDaemon creates the state directory and waits for its start lock, held
+// by startDaemon and restart while they change the daemon; closing the
+// returned file releases it.
+func lockDaemon(state string) (*os.File, error) {
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		return nil, fmt.Errorf("creating state %s: %w", state, err)
+	}
+	lock, err := lockStart(state)
+	if err != nil {
+		return nil, fmt.Errorf("waiting for other starts of %s: %w", state, err)
+	}
+	return lock, nil
+}
+
+// spawnDaemon is startDaemon for a caller that holds the start lock.
+func spawnDaemon(ctx context.Context, state, mount string) (*admin.Client, int, error) {
 	state, err := filepath.Abs(state)
 	if err != nil {
 		return nil, 0, fmt.Errorf("resolving state %s: %w", state, err)
@@ -78,14 +102,6 @@ func startDaemon(ctx context.Context, state, mount string) (*admin.Client, int, 
 	if mount, err = filepath.Abs(mount); err != nil {
 		return nil, 0, fmt.Errorf("resolving mount %s: %w", mount, err)
 	}
-	if err := os.MkdirAll(state, 0o700); err != nil {
-		return nil, 0, fmt.Errorf("creating state %s: %w", state, err)
-	}
-	lock, err := lockStart(state)
-	if err != nil {
-		return nil, 0, fmt.Errorf("waiting for other starts of %s: %w", state, err)
-	}
-	defer lock.Close()
 	if accepting(state) {
 		client, err := admin.Dial(socketPath(state), adminProtocol)
 		return client, 0, err
@@ -193,12 +209,20 @@ func runStart(c *cli, args []string) error {
 	return nil
 }
 
-// stopDaemon asks the running daemon to exit and waits until its socket stops
-// accepting, returning the stop reply (nil when the daemon closed the
-// connection first). It fails when the daemon refuses, as it does while its
-// mount is busy, or outlives daemonWait.
+// stopDaemon asks the running daemon to exit and waits until its process is
+// gone, and with it the hold on the state directory the next daemon needs,
+// returning the stop reply (nil when the daemon closed the connection first).
+// It fails when the daemon refuses, as it does while its mount is busy, or
+// still accepts connections after daemonWait. A daemon that stopped accepting
+// is exiting: its final flush and state write can outlast daemonWait under
+// load, so that wait has no bound.
 func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
-	raw, err := c.call("stop", args)
+	raw, err := c.call("status", struct{}{})
+	st, err := decodeReply[api.Status]("status", raw, err)
+	if err != nil {
+		return nil, err
+	}
+	raw, err = c.call("stop", args)
 	if _, ok := errors.AsType[*admin.RemoteError](err); ok {
 		return nil, err
 	}
@@ -206,9 +230,20 @@ func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
 	c.close()
 	c.conn = nil
 	deadline := time.Now().Add(daemonWait)
-	for accepting(c.state) {
+	noticed := false
+	for {
+		up := accepting(c.state)
+		if !up && (st.PID == 0 || !processAlive(st.PID)) {
+			return raw, nil
+		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("ovnfs still accepting connections at %s after %s", socketPath(c.state), daemonWait)
+			if up {
+				return nil, fmt.Errorf("ovnfs still accepting connections at %s after %s", socketPath(c.state), daemonWait)
+			}
+			if !noticed {
+				noticed = true
+				fmt.Fprintf(os.Stderr, "waiting for ovnfs (pid %d) to finish shutting down\n", st.PID)
+			}
 		}
 		select {
 		case <-c.ctx.Done():
@@ -216,10 +251,9 @@ func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return raw, nil
 }
 
-// runStop asks the daemon to exit and waits until its socket stops accepting.
+// runStop asks the daemon to exit and waits until it has exited.
 func runStop(c *cli, args []string) error {
 	if _, err := c.parse(c.flags("stop"), args, 0, 0); err != nil {
 		return err
@@ -243,11 +277,18 @@ func runStop(c *cli, args []string) error {
 // invocation's binary, which is how a rebuilt or upgraded ovnfs takes over. An
 // NFS or SMB mount stays, so processes inside it carry on once the new daemon
 // serves. It starts the daemon when none runs, and leaves the old one
-// untouched if it refuses to stop.
+// untouched if it refuses to stop. The start lock is held throughout, so
+// clients that auto-start while the old daemon exits wait for the new one
+// instead of racing it for the state directory.
 func runRestart(c *cli, args []string) error {
 	if _, err := c.parse(c.flags("restart"), args, 0, 0); err != nil {
 		return err
 	}
+	lock, err := lockDaemon(c.state)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	if accepting(c.state) {
 		client, err := c.client()
 		if err != nil {
@@ -259,7 +300,7 @@ func runRestart(c *cli, args []string) error {
 			return err
 		}
 	}
-	client, pid, err := startDaemon(c.ctx, c.state, c.mount)
+	client, pid, err := spawnDaemon(c.ctx, c.state, c.mount)
 	if err != nil {
 		return err
 	}

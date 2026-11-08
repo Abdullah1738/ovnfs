@@ -42,6 +42,17 @@ func detachedProcess() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{CreationFlags: flags}
 }
 
+// processAlive reports whether pid names a process that has not exited.
+func processAlive(pid int) bool {
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+	event, err := windows.WaitForSingleObject(h, 0)
+	return err == nil && event == uint32(windows.WAIT_TIMEOUT)
+}
+
 // mayLeaveJob reports whether this process runs in a job that lets children
 // break away; outside any job the query fails and there is nothing to leave.
 func mayLeaveJob() bool {

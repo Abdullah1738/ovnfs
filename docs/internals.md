@@ -160,7 +160,12 @@ mount path, so hard-mounted NFS I/O resumes with existing handles and cwd.
 `keep_mount`): the old daemon cuts its file connections before it closes the
 export, and the client retries until the new one serves. A plain `stop`
 unmounts before it replies; while the mount is busy it fails and the daemon
-keeps running, and the next `stop` forces the unmount.
+keeps running, and the next `stop` forces the unmount. The daemon closes its
+admin socket before its final flush, hash drain and state write, which can take
+a while under load; `stop` and `restart` wait for its process to exit, when the
+state lock is released, and `restart` holds the start lock throughout, so
+auto-starting clients wait for the new daemon rather than failing on the state
+lock.
 Metadata uses `fsync(2)`, not `F_FULLFSYNC`: it survives server crashes, not
 power loss. `state.json` is synced after its rename, so a kernel crash during
 that sync can leave it empty on filesystems that do not order data before
