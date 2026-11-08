@@ -97,6 +97,8 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 		return dispatch(ctx, raw, h.links.attach)
 	case "pull":
 		return dispatch(ctx, raw, h.links.pull)
+	case "push":
+		return dispatch(ctx, raw, h.links.push)
 	case "share":
 		return dispatch(ctx, raw, h.shares.Share)
 	case "mesh.setup":

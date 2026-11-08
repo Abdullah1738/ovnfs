@@ -35,7 +35,8 @@ link. Commits stay in the mirror across restarts and for later attaches; delete
 `mirror.git` to reclaim its space.
 
 The link reconnects with backoff while the source daemon runs. Without it,
-cached content stays readable and uncached reads fail with EIO. A slow download
+cached content stays readable and uncached reads fail with EIO; [push](#push)
+first to cache all of it. A slow download
 for an open does not hold the overlay's namespace lock: unrelated reads and
 writes can proceed. Re-attaching the same snapshot reuses the remote checkout.
 A newer snapshot updates the same
@@ -99,6 +100,30 @@ and the link must be up.
 
 Then `ovnfs apply CHECKOUT` merges the local checkout back into the folder.
 Attaching a folder prints the local checkout name to use for pull and apply.
+
+## Push
+
+`ovnfs push [CHECKOUT] [--to HOST]` makes attached machines independent of this
+one: each fetches, over its link, every blob it would still read from here, so
+its checkouts keep working after this machine sleeps, leaves the network or
+stops its daemon.
+
+```sh
+ovnfs attach app --to devbox
+ovnfs push app                 # devbox now holds all of app's source content
+```
+
+Without arguments push covers every attachment; `CHECKOUT` and `--to` narrow
+it. On the remote it covers every checkout and snapshot attached from the same
+source folder, whichever lane holds it, including symlinks and files only the
+local checkout had; files its [git mirror](#committed-content-from-the-git-upstream)
+holds, cache roots, and local or hidden paths stay out. The remote fetches with
+ordinary verified requests, in batches of at most 8 MiB or 1024 blobs, so its
+reads keep being answered during a long push. Each attachment reports the blobs
+and bytes it fetched; one that is disconnected or fails is reported without
+stopping the others, and push then exits 1. Blobs fetched before a failure or
+an interrupt stay, so pushing again resumes. Push changes nothing the remote's
+checkouts show; edits made here after the attach still need another `attach`.
 
 ## Share
 

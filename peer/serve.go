@@ -22,21 +22,22 @@ type Blobs interface {
 // Serve runs the source side: sends offer, waits for Accepted (calling accepted once) or a refusal (returned as error), then answers blob requests until the stream ends or ctx is done. Returns nil on a clean close by the remote.
 // Serve owns conn and closes it before returning; on ctx done it says goodbye to the remote first and returns ctx's error.
 func Serve(ctx context.Context, conn io.ReadWriteCloser, offer Offer, blobs Blobs, accepted func(Accepted)) error {
-	return ServePull(ctx, conn, offer, blobs, func(a Accepted, _ *Puller) {
+	return ServeRemote(ctx, conn, offer, blobs, func(a Accepted, _ *Remote) {
 		if accepted != nil {
 			accepted(a)
 		}
 	})
 }
 
-// ServePull serves blobs like Serve and exposes the active link's pull handle
-// after acceptance. The callback should retain the handle and return; requests
-// are served after it returns. The handle becomes unavailable when this connection ends.
-func ServePull(ctx context.Context, conn io.ReadWriteCloser, offer Offer, blobs Blobs, accepted func(Accepted, *Puller)) error {
+// ServeRemote serves blobs like Serve and exposes the accepted link's Remote,
+// which pulls from and pushes to the remote side. The callback should retain
+// the handle and return; requests are served after it returns. The handle
+// becomes unavailable when this connection ends.
+func ServeRemote(ctx context.Context, conn io.ReadWriteCloser, offer Offer, blobs Blobs, accepted func(Accepted, *Remote)) error {
 	sv := &server{conn: conn, blobs: blobs, sem: make(chan struct{}, 1), searches: map[uint32]context.CancelFunc{}, scanning: make(chan struct{}, searchers)}
 	sv.searchCtx, sv.searchStop = context.WithCancel(ctx)
 	defer sv.searchStop()
-	sv.pull = &Puller{sv: sv, pending: map[uint32]*pullCall{}, done: make(chan struct{})}
+	sv.remote = &Remote{sv: sv, pending: map[uint32]*pending{}, done: make(chan struct{})}
 	sv.queue.cond.L = &sv.queue.mu
 	stopped := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
@@ -45,7 +46,7 @@ func ServePull(ctx context.Context, conn io.ReadWriteCloser, offer Offer, blobs 
 		sv.stopping = true
 		bye := sv.offered
 		sv.mu.Unlock()
-		sv.pull.end(ctx.Err())
+		sv.remote.end(ctx.Err())
 		if bye {
 			sv.goodbye()
 		}
@@ -58,22 +59,22 @@ func ServePull(ctx context.Context, conn io.ReadWriteCloser, offer Offer, blobs 
 	}()
 	err := sv.run(offer, func(a Accepted) {
 		if accepted != nil {
-			accepted(a, sv.pull)
+			accepted(a, sv.remote)
 		}
 	})
 	conn.Close()
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
-	sv.pull.end(err)
+	sv.remote.end(err)
 	return err
 }
 
 // server is the source side of one link.
 type server struct {
-	conn  io.ReadWriteCloser
-	blobs Blobs
-	pull  *Puller
+	conn   io.ReadWriteCloser
+	blobs  Blobs
+	remote *Remote
 	// sem serializes frame writes; waiting writers are served in arrival order, which interleaves the streams.
 	sem   chan struct{}
 	queue queue
@@ -133,7 +134,7 @@ func (sv *server) run(offer Offer, accepted func(Accepted)) error {
 		wg.Go(sv.work)
 	}
 	err = sv.read(fr)
-	sv.pull.end(err)
+	sv.remote.end(err)
 	sv.queue.close()
 	sv.searchStop()
 	sv.conn.Close()
@@ -166,8 +167,8 @@ func (sv *server) read(fr *frameReader) error {
 				return fmt.Errorf("protocol error: %w", err)
 			}
 			sv.queue.push(reqs)
-		case frameMeta, frameMetaEnd, frameBlob, frameChunk, framePulled, framePullErr:
-			if err := sv.pull.receive(typ, p); err != nil {
+		case frameMeta, frameMetaEnd, frameBlob, frameChunk, framePulled, framePullErr, framePushed, framePushErr:
+			if err := sv.remote.receive(typ, p); err != nil {
 				return err
 			}
 		case frameSearch:
@@ -268,21 +269,25 @@ func (sv *server) goodbye() {
 	}
 }
 
-// Puller requests remote changes over an accepted source-side link.
-type Puller struct {
+// Remote asks the remote side of an accepted source-side link for work: Pull
+// its checkout's changes, Push the content it still reads through the link.
+type Remote struct {
 	sv      *server
 	mu      sync.Mutex
 	next    uint32
-	pending map[uint32]*pullCall
+	pending map[uint32]*pending
 	done    chan struct{}
 	err     error
 }
 
-// pullCall accumulates one pull, touched under Puller.mu.
-type pullCall struct {
+// pending is one pull or push awaiting the remote's answer, touched under Remote.mu.
+type pending struct {
 	done   chan struct{}
-	result Pulled
 	err    error
+	push   bool   // answered by framePushed or framePushErr; else a pull
+	pushed Pushed // a push's answer
+	// A pull's answer, assembled as its frames arrive.
+	result Pulled
 	meta   []byte
 	ready  bool
 	blob   store.OID
@@ -292,23 +297,46 @@ type pullCall struct {
 
 // Pull snapshots the remote checkout and returns source changes since from.
 // Cancellation abandons this request without interrupting concurrent fetches.
-func (p *Puller) Pull(ctx context.Context, from store.OID) (Pulled, error) {
+func (p *Remote) Pull(ctx context.Context, from store.OID) (Pulled, error) {
 	raw, ok := hexID(from)
 	if !ok {
 		return Pulled{}, fmt.Errorf("pull: malformed base tree id %q", from)
 	}
-	if err := ctx.Err(); err != nil {
+	c, err := p.ask(ctx, framePull, raw[:])
+	if err != nil {
 		return Pulled{}, err
+	}
+	return c.result, nil
+}
+
+// Push has the remote fetch, over this link, every blob its checkouts attached
+// from this machine still lack (see Session.SetPushHandler), so they stay
+// readable once the link is gone. Cancellation stops the remote fetching more;
+// blobs already requested still land there.
+func (p *Remote) Push(ctx context.Context) (Pushed, error) {
+	c, err := p.ask(ctx, framePush, nil)
+	if err != nil {
+		return Pushed{}, err
+	}
+	return c.pushed, nil
+}
+
+// ask sends a pull or push request of typ under a fresh tag, followed by body,
+// and waits for the remote's answer, the end of the link or ctx; a request
+// abandoned by ctx is canceled on the remote too.
+func (p *Remote) ask(ctx context.Context, typ byte, body []byte) (*pending, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	p.mu.Lock()
 	if p.err != nil {
 		err := p.err
 		p.mu.Unlock()
-		return Pulled{}, err
+		return nil, err
 	}
 	tag := p.next
 	p.next++
-	c := &pullCall{done: make(chan struct{})}
+	c := &pending{done: make(chan struct{}), push: typ == framePush}
 	p.pending[tag] = c
 	p.mu.Unlock()
 	defer func() {
@@ -317,40 +345,44 @@ func (p *Puller) Pull(ctx context.Context, from store.OID) (Pulled, error) {
 		p.mu.Unlock()
 	}()
 	sent := make(chan error, 1)
-	go func() { sent <- p.sv.send(frame(framePull, binary.BigEndian.AppendUint32(nil, tag), raw[:])) }()
+	go func() { sent <- p.sv.send(frame(typ, binary.BigEndian.AppendUint32(nil, tag), body)) }()
 	select {
 	case err := <-sent:
 		if err != nil {
-			return Pulled{}, fmt.Errorf("pull request: %w", err)
+			what := "pull"
+			if c.push {
+				what = "push"
+			}
+			return nil, fmt.Errorf("%s request: %w", what, err)
 		}
 	case <-ctx.Done():
 		go func() {
 			<-sent
 			p.cancel(tag)
 		}()
-		return Pulled{}, ctx.Err()
+		return nil, ctx.Err()
 	case <-p.done:
 		p.mu.Lock()
 		err := p.err
 		p.mu.Unlock()
-		return Pulled{}, err
+		return nil, err
 	}
 	select {
 	case <-c.done:
-		return c.result, c.err
+		return c, c.err
 	case <-ctx.Done():
 		p.cancel(tag)
-		return Pulled{}, ctx.Err()
+		return nil, ctx.Err()
 	}
 }
 
-// cancel asks the remote to abandon a pull without blocking its caller.
-func (p *Puller) cancel(tag uint32) {
+// cancel asks the remote to abandon a pull or push without blocking its caller.
+func (p *Remote) cancel(tag uint32) {
 	go p.sv.send(frame(frameCancel, binary.BigEndian.AppendUint32(nil, tag)))
 }
 
-// end releases every pending pull when the serving connection ends.
-func (p *Puller) end(err error) {
+// end releases every pending request when the serving connection ends.
+func (p *Remote) end(err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.err != nil {
@@ -368,10 +400,10 @@ func (p *Puller) end(err error) {
 	clear(p.pending)
 }
 
-// receive consumes a bounded pull response frame; canceled tags are discarded.
-func (p *Puller) receive(typ byte, body []byte) error {
+// receive consumes a bounded pull or push response frame; canceled tags are discarded.
+func (p *Remote) receive(typ byte, body []byte) error {
 	if len(body) < 4 {
-		return fmt.Errorf("protocol error: short pull frame %q", typ)
+		return fmt.Errorf("protocol error: short response frame %q", typ)
 	}
 	tag := binary.BigEndian.Uint32(body)
 	body = body[4:]
@@ -381,12 +413,27 @@ func (p *Puller) receive(typ byte, body []byte) error {
 	if c == nil {
 		return nil
 	}
+	if c.push != (typ == framePushed || typ == framePushErr) {
+		return fmt.Errorf("protocol error: frame %q answers request %d of another kind", typ, tag)
+	}
 	finish := func(err error) {
 		c.err = err
 		delete(p.pending, tag)
 		close(c.done)
 	}
 	switch typ {
+	case framePushErr:
+		finish(fmt.Errorf("remote push: %s", body))
+	case framePushed:
+		if len(body) != 16 {
+			return errors.New("protocol error: invalid push answer")
+		}
+		blobs, bytes := binary.BigEndian.Uint64(body), binary.BigEndian.Uint64(body[8:])
+		if blobs > math.MaxInt64 || bytes > math.MaxInt64 {
+			return errors.New("protocol error: push answer out of range")
+		}
+		c.pushed = Pushed{Blobs: int64(blobs), Bytes: int64(bytes)}
+		finish(nil)
 	case framePullErr:
 		finish(fmt.Errorf("remote snapshot: %s", body))
 	case frameMeta:
@@ -435,7 +482,7 @@ func (p *Puller) receive(typ byte, body []byte) error {
 }
 
 // finishBlob verifies a complete pulled blob before exposing its bytes.
-func (c *pullCall) finishBlob() error {
+func (c *pending) finishBlob() error {
 	if store.HashBytes("blob", c.data) != c.blob {
 		return fmt.Errorf("pull blob %s: content hash mismatch", c.blob)
 	}

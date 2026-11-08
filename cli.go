@@ -61,6 +61,7 @@ func commands() []command {
 		{"attach", "[DIR|CHECKOUT] --to MEMBER|HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine (a mesh member, else over ssh); content moves on first read", true, runAttach},
 		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there and joining the mesh as needed; PATH there links to the checkout", true, runSend},
 		{"pull", "CHECKOUT [--from HOST] [--dry-run]", "merge attached remote source changes into the local checkout", true, runPull},
+		{"push", "[CHECKOUT] [--to HOST]", "have attached machines fetch all content they still read from this one, so they work without it", true, runPush},
 		{"share", "CHECKOUT [--rw]", "serve a checkout over remote-fs for a VM (vmon --remote-fs TAG:SOCK[:rw]) or a peer", true, runShare},
 		{"mesh", "setup|join TOKEN|ls|rm MEMBER|leave", "join machines into a mesh; attach --to a member then runs over it", true, runMesh},
 		{"link", "", "relay an attach session from ssh into this machine's daemon (run by attach)", true, runLink},
@@ -497,6 +498,40 @@ func runPull(c *cli, args []string) error {
 		again += " --from " + a.From
 	}
 	return printMerge(c, r, a.DryRun, again)
+}
+
+// runPush has the machines checkouts are attached to fetch all the content
+// they still read from this one, and fails when any attachment could not.
+func runPush(c *cli, args []string) error {
+	fs := c.flags("push")
+	var a api.PushArgs
+	fs.StringVar(&a.To, "to", "", "only the attachments to this host, as passed to attach")
+	pos, err := c.parse(fs, args, 0, 1)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 1 {
+		a.Checkout = pos[0]
+	}
+	r, err := call[api.PushReply](c, "push", a)
+	if err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	failed := 0
+	for _, p := range r.Pushed {
+		if p.Error != "" {
+			failed++
+			fmt.Fprintf(os.Stderr, "push %s to %s: %s\n", p.Checkout, p.To, p.Error)
+		} else if !c.json {
+			fmt.Fprintf(tw, "%s\t→ %s\t%s\t%s\n", p.Checkout, p.To, plural(int(p.Blobs), "blob", "blobs"), humanBytes(p.Bytes))
+		}
+	}
+	tw.Flush()
+	if failed > 0 {
+		return exitCode(1)
+	}
+	return nil
 }
 
 // printMerge prints apply and pull outcomes and fails when conflicts remain,

@@ -31,8 +31,8 @@ func TestPullSelectsAttachment(t *testing.T) {
 			l := newLinks()
 			defer l.cancel()
 			for _, key := range tc.attachments {
-				_, host, _ := strings.Cut(key, "@")
-				l.out[key] = &outLink{to: host}
+				name, host, _ := strings.Cut(key, "@")
+				l.out[key] = &outLink{checkout: name, to: host}
 			}
 			_, err := l.pull(context.Background(), tc.args)
 			var he *checkout.Error
@@ -43,5 +43,46 @@ func TestPullSelectsAttachment(t *testing.T) {
 				t.Fatalf("pull error = %q, want %q", he.Message, tc.message)
 			}
 		})
+	}
+}
+
+// TestPushReportsEachAttachment: push takes every attachment the filters
+// match, in checkout and host order, and reports one that cannot push without
+// failing the others.
+func TestPushReportsEachAttachment(t *testing.T) {
+	l := newLinks()
+	defer l.cancel()
+	for _, key := range []string{"web@b", "app@me@b", "app@a"} {
+		name, host, _ := strings.Cut(key, "@")
+		l.out[key] = &outLink{checkout: name, to: host}
+	}
+	for _, tc := range []struct {
+		args api.PushArgs
+		want []string
+	}{
+		{args: api.PushArgs{}, want: []string{"app@a", "app@me@b", "web@b"}},
+		{args: api.PushArgs{Checkout: "app"}, want: []string{"app@a", "app@me@b"}},
+		{args: api.PushArgs{To: "b"}, want: []string{"web@b"}},
+		{args: api.PushArgs{Checkout: "app", To: "me@b"}, want: []string{"app@me@b"}},
+	} {
+		r, err := l.push(context.Background(), tc.args)
+		if err != nil {
+			t.Fatalf("push %+v: %v", tc.args, err)
+		}
+		var got []string
+		for _, p := range r.Pushed {
+			got = append(got, p.Checkout+"@"+p.To)
+			if !strings.Contains(p.Error, "not connected") {
+				t.Errorf("push %s@%s error = %q, want not connected", p.Checkout, p.To, p.Error)
+			}
+		}
+		if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("push %+v reached %v, want %v", tc.args, got, tc.want)
+		}
+	}
+	_, err := l.push(context.Background(), api.PushArgs{Checkout: "app", To: "c"})
+	var he *checkout.Error
+	if !errors.As(err, &he) || he.Code != "not_found" || !strings.Contains(he.Message, "checkout app is not attached to c") {
+		t.Fatalf("push to no attachment = %v", err)
 	}
 }

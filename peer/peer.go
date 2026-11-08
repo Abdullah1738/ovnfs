@@ -25,6 +25,12 @@
 // or 'F' with an error message. Metadata is JSON Pulled without Data; blobs
 // travel as raw bytes, each chunk at most 256 KiB. Pulls and fetches interleave.
 //
+// Source-initiated pushes use 'U' (tag): the remote then fetches, with ordinary
+// requests in batches, every blob its checkouts attached from the source still
+// lack, and answers 'V' (tag, blob count u64, byte count u64) or 'G' (tag and an
+// error message). 'K' cancels a push as it does a pull; pull and push tags share
+// one sequence.
+//
 // Tags are chosen by the remote, one per requested blob. The source streams up
 // to four blobs at once, interleaving their chunks; a blob is complete once
 // its announced size has arrived. Every frame other than the offer is capped
@@ -62,7 +68,7 @@ import (
 )
 
 // Version is the link protocol version; both sides refuse others.
-const Version = 4
+const Version = 5
 
 // Entry is one leaf of an offered snapshot (blob, symlink, or empty dir as store.ModeDir/store.EmptyTree).
 type Entry struct {
@@ -99,6 +105,13 @@ type Pulled struct {
 	Data     map[store.OID][]byte  `json:"data"`
 }
 
+// Pushed is what a push moved: the blobs the remote lacked when it started and
+// their offered sizes.
+type Pushed struct {
+	Blobs int64
+	Bytes int64
+}
+
 // Accepted is the remote side's answer to an offer.
 type Accepted struct {
 	Checkout string `json:"checkout"`
@@ -116,13 +129,16 @@ const (
 	frameError   byte = 'X'
 	frameBye     byte = 'Q'
 	framePull    byte = 'P' // tag and base tree id
-	frameCancel  byte = 'K' // pull tag
+	framePush    byte = 'U' // tag
+	frameCancel  byte = 'K' // pull or push tag
 	frameMeta    byte = 'M' // tag and metadata chunk
 	frameMetaEnd byte = 'N' // tag, ends metadata
 	frameBlob    byte = 'J' // tag, blob id, size
 	frameChunk   byte = 'L' // tag and blob chunk
 	framePulled  byte = 'E' // tag, completes pull
 	framePullErr byte = 'F' // tag and error message
+	framePushed  byte = 'V' // tag, blob count, byte count; completes push
+	framePushErr byte = 'G' // tag and error message
 	frameSearch  byte = 'S' // tag, query and wanted blobs
 	frameAbort   byte = 'C' // search tag
 	frameHits    byte = 'H' // tag and results chunk

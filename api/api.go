@@ -9,7 +9,7 @@ package api
 import "time"
 
 // Ops lists every operation the daemon serves, in CLI help order.
-var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "attach", "pull", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
+var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "attach", "pull", "push", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
 
 // Features names optional request fields this daemon honors, so clients can rely on
 // them without a new protocol generation: "new.base" (NewArgs.Base),
@@ -280,6 +280,28 @@ type PullArgs struct {
 
 // PullReply reports changes merged into the local checkout and its conflicts.
 type PullReply = ApplyReply
+
+// PushArgs has the machines checkouts are attached to fetch every blob they
+// still read from this one over the link, so their checkouts keep working once
+// it is gone. Empty fields match every attachment.
+type PushArgs struct {
+	Checkout string `json:"checkout,omitempty"` // the local checkout attached
+	To       string `json:"to,omitempty"`       // host passed to attach
+}
+
+// PushReply reports each matching attachment's push, sorted by checkout and host.
+type PushReply struct {
+	Pushed []Pushed `json:"pushed"`
+}
+
+// Pushed is one attachment's push: what its machine lacked and fetched, or why it failed.
+type Pushed struct {
+	Checkout string `json:"checkout"`
+	To       string `json:"to"`
+	Blobs    int64  `json:"blobs"`           // distinct blobs fetched
+	Bytes    int64  `json:"bytes"`           // their sizes as offered
+	Error    string `json:"error,omitempty"` // set when the push failed; blobs fetched before stay
+}
 
 // Mesh is this machine's mesh: the machines that reach each other by node key,
 // directly or through the relay. An empty Mesh id means it is in none.

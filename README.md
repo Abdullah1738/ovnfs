@@ -43,6 +43,7 @@ ovnfs run -- make test         # a disposable checkout: run, then remove
 ovnfs new --rev main           # start from a revision instead of the working tree
 ovnfs attach app --to devbox   # the same checkout on another machine, fetched lazily
 ovnfs send . devbox:src/app    # attach over ssh, installing ovnfs and joining the mesh there first
+ovnfs push app                 # copy what devbox still reads from here, so it works with this machine off
 ovnfs grep 'TODO' app          # search in the daemon, without traversing the mount
 ovnfs glob '*.go' app          # matching paths, recursively and ignore-aware
 ovnfs ls .                     # the checkouts of this folder

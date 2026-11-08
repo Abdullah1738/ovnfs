@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -140,6 +141,7 @@ func (l *links) inbound(conn io.ReadWriteCloser, from string) {
 	s.SetPullHandler(func(ctx context.Context, _ store.OID) (peer.Pulled, error) {
 		return l.reg.RemoteChanges(ctx, h.Name, offer.Tree)
 	})
+	s.SetPushHandler(func() []peer.Want { return peerWants(l.reg.Missing(key)) })
 	host, _ := os.Hostname()
 	if err := s.Reply(peer.Accepted{Checkout: h.Name, Path: h.Path, Host: host}); err != nil {
 		log.Printf("link from %s: %v", offer.Source, err)
@@ -183,7 +185,7 @@ func (l *links) attach(ctx context.Context, args api.AttachArgs) (api.AttachRepl
 	if old := l.out[key]; old != nil {
 		old.cancel()
 	}
-	o := newOutLink(l.ctx, args.To, l.opener(args.To, args.RemoteBin), offer, blobs)
+	o := newOutLink(l.ctx, name, args.To, l.opener(args.To, args.RemoteBin), offer, blobs)
 	l.out[key] = o
 	l.mu.Unlock()
 	l.wg.Go(func() {
@@ -210,28 +212,19 @@ func (l *links) pull(ctx context.Context, args api.PullArgs) (api.PullReply, err
 	if args.Checkout == "" {
 		return api.PullReply{}, &checkout.Error{Code: "invalid", Message: "pull needs a checkout"}
 	}
-	l.mu.Lock()
-	var selected *outLink
-	var hosts []string
-	for key, o := range l.out {
-		host, ok := strings.CutPrefix(key, args.Checkout+"@")
-		if !ok || (args.From != "" && host != args.From) {
-			continue
-		}
-		selected = o
-		hosts = append(hosts, host)
-	}
-	l.mu.Unlock()
-	if len(hosts) == 0 {
+	found := l.attached(args.Checkout, args.From)
+	if len(found) == 0 {
 		return api.PullReply{}, &checkout.Error{Code: "not_found", Message: fmt.Sprintf("checkout %s has no matching attachment; attach it first", args.Checkout)}
 	}
-	if len(hosts) > 1 {
-		sort.Strings(hosts)
+	if len(found) > 1 {
+		hosts := make([]string, len(found))
+		for i, o := range found {
+			hosts[i] = o.to
+		}
 		return api.PullReply{}, &checkout.Error{Code: "invalid", Message: fmt.Sprintf("checkout %s is attached to %s; choose --from HOST", args.Checkout, strings.Join(hosts, ", "))}
 	}
-	selected.mu.Lock()
-	p := selected.active
-	selected.mu.Unlock()
+	selected := found[0]
+	p := selected.remote()
 	if p == nil {
 		return api.PullReply{}, &checkout.Error{Code: "unavailable", Message: fmt.Sprintf("attachment %s@%s is not connected", args.Checkout, selected.to)}
 	}
@@ -243,6 +236,50 @@ func (l *links) pull(ctx context.Context, args api.PullArgs) (api.PullReply, err
 		return api.PullReply{}, &checkout.Error{Code: "unavailable", Message: fmt.Sprintf("pull from %s: %v", selected.to, err)}
 	}
 	return l.reg.MergePull(ctx, args, selected.offer.Tree, pulled)
+}
+
+// push has the machines of the matching attachments fetch everything they
+// still read through their links, all at once; one attachment failing does
+// not stop the others, and the reply says how each went.
+func (l *links) push(ctx context.Context, args api.PushArgs) (api.PushReply, error) {
+	found := l.attached(args.Checkout, args.To)
+	if len(found) == 0 {
+		what := "no checkout is attached"
+		if args.Checkout != "" {
+			what = "checkout " + args.Checkout + " is not attached"
+		}
+		if args.To != "" {
+			what += " to " + args.To
+		}
+		return api.PushReply{}, &checkout.Error{Code: "not_found", Message: what + "; attach it first"}
+	}
+	reply := api.PushReply{Pushed: make([]api.Pushed, len(found))}
+	var wg sync.WaitGroup
+	for i, o := range found {
+		wg.Go(func() { reply.Pushed[i] = o.push(ctx) })
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return api.PushReply{}, err
+	}
+	return reply, nil
+}
+
+// attached returns the outbound links of the checkout name to host, sorted by
+// checkout and then host; "" matches every checkout or host.
+func (l *links) attached(name, host string) []*outLink {
+	l.mu.Lock()
+	var found []*outLink
+	for _, o := range l.out {
+		if (name == "" || o.checkout == name) && (host == "" || o.to == host) {
+			found = append(found, o)
+		}
+	}
+	l.mu.Unlock()
+	slices.SortFunc(found, func(a, b *outLink) int {
+		return cmp.Or(strings.Compare(a.checkout, b.checkout), strings.Compare(a.to, b.to))
+	})
+	return found
 }
 
 // captureDir opens (or refreshes) the checkout that stands for a folder being attached:
@@ -312,9 +349,10 @@ func (l *links) opener(to, bin string) opener {
 // outLink is one attached checkout served to one machine.
 type outLink struct {
 	mu       sync.Mutex
-	active   *peer.Puller
+	active   *peer.Remote // nil while disconnected
 	ctx      context.Context
 	cancel   context.CancelFunc
+	checkout string // the local checkout offered
 	to       string
 	open     opener
 	offer    peer.Offer
@@ -323,10 +361,34 @@ type outLink struct {
 	failed   chan error         // the first attempt's failure only
 }
 
-// newOutLink prepares a link; run starts it.
-func newOutLink(parent context.Context, to string, open opener, offer peer.Offer, blobs peer.Blobs) *outLink {
+// newOutLink prepares a link offering the checkout name to the machine to; run starts it.
+func newOutLink(parent context.Context, name, to string, open opener, offer peer.Offer, blobs peer.Blobs) *outLink {
 	ctx, cancel := context.WithCancel(parent)
-	return &outLink{ctx: ctx, cancel: cancel, to: to, open: open, offer: offer, blobs: blobs, accepted: make(chan peer.Accepted, 1), failed: make(chan error, 1)}
+	return &outLink{ctx: ctx, cancel: cancel, checkout: name, to: to, open: open, offer: offer, blobs: blobs, accepted: make(chan peer.Accepted, 1), failed: make(chan error, 1)}
+}
+
+// remote is the connected session's handle, nil while the link is down.
+func (o *outLink) remote() *peer.Remote {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.active
+}
+
+// push has the machine fetch everything it still reads through this link.
+func (o *outLink) push(ctx context.Context) api.Pushed {
+	r := api.Pushed{Checkout: o.checkout, To: o.to}
+	p := o.remote()
+	if p == nil {
+		r.Error = "not connected; the link is reconnecting"
+		return r
+	}
+	pushed, err := p.Push(ctx)
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	r.Blobs, r.Bytes = pushed.Blobs, pushed.Bytes
+	return r
 }
 
 // run keeps the session up, reconnecting with backoff after the first acceptance.
@@ -369,7 +431,7 @@ func (o *outLink) session(accepted func(peer.Accepted)) error {
 		o.active = nil
 		o.mu.Unlock()
 	}()
-	err = peer.ServePull(o.ctx, conn, o.offer, o.blobs, func(a peer.Accepted, p *peer.Puller) {
+	err = peer.ServeRemote(o.ctx, conn, o.offer, o.blobs, func(a peer.Accepted, p *peer.Remote) {
 		o.mu.Lock()
 		o.active = p
 		o.mu.Unlock()

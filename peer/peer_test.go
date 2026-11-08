@@ -119,7 +119,7 @@ func (s *stalled) Read(p []byte) (int, error) {
 // link is a running source and accepted remote session.
 type link struct {
 	s      *Session
-	pull   *Puller
+	remote *Remote
 	st     *store.Store
 	dir    string
 	served chan error
@@ -129,11 +129,25 @@ type link struct {
 // start runs Serve on src and an accepted, replied Session on dst.
 func start(t *testing.T, src, dst io.ReadWriteCloser, blobs Blobs) *link {
 	t.Helper()
-	return startPull(t, src, dst, blobs, nil)
+	return startWith(t, src, dst, blobs, nil)
 }
 
 // startPull prepares a link with remote snapshot handling before acceptance.
 func startPull(t *testing.T, src, dst io.ReadWriteCloser, blobs Blobs, handler func(context.Context, store.OID) (Pulled, error)) *link {
+	t.Helper()
+	return startWith(t, src, dst, blobs, func(s *Session) { s.SetPullHandler(handler) })
+}
+
+// startPush prepares a link over net.Pipe whose pushes fetch what list returns.
+func startPush(t *testing.T, blobs Blobs, list func() []Want) *link {
+	t.Helper()
+	src, dst := net.Pipe()
+	return startWith(t, src, dst, blobs, func(s *Session) { s.SetPushHandler(list) })
+}
+
+// startWith runs ServeRemote on src and, on dst, a Session that setup (if any)
+// configures before it is accepted.
+func startWith(t *testing.T, src, dst io.ReadWriteCloser, blobs Blobs, setup func(*Session)) *link {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(dir, 64<<20)
@@ -142,20 +156,22 @@ func startPull(t *testing.T, src, dst io.ReadWriteCloser, blobs Blobs, handler f
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &link{st: st, dir: dir, served: make(chan error, 1), cancel: cancel}
-	ready := make(chan *Puller, 1)
+	ready := make(chan *Remote, 1)
 	go func() {
-		l.served <- ServePull(ctx, src, offerOf(3), blobs, func(_ Accepted, p *Puller) { ready <- p })
+		l.served <- ServeRemote(ctx, src, offerOf(3), blobs, func(_ Accepted, p *Remote) { ready <- p })
 	}()
 	s, _, err := Accept(dst, st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.SetPullHandler(handler)
+	if setup != nil {
+		setup(s)
+	}
 	if err := s.Reply(Accepted{Checkout: "h", Path: "/checkouts/h", Host: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	l.s = s
-	l.pull = wait(t, ready, "pull handle")
+	l.remote = wait(t, ready, "remote handle")
 	t.Cleanup(func() {
 		s.Close()
 		cancel()
@@ -282,7 +298,7 @@ func TestPullRoundTripDuringFetch(t *testing.T) {
 	}
 	pending := make(chan result, 1)
 	go func() {
-		p, err := l.pull.Pull(context.Background(), offerOf(3).Tree)
+		p, err := l.remote.Pull(context.Background(), offerOf(3).Tree)
 		pending <- result{p, err}
 	}()
 	if from := wait(t, began, "remote snapshot"); from != offerOf(3).Tree {
@@ -322,7 +338,7 @@ func TestPullSnapshotFailureLeavesFetchWorking(t *testing.T) {
 		id := blobs.add([]byte("still available"))
 		l := startPull(t, src, dst, blobs, handler)
 		for range 2 {
-			_, err := l.pull.Pull(context.Background(), offerOf(3).Tree)
+			_, err := l.remote.Pull(context.Background(), offerOf(3).Tree)
 			if err == nil || !strings.Contains(err.Error(), "remote snapshot:") {
 				t.Fatalf("pull error = %v", err)
 			}
@@ -352,7 +368,7 @@ func TestPendingPullReleasedOnCancellationAndShutdown(t *testing.T) {
 			defer cancel()
 			pending := make(chan error, 1)
 			go func() {
-				_, err := l.pull.Pull(ctx, offerOf(3).Tree)
+				_, err := l.remote.Pull(ctx, offerOf(3).Tree)
 				pending <- err
 			}()
 			wait(t, began, "snapshot started")
@@ -388,12 +404,12 @@ func TestPendingPullReleasedOnCancellationAndShutdown(t *testing.T) {
 func TestPullValidatesBaseAndContext(t *testing.T) {
 	src, dst := net.Pipe()
 	l := startPull(t, src, dst, newBlobs(), nil)
-	if _, err := l.pull.Pull(context.Background(), "invalid"); err == nil {
+	if _, err := l.remote.Pull(context.Background(), "invalid"); err == nil {
 		t.Fatal("invalid base accepted")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := l.pull.Pull(ctx, offerOf(3).Tree); !errors.Is(err, context.Canceled) {
+	if _, err := l.remote.Pull(ctx, offerOf(3).Tree); !errors.Is(err, context.Canceled) {
 		t.Fatalf("pull with canceled context: %v", err)
 	}
 }
@@ -406,11 +422,123 @@ func TestPullRejectsCorruptBlob(t *testing.T) {
 	})
 	pending := make(chan error, 1)
 	go func() {
-		_, err := l.pull.Pull(context.Background(), offerOf(3).Tree)
+		_, err := l.remote.Pull(context.Background(), offerOf(3).Tree)
 		pending <- err
 	}()
 	if err := wait(t, pending, "corrupt pull"); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("corrupt pull = %v", err)
+	}
+}
+
+// pushWants lists blobs in order as a push handler would, each under its own path.
+func pushWants(blobs *memBlobs, ids ...store.OID) []Want {
+	wants := make([]Want, len(ids))
+	for i, id := range ids {
+		wants[i] = Want{ID: id, Path: fmt.Sprintf("f%d", i), Size: int64(len(blobs.data[id]))}
+	}
+	return wants
+}
+
+// TestPushFetchesInBatches: a push fetches everything listed and reports it,
+// but asks the source for the next batch only once the previous one landed.
+func TestPushFetchesInBatches(t *testing.T) {
+	blobs := newBlobs()
+	var ids []store.OID
+	for i := range 3 {
+		ids = append(ids, blobs.add(randomBytes(3<<20, uint64(i+1)))) // two fit a batch, the third does not
+	}
+	ids = append(ids, blobs.add([]byte("small")), blobs.add(nil))
+	l := startPush(t, blobs, func() []Want { return pushWants(blobs, ids...) })
+	blobs.open = make(chan store.OID, len(ids))
+	release := blobs.hold(ids[0])
+	defer release()
+	pushed := make(chan error, 1)
+	var got Pushed
+	go func() {
+		var err error
+		got, err = l.remote.Push(context.Background())
+		pushed <- err
+	}()
+	// The source opens both blobs of the first batch, the first of them held.
+	for opened := map[store.OID]bool{}; !opened[ids[1]]; {
+		opened[wait(t, blobs.open, "first batch")] = true
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, id := range ids[2:] {
+		if blobs.opened(id) != 0 {
+			t.Fatalf("blob %s of the second batch requested before the first landed", id)
+		}
+	}
+	release()
+	if err := wait(t, pushed, "push"); err != nil {
+		t.Fatal(err)
+	}
+	want := Pushed{Blobs: int64(len(ids)), Bytes: 3*(3<<20) + int64(len("small"))}
+	if got != want {
+		t.Fatalf("pushed %+v, want %+v", got, want)
+	}
+	for _, id := range ids {
+		checkBlob(t, l.st, id, blobs.data[id])
+	}
+}
+
+// TestPushCancelStopsLaterBatches: canceling a push on the source stops the
+// remote before it asks for the next batch.
+func TestPushCancelStopsLaterBatches(t *testing.T) {
+	blobs := newBlobs()
+	first := blobs.add(randomBytes(5<<20, 1))
+	second := blobs.add(randomBytes(5<<20, 2))
+	l := startPush(t, blobs, func() []Want { return pushWants(blobs, first, second) })
+	blobs.open = make(chan store.OID, 2)
+	release := blobs.hold(first)
+	defer release()
+	ctx, cancel := context.WithCancel(context.Background())
+	pushed := make(chan error, 1)
+	go func() {
+		_, err := l.remote.Push(ctx)
+		pushed <- err
+	}()
+	wait(t, blobs.open, "first batch")
+	cancel()
+	if err := wait(t, pushed, "canceled push"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled push = %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		l.s.mu.Lock()
+		running := len(l.s.pushes)
+		l.s.mu.Unlock()
+		if running == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the remote kept pushing after the source canceled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	release()
+	time.Sleep(50 * time.Millisecond)
+	if blobs.opened(second) != 0 {
+		t.Fatal("a canceled push requested its next batch")
+	}
+}
+
+// TestPushFailures: a remote without a push handler refuses, a blob the source
+// cannot produce fails the push by name, and the link outlives both.
+func TestPushFailures(t *testing.T) {
+	blobs := newBlobs()
+	if _, err := pipeLink(t, blobs).remote.Push(context.Background()); err == nil || !strings.Contains(err.Error(), "does not take pushes") {
+		t.Fatalf("push without a handler = %v", err)
+	}
+	gone := blobs.add([]byte("gone"))
+	blobs.fail[gone] = "object vanished"
+	l := startPush(t, blobs, func() []Want { return pushWants(blobs, gone) })
+	if _, err := l.remote.Push(context.Background()); err == nil || !strings.Contains(err.Error(), "object vanished") || !strings.Contains(err.Error(), "f0") {
+		t.Fatalf("push of an unavailable blob = %v", err)
+	}
+	ok := blobs.add([]byte("still served"))
+	if err := l.s.Fetch(context.Background(), []Want{{ID: ok}}); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -186,5 +186,5 @@ is always pruned.
   the mount must be a free drive letter.
 - More: [checkouts](https://github.com/stencil-hq/ovnfs/blob/main/docs/checkouts.md),
   [configuration](https://github.com/stencil-hq/ovnfs/blob/main/docs/configuration.md),
-  [remote checkouts](https://github.com/stencil-hq/ovnfs/blob/main/docs/remote.md) (`attach`, `pull`, `share`),
+  [remote checkouts](https://github.com/stencil-hq/ovnfs/blob/main/docs/remote.md) (`attach`, `pull`, `push`, `share`),
   [limitations](https://github.com/stencil-hq/ovnfs/blob/main/docs/limitations.md).
