@@ -334,9 +334,6 @@ func mountInProcess(proto string, e *export.Export, mount string) (inProcessMoun
 		}
 		return srv, nil
 	}
-	if err := os.MkdirAll(mount, 0o755); err != nil {
-		return nil, fmt.Errorf("mount directory: %w", err)
-	}
 	srv, err := ovnfuse.Mount(e, mount, ovnfuse.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("mount: %w", err)
