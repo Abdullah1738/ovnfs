@@ -386,3 +386,35 @@ func upperTree(t *testing.T, dir string) map[string]string {
 	}))
 	return out
 }
+
+// TestMemorySyncReachesDisk makes fsync mean what it does on any filesystem:
+// a synced memory file is in its upper on disk, with the bytes written so far,
+// so a daemon killed right after loses none of it. Later writes through the
+// same handle go to that host file.
+func TestMemorySyncReachesDisk(t *testing.T) {
+	upper := filepath.Join(t.TempDir(), "u")
+	f, err := New(upper, nil, dirBottom{tree(t, map[string]string{"d/lower": "data"})}, NewMemory(1<<20, 64<<10, 0))
+	must(t, err)
+	for _, name := range []string{"d/new", "d/lower"} {
+		h, err := f.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+		must(t, err)
+		_, err = h.Write([]byte("synced"))
+		must(t, err)
+		if _, err := os.Stat(filepath.Join(upper, name)); err == nil {
+			t.Fatalf("%s reached the upper before sync; the test needs it in memory", name)
+		}
+		must(t, h.(interface{ Sync() error }).Sync())
+		if b, err := os.ReadFile(filepath.Join(upper, name)); err != nil || string(b) != "synced" {
+			t.Fatalf("%s after sync: upper holds %q, %v", name, b, err)
+		}
+		_, err = h.Write([]byte(" more"))
+		must(t, err)
+		must(t, h.Close())
+		if b, err := os.ReadFile(filepath.Join(upper, name)); err != nil || string(b) != "synced more" {
+			t.Fatalf("%s after a later write: upper holds %q, %v", name, b, err)
+		}
+	}
+	if f.Unflushed() {
+		t.Fatal("a synced file stayed in memory")
+	}
+}
