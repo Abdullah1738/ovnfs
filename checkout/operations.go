@@ -1117,7 +1117,11 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 	return s, nil
 }
 
-// Rm retires handles while frozen and deletes writable state; snapshots stay until dropped.
+// Rm retires handles while frozen and deletes writable state; snapshots stay until
+// dropped. The removal is published before the checkout's files go, outside the
+// registry lock and with a state write shared with concurrent operations; a crash
+// in between leaves files no checkout names, which reopening removes. The name
+// stays reserved until they are gone.
 func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -1133,36 +1137,37 @@ func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
 		r.mu.Unlock()
 		return failure("not_found", "no checkout %s", name)
 	}
+	r.operations.Add(1)
+	defer r.operations.Done()
 	h.freeze.Lock()
-	r.intents[name] = diskIntent{Op: "removing", Checkout: name, Layer: h.meta.Base}
-	if err := r.persistIntentLocked(); err != nil {
-		delete(r.intents, name)
-		h.freeze.Unlock()
-		r.mu.Unlock()
-		return coded(err)
-	}
+	defer h.freeze.Unlock()
 	h.retired.Store(true)
 	if r.config.Retire != nil {
 		r.config.Retire(name)
 	}
 	h.fs.Discard()
 	h.fs.CloseFiles()
-	if err := errors.Join(os.RemoveAll(r.gitdirPath(name)), os.RemoveAll(h.upper)); err != nil {
-		h.freeze.Unlock()
-		r.mu.Unlock()
-		return coded(err)
-	}
 	delete(r.checkouts, name)
-	delete(r.intents, name)
+	r.reserved[name] = true
 	r.releaseLocked(h.base, h.stack)
 	r.moveRootLocked()
-	err := r.persistLocked()
-	if err != nil {
-		r.intents[name] = diskIntent{Op: "removing", Checkout: name, Layer: h.meta.Base}
-	}
-	h.freeze.Unlock()
+	seq := r.requestCommitLocked()
 	r.mu.Unlock()
+	err := r.commitState(seq)
 	if err != nil {
+		// The state on disk still names the checkout: record its removal for the
+		// next commit, or for recovery at reopen should none succeed.
+		r.mu.Lock()
+		r.intents[name] = diskIntent{Op: "removing", Checkout: name, Dir: h.meta.Dir, Layer: h.meta.Base}
+		r.mu.Unlock()
+	}
+	removeErr := errors.Join(os.RemoveAll(r.gitdirPath(h.meta.dir())), os.RemoveAll(h.upper))
+	r.mu.Lock()
+	if removeErr == nil {
+		delete(r.reserved, name)
+	}
+	r.mu.Unlock()
+	if err = errors.Join(err, removeErr); err != nil {
 		return coded(err)
 	}
 	r.emit(Event{Name: "removed", Payload: map[string]any{"name": name}})

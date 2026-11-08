@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"sync/atomic"
 
 	"github.com/stencil-hq/ovnfs/base"
 	"github.com/stencil-hq/ovnfs/internal/durable"
@@ -150,7 +152,7 @@ func rebuildsStack(lineage map[string]*snapRecord, s *snapRecord) bool {
 
 // persistLocked commits all metadata with a file and directory durability barrier.
 func (r *Registry) persistLocked() error {
-	if err := writeState(r.config.State, r.stateLocked()); err != nil {
+	if err := r.writeOrdered(r.stateLocked(), r.writes.stamp.Add(1), true); err != nil {
 		return err
 	}
 	r.pruneLineageLocked()
@@ -161,7 +163,117 @@ func (r *Registry) persistLocked() error {
 // intents published before filesystem changes, and snapshot tree ids, which reopening
 // computes again when a crash lost them.
 func (r *Registry) persistIntentLocked() error {
-	return writeStateMode(r.config.State, r.stateLocked(), false)
+	return r.writeOrdered(r.stateLocked(), r.writes.stamp.Add(1), false)
+}
+
+// stateWrites orders state.json writes made with and without the registry lock:
+// each snapshot gets a stamp while the lock is held, and a write never replaces
+// the file with an older snapshot than it holds.
+type stateWrites struct {
+	stamp   atomic.Uint64 // the latest snapshot's
+	mu      sync.Mutex    // held while writing
+	written uint64        // mu: stamp of the snapshot in state.json
+	durable bool          // mu: state.json passed a durability barrier since
+}
+
+// writeOrdered writes snapshot d, stamped stamp while r.mu was held, unless the
+// file holds a newer one already; then a durable write only completes the newer
+// one's barrier, since that snapshot holds every change d does.
+func (r *Registry) writeOrdered(d diskState, stamp uint64, durable bool) error {
+	w := &r.writes
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if stamp < w.written {
+		if !durable || w.durable {
+			return nil
+		}
+		if err := syncState(r.config.State); err != nil {
+			return err
+		}
+		w.durable = true
+		return nil
+	}
+	if err := writeStateMode(r.config.State, d, durable); err != nil {
+		return err
+	}
+	w.written, w.durable = stamp, durable
+	return nil
+}
+
+// stateCommits coalesces durable state commits that callers request after
+// releasing the registry lock: one write covers every request made before its
+// snapshot, so concurrent creates share a single file and directory sync, and
+// the registry lock is held only to take the snapshot.
+type stateCommits struct {
+	mu      sync.Mutex
+	cond    sync.Cond // on mu; broadcast when a commit ends
+	want    uint64    // the latest request
+	done    uint64    // every request up to done is durable
+	failed  uint64    // requests up to failed ended in err, unless done covers them
+	err     error
+	running bool
+}
+
+// requestCommitLocked registers a mutation made under the registry's write lock
+// for commitState and returns its request.
+func (r *Registry) requestCommitLocked() uint64 {
+	c := &r.commits
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.want++
+	return c.want
+}
+
+// commitState makes request seq durable, by its own write or one in flight that
+// will cover it. The caller holds no registry lock.
+func (r *Registry) commitState(seq uint64) error {
+	c := &r.commits
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for {
+		switch {
+		case c.done >= seq:
+			return nil
+		case c.failed >= seq:
+			return c.err
+		case c.running:
+			c.cond.Wait()
+			continue
+		}
+		c.running = true
+		c.mu.Unlock()
+		r.mu.RLock()
+		c.mu.Lock()
+		target := c.want
+		c.mu.Unlock()
+		d, stamp := r.stateLocked(), r.writes.stamp.Add(1)
+		r.mu.RUnlock()
+		err := r.writeOrdered(d, stamp, true)
+		c.mu.Lock()
+		c.running = false
+		if err == nil {
+			c.done = target
+		} else {
+			c.failed, c.err = target, err
+		}
+		c.cond.Broadcast()
+	}
+}
+
+// syncState passes state.json, as it is, through the durability barrier.
+func syncState(dir string) error {
+	f, err := os.OpenFile(filepath.Join(dir, "state.json"), os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	err = durable.Sync(f)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return durable.Dir(dir)
 }
 
 // writeState atomically replaces state.json and makes it durable against process
@@ -200,17 +312,7 @@ func writeStateMode(dir string, d diskState, syncCommit bool) error {
 		return err
 	}
 	// Reopened rather than kept open: Windows cannot rename an open file.
-	if f, err = os.OpenFile(final, os.O_RDWR, 0); err != nil {
-		return err
-	}
-	err = durable.Sync(f)
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return durable.Dir(dir)
+	return syncState(dir)
 }
 
 // exists reports whether a path survived an interrupted operation.

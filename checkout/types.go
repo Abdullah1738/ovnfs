@@ -163,7 +163,9 @@ type Registry struct {
 	closeErr     error
 	watcher      *watch.Watcher // nil where folder events are unsupported
 	watchWake    chan struct{}
-	mirror       *mirror // git upstream content of attached checkouts
+	mirror       *mirror      // git upstream content of attached checkouts
+	commits      stateCommits // durable state commits requested outside r.mu
+	writes       stateWrites  // orders state.json writes
 }
 
 // checkoutRecord holds one freeze lock for all calls against a live folder.
