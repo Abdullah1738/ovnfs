@@ -3,6 +3,7 @@ package repo
 import (
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -338,7 +339,7 @@ func TestDiscoverUnsafe(t *testing.T) {
 		{"[safe]\n\tdirectory = " + top + "\n", true},
 		{"[safe]\n\tdirectory = *\n", true},
 		{"[safe]\n\tdirectory = *\n\tdirectory =\n", false},
-		{"[safe]\n\tdirectory = " + filepath.Dir(top) + "/*\n", true},
+		{"[safe]\n\tdirectory = " + path.Dir(top) + "/*\n", true},
 		{"[safe]\n\tdirectory = " + top + "/*\n", false},
 		{"[safe]\n\tdirectory = " + top + "x\n", false},
 	} {

@@ -2,10 +2,8 @@ package repo
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/user"
 	"regexp"
@@ -19,17 +17,15 @@ import (
 	"github.com/stencil-hq/ovnfs/git/internal/object"
 )
 
-// hostLookupTimeout bounds the canonical host name lookup made when no email
-// address is configured.
-const hostLookupTimeout = 2 * time.Second
-
 // Committer returns the identity git records as the committer of a ref
 // update (the reflog identity), following git-commit-tree's COMMIT
 // INFORMATION chain leniently as reflog writes do:
 //
 //   - name: GIT_COMMITTER_NAME, committer.name, user.name, then the account's
-//     full name; an empty result becomes the account's user name.
-//   - email: GIT_COMMITTER_EMAIL, committer.email, user.email, EMAIL, then
+//     full name (on Windows its display name, else "unknown"); an empty
+//     result becomes the account's user name.
+//   - email: GIT_COMMITTER_EMAIL, committer.email, user.email, EMAIL, on
+//     Windows the account's user principal name, then
 //     <user>@<host>, the host being /etc/mailname's first line, else the
 //     host name if it contains a dot, else its canonical name if that does,
 //     else "<hostname>.(none)".
@@ -97,6 +93,10 @@ func committer(cfg *config.Config, env func(string) (string, bool), now time.Tim
 		ok = ok && email != ""
 	}
 	if !ok {
+		email = queryUserEmail()
+		ok = email != ""
+	}
+	if !ok {
 		u, err := lookupAccount()
 		if err != nil {
 			return object.Signature{}, err
@@ -115,11 +115,10 @@ func committer(cfg *config.Config, env func(string) (string, bool), now time.Tim
 	return object.Signature{Name: sanitize(name), Email: sanitize(email), When: when}, nil
 }
 
-// fullName returns the account's full name: on Unix the first
-// comma-separated field of the GECOS field, with '&' standing for the
-// capitalized user name.
+// fullName returns the account's full name: the first comma-separated field
+// of the GECOS field, with '&' standing for the capitalized user name.
 func fullName(u *user.User) string {
-	name, _, _ := strings.Cut(u.Name, ",")
+	name, _, _ := strings.Cut(gecos(u), ",")
 	if strings.Contains(name, "&") {
 		login := accountName(u)
 		if r, size := utf8.DecodeRuneInString(login); size > 0 {
@@ -156,12 +155,8 @@ func mailDomain() string {
 	if strings.Contains(host, ".") {
 		return host
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hostLookupTimeout)
-	defer cancel()
-	if cname, err := net.DefaultResolver.LookupCNAME(ctx, host); err == nil {
-		if cname = strings.TrimSuffix(cname, "."); strings.Contains(cname, ".") {
-			return cname
-		}
+	if cname, ok := canonicalName(host); ok && strings.Contains(cname, ".") {
+		return cname
 	}
 	return host + ".(none)"
 }

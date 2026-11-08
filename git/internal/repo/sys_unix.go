@@ -3,10 +3,19 @@
 package repo
 
 import (
+	"context"
+	"net"
 	"os"
+	"os/user"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 )
+
+// hostLookupTimeout bounds the canonical host name lookup made when no email
+// address is configured.
+const hostLookupTimeout = 2 * time.Second
 
 // device returns the ID of the filesystem holding path.
 func device(path string) (uint64, bool) {
@@ -36,4 +45,22 @@ func ownedByCurrentUser(path string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// gecos returns the account's GECOS field.
+func gecos(u *user.User) string { return u.Name }
+
+// queryUserEmail returns the account's own email address, which only Git for
+// Windows knows how to look up.
+func queryUserEmail() string { return "" }
+
+// canonicalName returns host's canonical name from the resolver.
+func canonicalName(host string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), hostLookupTimeout)
+	defer cancel()
+	cname, err := net.DefaultResolver.LookupCNAME(ctx, host)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSuffix(cname, "."), true
 }

@@ -52,7 +52,6 @@ func checkOwnership(paths []string, dir, gitDir, workTree string) error {
 // unknown).
 func safeDirectory(values []string, dir string) bool {
 	safe := false
-	dir = filepath.ToSlash(dir)
 	for _, v := range values {
 		switch v {
 		case "":
@@ -71,7 +70,6 @@ func safeDirectory(values []string, dir string) bool {
 			continue
 		}
 		for _, cand := range []string{filepath.Clean(p), physical(p)} {
-			cand = filepath.ToSlash(cand)
 			if prefix && within(dir, cand) && dir != cand || !prefix && dir == cand {
 				safe = true
 			}

@@ -105,7 +105,8 @@ func writeFile(t *testing.T, name, content string) {
 
 // checkDiscover compares Discover(dir) with what
 // `git rev-parse --is-inside-work-tree --show-toplevel --git-common-dir --git-dir`
-// says from dir, returning the repository when both found one.
+// says from dir, returning the repository when both found one. Git for
+// Windows prints paths with forward slashes.
 func checkDiscover(t *testing.T, dir string) *Repository {
 	t.Helper()
 	out, stderr, gitErr := gitResult(dir, "rev-parse", "--path-format=absolute",
@@ -120,7 +121,7 @@ func checkDiscover(t *testing.T, dir string) *Repository {
 		}
 		got := []string{r.Top, r.CommonDir, r.GitDir}
 		for i, g := range got {
-			if g != lines[i+1] {
+			if g != filepath.FromSlash(lines[i+1]) {
 				t.Fatalf("Discover(%s) = top %q common %q gitdir %q; git: %q", dir, got[0], got[1], got[2], lines[1:])
 			}
 		}

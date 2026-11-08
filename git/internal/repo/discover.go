@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/stencil-hq/ovnfs/git/internal/config"
@@ -168,6 +169,7 @@ func gitDirLayout(dir string) (string, error) {
 // directory: a symlink whose target starts with "refs/", or a file holding
 // "ref:" (optionally followed by whitespace) and a name starting with
 // "refs/", or starting with at least 40 hex digits. Nothing else is checked.
+// Git for Windows reads symlink targets with forward slashes.
 func validHead(path string) bool {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -175,7 +177,7 @@ func validHead(path string) bool {
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(path)
-		return err == nil && strings.HasPrefix(target, "refs/")
+		return err == nil && strings.HasPrefix(filepath.ToSlash(target), "refs/")
 	}
 	if !fi.Mode().IsRegular() {
 		return false
@@ -204,7 +206,10 @@ func isHex(c byte) bool {
 
 // readGitfile returns the physical git directory a .git file points to. The
 // file must start with "gitdir: "; the rest, less trailing CR and LF, is the
-// path, relative to the file's directory unless absolute.
+// path, relative to the file's directory unless absolute. On Windows a path
+// with a component ending in a space or period is invalid, as Git for
+// Windows refuses to open it (core.protectNTFS) where Windows would strip
+// the trailing characters.
 func readGitfile(name string) (string, error) {
 	data, err := os.ReadFile(name)
 	if err != nil {
@@ -218,6 +223,9 @@ func readGitfile(name string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("repo: %s: %w: no path", name, ErrInvalidGitfile)
 	}
+	if runtime.GOOS == "windows" && hasTrailingSpaceOrPeriod(p) {
+		return "", fmt.Errorf("repo: %s: %w: does not point to a valid repository", name, ErrInvalidGitfile)
+	}
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(filepath.Dir(name), p)
 	}
@@ -226,6 +234,17 @@ func readGitfile(name string) (string, error) {
 		return "", fmt.Errorf("repo: %s: %w: does not point to a valid repository", name, ErrInvalidGitfile)
 	}
 	return real, nil
+}
+
+// hasTrailingSpaceOrPeriod reports whether a component of p other than "."
+// and ".." ends in a space or a period.
+func hasTrailingSpaceOrPeriod(p string) bool {
+	for _, c := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if c != "." && c != ".." && (strings.HasSuffix(c, " ") || strings.HasSuffix(c, ".")) {
+			return true
+		}
+	}
+	return false
 }
 
 // trimEOL drops trailing CR and LF characters, as git does for the one-line

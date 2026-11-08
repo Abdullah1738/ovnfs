@@ -58,6 +58,10 @@ func InitBare(dir string) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
+	symlinks, err := symlinksEnabled(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	for _, sub := range []string{"objects/info", "objects/pack", "refs/heads", "refs/tags", "info"} {
 		if err := os.MkdirAll(filepath.Join(dir, filepath.FromSlash(sub)), 0o777); err != nil {
@@ -78,7 +82,7 @@ func InitBare(dir string) (*Repository, error) {
 	if err := os.WriteFile(configPath, []byte(initConfig(format, nil)), 0o666); err != nil {
 		return nil, err
 	}
-	probes, err := probeFilesystem(dir, configPath)
+	probes, err := probeFilesystem(dir, configPath, symlinks)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +90,24 @@ func InitBare(dir string) (*Repository, error) {
 		return nil, err
 	}
 	return Open(dir)
+}
+
+// symlinksEnabled reports whether git attempts its symlink probe. Git for
+// Windows creates symlinks only when core.symlinks is true or, unset, when
+// MSYS contains "winsymlinks:nativestrict" (compat/mingw.c); elsewhere it
+// always tries.
+func symlinksEnabled(cfg *config.Config) (bool, error) {
+	if runtime.GOOS != "windows" {
+		return true, nil
+	}
+	v, found, err := cfg.Bool("core.symlinks")
+	if err != nil {
+		return false, fmt.Errorf("repo: %w", err)
+	}
+	if found {
+		return v, nil
+	}
+	return strings.Contains(os.Getenv("MSYS"), "winsymlinks:nativestrict"), nil
 }
 
 // initFormat picks the object format: GIT_DEFAULT_HASH, else
@@ -137,9 +159,9 @@ func initConfig(format object.Format, p *coreProbes) string {
 
 // probeFilesystem tests, inside the new git directory, whether the
 // filesystem keeps the executable bit (toggling it on file), supports
-// symlinks, folds case, and (macOS) finds a precomposed name by its
-// decomposed spelling.
-func probeFilesystem(dir, file string) (*coreProbes, error) {
+// symlinks (only tried when trySymlinks is set), folds case, and (macOS)
+// finds a precomposed name by its decomposed spelling.
+func probeFilesystem(dir, file string, trySymlinks bool) (*coreProbes, error) {
 	p := &coreProbes{}
 	before, err := os.Stat(file)
 	if err != nil {
@@ -154,11 +176,13 @@ func probeFilesystem(dir, file string) (*coreProbes, error) {
 		}
 	}
 
-	link := filepath.Join(dir, "tXXXXXX"+randomSuffix())
-	if err := os.Symlink("testing", link); err == nil {
-		p.symlinks = true
-		if err := os.Remove(link); err != nil {
-			return nil, err
+	if trySymlinks {
+		link := filepath.Join(dir, "tXXXXXX"+randomSuffix())
+		if err := os.Symlink("testing", link); err == nil {
+			p.symlinks = true
+			if err := os.Remove(link); err != nil {
+				return nil, err
+			}
 		}
 	}
 

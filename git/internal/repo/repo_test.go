@@ -61,7 +61,7 @@ func TestOpen(t *testing.T) {
 			}
 			out := strings.Split(git(t, base, "--git-dir="+tc.path, "rev-parse", "--path-format=absolute",
 				"--git-common-dir", "--git-dir", "--is-bare-repository"), "\n")
-			if r.CommonDir != out[0] || r.GitDir != out[1] {
+			if r.CommonDir != filepath.FromSlash(out[0]) || r.GitDir != filepath.FromSlash(out[1]) {
 				t.Errorf("Open: common %q gitdir %q; git %q", r.CommonDir, r.GitDir, out)
 			}
 			if r.Top != tc.top || r.Bare != tc.bare || (out[2] == "true") != tc.bare {
@@ -121,7 +121,7 @@ func TestWorktrees(t *testing.T) {
 	for line := range strings.SplitSeq(git(t, main, "worktree", "list", "--porcelain"), "\n") {
 		switch k, v, _ := strings.Cut(line, " "); k {
 		case "worktree":
-			top = v
+			top = filepath.FromSlash(v)
 		case "branch":
 			want = append(want, top+" "+v)
 		case "detached":
