@@ -17,4 +17,6 @@ type Options struct {
 	FsName string
 	// Debug logs every FUSE request and reply.
 	Debug bool
+	// Atime lets the kernel update access times; off mounts noatime.
+	Atime bool
 }

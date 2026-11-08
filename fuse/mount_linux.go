@@ -34,15 +34,19 @@ func Mount(e *export.Export, mountpoint string, opts Options) (*Server, error) {
 	if fsName == "" {
 		fsName = "ovnfs"
 	}
+	// The kernel checks modes and owners itself; nodev and nosuid are what
+	// fusermount forces on unprivileged mounts anyway.
+	options := []string{"default_permissions", "nodev", "nosuid"}
+	if !opts.Atime {
+		options = append(options, "noatime")
+	}
 	srv, err := gofuse.NewServer(newExportFS(e.Nodes()), mountpoint, &gofuse.MountOptions{
 		AllowOther: opts.AllowOther,
 		FsName:     fsName,
 		Name:       "ovnfs",
-		// The kernel checks modes and owners itself; nodev and nosuid are
-		// what fusermount forces on unprivileged mounts anyway.
-		Options:  []string{"default_permissions", "nodev", "nosuid", "noatime"},
-		MaxWrite: gofuse.MAX_KERNEL_WRITE,
-		Debug:    opts.Debug,
+		Options:    options,
+		MaxWrite:   gofuse.MAX_KERNEL_WRITE,
+		Debug:      opts.Debug,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fuse: mount %s: %w", mountpoint, err)

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -20,11 +21,25 @@ func mountRoots(string) []string { return nil }
 // smbAccount is empty: mount_smbfs and mount.cifs connect as guest.
 func smbAccount(string) (user, password string, err error) { return "", "", nil }
 
-// mountServer mounts the localhost NFS or SMB server at mount with the system client.
-func mountServer(proto string, port int, mount, user, password string) error {
-	cmd := mountCmd(proto, port, mount, "", "ovnfs", user, password)
+// mountServer mounts the localhost NFS or SMB server at mount with the system
+// client, updating access times only if atime is set.
+func mountServer(proto string, port int, mount, user, password string, atime bool) error {
+	cmd := mountCmd(proto, port, mount, atimeOption(atime), "ovnfs", user, password)
 	if out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, out)
+	}
+	return nil
+}
+
+// matchAtime brings the mount at dir, left by a previous daemon, to the
+// access-time setting in place, so processes using the mount keep running.
+func matchAtime(dir string, atime bool) error {
+	if current, ok := mountAtime(dir); !ok || current == atime {
+		return nil
+	}
+	cmd := remountCmd(dir, atimeOption(atime))
+	if out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
 	}
 	return nil
 }

@@ -72,8 +72,9 @@ const (
 	connectTemporary         = 4
 )
 
-// mountServer maps mount's drive to the daemon's SMB share as user; Windows has no NFS client mount.
-func mountServer(proto string, port int, mount, user, password string) error {
+// mountServer maps mount's drive to the daemon's SMB share as user; Windows has
+// no NFS client mount, and a mapped drive has no access-time option.
+func mountServer(proto string, port int, mount, user, password string, _ bool) error {
 	if proto != "smb" {
 		return fmt.Errorf("NFS mounts unsupported on Windows; use -proto smb")
 	}
@@ -136,6 +137,9 @@ func mapDrive(drive, remote string, port int, user, password string) error {
 		return fmt.Errorf("mapping %s to %s: %w", drive, remote, e)
 	}
 }
+
+// matchAtime has nothing to update: a mapped drive has no access-time option.
+func matchAtime(string, bool) error { return nil }
 
 // unmount removes this daemon's mapped SMB drive holding dir, suppressing the interactive prompt.
 func unmount(dir string, _ bool) error {

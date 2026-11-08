@@ -94,6 +94,19 @@ func sizeFlag(flags *flag.FlagSet, name, env string, def int64, usage string) (*
 	return &b, nil
 }
 
+// boolFlag registers a bool flag, off unless an environment variable sets it
+// (strconv.ParseBool syntax).
+func boolFlag(flags *flag.FlagSet, name, env, usage string) (*bool, error) {
+	var def bool
+	if v := os.Getenv(env); v != "" {
+		var err error
+		if def, err = strconv.ParseBool(v); err != nil {
+			return nil, fmt.Errorf("%s: %w", env, err)
+		}
+	}
+	return flags.Bool(name, def, usage+", env "+env), nil
+}
+
 // eventHub fans persisted events out to connected admin subscribers.
 type eventHub struct {
 	mu          sync.Mutex
@@ -150,6 +163,10 @@ func serve(args []string) error {
 		return err
 	}
 	blobCache, err := sizeFlag(flags, "blob-cache", "OVNFS_BLOB_CACHE", 512<<20, "bytes of small content-addressed blobs served from memory; 0 disables")
+	if err != nil {
+		return err
+	}
+	atime, err := boolFlag(flags, "atime", "OVNFS_ATIME", "let the mount update access times, which on macOS costs a SETATTR per exec of a checkout binary; off mounts noatime")
 	if err != nil {
 		return err
 	}
@@ -238,7 +255,7 @@ func serve(args []string) error {
 	port := 0
 	release := func(force bool) error { return unmount(*mount, force) }
 	if *proto == "fuse" || *proto == "winfsp" {
-		srv, mountErr := mountInProcess(*proto, e, *mount)
+		srv, mountErr := mountInProcess(*proto, e, *mount, *atime)
 		if mountErr != nil {
 			return mountErr
 		}
@@ -250,7 +267,7 @@ func serve(args []string) error {
 		}
 	} else {
 		var l *fileListener
-		if port, l, err = listenAndMount(reg, e, *proto, *address, *state, *mount, served, func(s *smb.Server) { smbServer = s }); err != nil {
+		if port, l, err = listenAndMount(reg, e, *proto, *address, *state, *mount, *atime, served, func(s *smb.Server) { smbServer = s }); err != nil {
 			return err
 		}
 		files.Store(l)
@@ -420,8 +437,8 @@ type inProcessMount interface {
 	Wait()
 }
 
-// mountInProcess mounts e at mount through FUSE or WinFsp.
-func mountInProcess(proto string, e *export.Export, mount string) (inProcessMount, error) {
+// mountInProcess mounts e at mount through FUSE or WinFsp; atime applies to FUSE.
+func mountInProcess(proto string, e *export.Export, mount string, atime bool) (inProcessMount, error) {
 	if proto == "winfsp" {
 		if err := makeMountPoint(mount); err != nil {
 			return nil, fmt.Errorf("mount directory: %w", err)
@@ -432,7 +449,7 @@ func mountInProcess(proto string, e *export.Export, mount string) (inProcessMoun
 		}
 		return srv, nil
 	}
-	srv, err := ovnfuse.Mount(e, mount, ovnfuse.Options{})
+	srv, err := ovnfuse.Mount(e, mount, ovnfuse.Options{Atime: atime})
 	if err != nil {
 		return nil, fmt.Errorf("mount: %w", err)
 	}
@@ -440,12 +457,13 @@ func mountInProcess(proto string, e *export.Export, mount string) (inProcessMoun
 }
 
 // listenAndMount serves NFS or SMB on the persisted port and mounts it at mount
-// with the system client, unless a previous run's mount is still there. An SMB
+// with the system client, unless a previous run's mount is still there, which
+// it brings to the access-time setting instead (see [matchAtime]). An SMB
 // client that dials one port only pins it, overriding an earlier run's port.
 // SMB authenticates with the state directory's account where the OS has one
 // (smbAccount), otherwise as guest. It returns the port and the listener
 // whose connections the system client holds.
-func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, state, mount string, served chan<- error, smbStarted func(*smb.Server)) (int, *fileListener, error) {
+func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, state, mount string, atime bool, served chan<- error, smbStarted func(*smb.Server)) (int, *fileListener, error) {
 	savedProto, savedPort := reg.Listen()
 	if savedPort != 0 && savedProto != proto {
 		return 0, nil, fmt.Errorf("listen: state uses %s; restart with -proto %s", savedProto, savedProto)
@@ -508,9 +526,11 @@ func listenAndMount(reg *checkout.Registry, e *export.Export, proto, address, st
 		if err = makeMountPoint(mount); err != nil {
 			return 0, nil, fmt.Errorf("mount directory: %w", err)
 		}
-		if err = mountServer(proto, port, mount, user, password); err != nil {
+		if err = mountServer(proto, port, mount, user, password, atime); err != nil {
 			return 0, nil, fmt.Errorf("mount: %w", err)
 		}
+	} else if err := matchAtime(mount, atime); err != nil {
+		log.Printf("%s keeps its access-time setting: %v", mount, err)
 	}
 	return port, files, nil
 }
