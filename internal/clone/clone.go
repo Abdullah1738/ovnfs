@@ -1,16 +1,27 @@
-// Package clone copies regular files by sharing their data blocks where the
-// filesystem supports it (clonefile on APFS, FICLONE reflinks on Linux) and by
-// copying bytes everywhere else, so callers get one portable copy primitive.
+// Package clone copies regular files and directory hierarchies by sharing their
+// data blocks where the filesystem supports it, and by copying bytes everywhere
+// else, so callers get one portable copy primitive:
+//
+//	Platform  Primitive                        Filesystems
+//	macOS     clonefile(2), fclonefileat(2)    APFS
+//	Linux     FICLONE                          btrfs, XFS, bcachefs, OCFS2, …
+//	Windows   FSCTL_DUPLICATE_EXTENTS_TO_FILE  ReFS, Dev Drive
+//
 // Reflink alone reports errors.ErrUnsupported, leaving dst absent, where blocks
-// cannot be shared, for callers with a cheaper fallback than a plain copy.
+// cannot be shared (another volume, a filesystem without cloning, another
+// platform), for callers with a cheaper fallback than a plain copy.
 package clone
 
 import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
+
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 // File clones the regular file at src to the new path dst, preserving its permission bits.
@@ -38,6 +49,95 @@ func FD(in *os.File, dst string, mode os.FileMode) error {
 		return copyBytes(in, dst, mode)
 	}
 	return err
+}
+
+// Tree clones the file, symlink or directory hierarchy at src to the new path
+// dst without following symlinks, preserving permission bits and modification
+// times. APFS clones a whole hierarchy in one clonefile(2) call, which also
+// keeps extended attributes and any sockets, fifos and devices inside it.
+// Elsewhere, or when that call is unsupported, Tree walks the hierarchy,
+// cloning each regular file as [FD] does and skipping special files. A special
+// file at src copies nothing.
+func Tree(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
+		return nil
+	}
+	if cloned, err := cloneHierarchy(src, dst, info); cloned || err != nil {
+		return err
+	}
+	var w walk
+	return w.tree(src, dst, info)
+}
+
+// walk is one entry-by-entry copy of a hierarchy for [Tree].
+type walk struct {
+	// copying is set once a clone was unsupported, so later files skip the
+	// attempt: the rest of the hierarchy is almost always on the same volume.
+	copying bool
+}
+
+// tree copies the entry at src, described by info, to the new path dst.
+func (w *walk) tree(src, dst string, info fs.FileInfo) error {
+	switch mode := info.Mode(); {
+	case mode&fs.ModeSymlink != 0:
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		if err := os.Symlink(target, dst); err != nil {
+			return err
+		}
+		return hostfile.Lchtimes(dst, info.ModTime(), info.ModTime())
+	case mode.IsDir():
+		// Owner access until the children are in, so a read-only directory fills.
+		if err := os.Mkdir(dst, mode.Perm()|0o700); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			child, err := e.Info()
+			if err != nil {
+				return err
+			}
+			if err := w.tree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), child); err != nil {
+				return err
+			}
+		}
+		if err := os.Chmod(dst, mode.Perm()); err != nil {
+			return err
+		}
+	case mode.IsRegular():
+		if err := w.file(src, dst, mode.Perm()); err != nil {
+			return err
+		}
+	default:
+		return nil
+	}
+	return os.Chtimes(dst, info.ModTime(), info.ModTime())
+}
+
+// file clones or copies the regular file src to the new path dst with mode.
+func (w *walk) file(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if !w.copying {
+		err := Reflink(in, dst, mode)
+		if !errors.Is(err, errors.ErrUnsupported) {
+			return err
+		}
+		w.copying = true
+	}
+	return copyBytes(in, dst, mode)
 }
 
 // copyBytes creates dst exclusively and copies all of in from offset zero, so

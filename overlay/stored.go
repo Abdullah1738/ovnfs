@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/go-git/go-billy/v5"
+	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/durable"
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 // Blobs serves the content of stored layer entries by blob id; checkout adapts
@@ -206,7 +208,7 @@ func (l *Layer) ReadFile(p string) ([]byte, error) {
 func (l *Layer) copyTo(p, dst string, info os.FileInfo) error {
 	return l.Content(p, func(host, blob string) error {
 		if blob == "" {
-			return cloneTree(host, dst)
+			return clone.Tree(host, dst)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := l.readBlob(blob)
@@ -216,7 +218,7 @@ func (l *Layer) copyTo(p, dst string, info os.FileInfo) error {
 			if err := os.Symlink(filepath.FromSlash(string(target)), dst); err != nil {
 				return err
 			}
-			return lchtimes(dst, info.ModTime(), info.ModTime())
+			return hostfile.Lchtimes(dst, info.ModTime(), info.ModTime())
 		}
 		if err := l.blobs.CopyTo(blob, dst, info.Mode().Perm()); err != nil {
 			return err

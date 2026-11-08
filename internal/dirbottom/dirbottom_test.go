@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stencil-hq/ovnfs/internal/hostfile"
 )
 
 // TestDirectoryBottom exercises host reads and recursive copy-up without changing the lower.
@@ -85,7 +87,7 @@ func TestSymlinkCopy(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	when := time.Unix(1_000_000_000, 0)
-	if err := linkTime(link, when); err != nil {
+	if err := hostfile.Lchtimes(link, when, when); err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(upper, "target")

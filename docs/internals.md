@@ -126,8 +126,10 @@ retained history, not the work of computing a Git SHA-1.
 
 Unreferenced layers, bases and store objects are collected in the background.
 Captures read the source once: files over 1 MiB are cloned where the filesystem
-has reflinks or `clonefile`, otherwise staged and streamed into chunks; smaller
-objects are compressed into the current pack. Packed reads check CRC-32C and the
+shares blocks (APFS `clonefile`, Linux `FICLONE` reflinks on btrfs, XFS and
+bcachefs, ReFS and Dev Drive block cloning on Windows), otherwise staged and
+streamed into chunks; smaller objects are compressed into the current pack.
+Packed reads check CRC-32C and the
 frame id; rebuilt deltas also verify the typed Git hash. Chunk reads verify
 private content hashes, internal manifest pages verify theirs, and whole chunked
 blob reads/materialization verify the Git hash. Plain loose reads do not rehash

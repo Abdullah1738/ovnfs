@@ -2,11 +2,10 @@
 package dirbottom
 
 import (
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/overlay"
 )
@@ -63,72 +62,7 @@ func (b bottom) Readlink(p string) (string, error) {
 	return filepath.ToSlash(target), err
 }
 
-// CopyTo materializes an entry at a new host path, preserving permissions and modification times.
+// CopyTo materializes an entry at a new host path with [clone.Tree].
 func (b bottom) CopyTo(p, dst string) error {
-	return copyEntry(filepath.Join(b.dir, filepath.FromSlash(p)), dst)
-}
-
-// copyEntry copies regular files, symlinks, and directory trees without following symlinks.
-func copyEntry(src, dst string) error {
-	info, err := os.Lstat(src)
-	if err != nil {
-		return err
-	}
-	mode := info.Mode()
-	switch {
-	case mode&os.ModeSymlink != 0:
-		target, err := os.Readlink(src)
-		if err != nil {
-			return err
-		}
-		if err := os.Symlink(target, dst); err != nil {
-			return err
-		}
-		return linkTime(dst, info.ModTime())
-	case mode.IsDir():
-		if err := os.Mkdir(dst, mode.Perm()|0700); err != nil {
-			return err
-		}
-		entries, err := os.ReadDir(src)
-		if err != nil {
-			return err
-		}
-		for _, entry := range entries {
-			if err := copyEntry(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
-				return err
-			}
-		}
-		if err := os.Chmod(dst, mode); err != nil {
-			return err
-		}
-	case mode.IsRegular():
-		if err := copyFile(src, dst, mode); err != nil {
-			return err
-		}
-	default:
-		return &os.PathError{Op: "copy", Path: src, Err: fmt.Errorf("unsupported file type %s: %w", mode.Type(), os.ErrInvalid)}
-	}
-	return os.Chtimes(dst, info.ModTime(), info.ModTime())
-}
-
-// copyFile copies bytes and restores the mode after creation so the process umask cannot change it.
-func copyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode.Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	if err := out.Chmod(mode); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
+	return clone.Tree(filepath.Join(b.dir, filepath.FromSlash(p)), dst)
 }

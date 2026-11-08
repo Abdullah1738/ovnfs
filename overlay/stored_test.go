@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/stencil-hq/ovnfs/internal/clone"
 )
 
 // memBlobs serves stored layer content from memory, by blob id.
@@ -223,7 +225,7 @@ func TestOpenLayerFinishesInterruptedStore(t *testing.T) {
 	sf := newStoredFixture(t)
 	want := viewOf(t, sf.readOnlyView(t, sf.layer))
 	crashed := filepath.Join(t.TempDir(), "crashed")
-	must(t, copyTree(sf.dir, crashed))
+	must(t, clone.Tree(sf.dir, crashed))
 	must(t, os.WriteFile(filepath.Join(crashed, manifestName+".tmp"), []byte("{partial"), 0o600))
 	unpublished, err := OpenLayer(crashed, sf.blobs)
 	must(t, err)

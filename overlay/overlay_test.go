@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stencil-hq/ovnfs/internal/clone"
 )
 
 // past is the stable timestamp used to detect accidental copy-up changes.
@@ -59,7 +61,7 @@ func (b dirBottom) Open(p string) (Content, error) {
 func (b dirBottom) Readlink(p string) (string, error) { return os.Readlink(filepath.Join(b.dir, p)) }
 
 // CopyTo uses the production clone helper while keeping the bottom immutable.
-func (b dirBottom) CopyTo(p, dst string) error { return cloneTree(filepath.Join(b.dir, p), dst) }
+func (b dirBottom) CopyTo(p, dst string) error { return clone.Tree(filepath.Join(b.dir, p), dst) }
 
 // setup builds a lower tree from path→content (a trailing "/" makes an empty
 // dir), all with mtime past, and fails the test if the overlay writes to it.

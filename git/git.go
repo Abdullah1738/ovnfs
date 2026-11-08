@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -287,29 +286,4 @@ func MergeFile(ctx context.Context, ours, base, theirs string, labels Labels) (m
 		return nil, false, fmt.Errorf("git merge-file: %s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return merged, true, nil
-}
-
-// CopyIndex snapshots an index file to dst (clone on APFS), so later reads see the captured state.
-func CopyIndex(src, dst string) error { return copyFile(src, dst) }
-
-// copyFile clones bytes on APFS and copies elsewhere, replacing dst.
-func copyFile(src, dst string) error {
-	if cloned, err := cloneIndexFile(src, dst); cloned || err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(out, in)
-	closeErr := out.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
 }

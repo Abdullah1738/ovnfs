@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/stencil-hq/ovnfs/internal/clone"
 )
 
 // A checkout of a repository gets a private git directory instead of a worktree of
@@ -87,7 +89,11 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 		{filepath.Join(r.CommonDir, "info", "exclude"), filepath.Join("info", "exclude"), false},
 	}
 	for _, c := range copies {
-		err := copyTree(c.src, filepath.Join(gitdir, c.dst))
+		dst := filepath.Join(gitdir, c.dst)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		err := clone.Tree(c.src, dst)
 		if err != nil && (c.required || !errors.Is(err, os.ErrNotExist)) {
 			return err
 		}
@@ -96,7 +102,7 @@ func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 	if err := copyFiles(filepath.Join(r.CommonDir, "refs"), filepath.Join(gitdir, "refs")); err != nil {
 		return err
 	}
-	if err := copyFile(index, filepath.Join(gitdir, "index")); err != nil {
+	if err := clone.File(index, filepath.Join(gitdir, "index")); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -180,7 +186,7 @@ func CopyGitdir(src, dst, objects string) error {
 		if e.Name() == "objects" {
 			continue
 		}
-		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+		if err := clone.Tree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
 			return err
 		}
 	}
@@ -375,35 +381,6 @@ func Gitfile(gitdir string) ([]byte, error) {
 	return []byte("gitdir: " + gitdir + "\n"), nil
 }
 
-// copyTree copies a file, symlink or directory tree to the new path dst.
-func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, p)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		switch {
-		case d.Type()&fs.ModeSymlink != 0:
-			link, err := os.Readlink(p)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(link, target)
-		case d.IsDir():
-			return os.MkdirAll(target, 0o755)
-		default:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			return copyFile(p, target)
-		}
-	})
-}
-
 // emptyIndex writes a valid empty version-two index for an unborn repository.
 func emptyIndex(name string) error {
 	const header = "DIRC\x00\x00\x00\x02\x00\x00\x00\x00"
@@ -411,7 +388,7 @@ func emptyIndex(name string) error {
 	return os.WriteFile(name, append([]byte(header), checksum[:]...), 0o600)
 }
 
-// copyFiles copies the files and symlinks below directory src to the new directory
+// copyFiles clones the files and symlinks below directory src to the new directory
 // dst, creating only the directories that lead to them.
 func copyFiles(src, dst string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -433,13 +410,6 @@ func copyFiles(src, dst string) error {
 			}
 			made[dir] = true
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			link, err := os.Readlink(p)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(link, target)
-		}
-		return copyFile(p, target)
+		return clone.Tree(p, target)
 	})
 }

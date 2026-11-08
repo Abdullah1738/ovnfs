@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/git"
+	"github.com/stencil-hq/ovnfs/internal/clone"
 	"github.com/stencil-hq/ovnfs/internal/hostfile"
 	"github.com/stencil-hq/ovnfs/rules"
 	"github.com/stencil-hq/ovnfs/store"
@@ -246,8 +248,8 @@ func (w *walker) copyRepo(ctx context.Context, repo *git.Repo, p string) (Repo, 
 		return Repo{}, err
 	}
 	r.Index = filepath.Join(dir, "index")
-	if err := git.CopyIndex(repo.IndexPath(), r.Index); err != nil {
-		if !os.IsNotExist(err) {
+	if err := clone.File(repo.IndexPath(), r.Index); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
 			return Repo{}, err
 		}
 		r.Index = ""

@@ -1,4 +1,4 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package clone
 
@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-// Reflink always reports errors.ErrUnsupported: these platforms have no supported clone syscall.
+// Reflink always reports errors.ErrUnsupported: these platforms have no supported clone primitive.
 func Reflink(_ *os.File, dst string, _ os.FileMode) error {
 	return fmt.Errorf("clone to %s: %w", dst, errors.ErrUnsupported)
 }

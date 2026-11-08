@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stencil-hq/ovnfs/internal/clone"
 )
 
 func TestIndexTreeUsesStageZeroObjectsAndCapturedIndex(t *testing.T) {
@@ -25,7 +27,7 @@ func TestIndexTreeUsesStageZeroObjectsAndCapturedIndex(t *testing.T) {
 		t.Fatalf("unmerged index: %s, %v", out, err)
 	}
 	index := filepath.Join(t.TempDir(), "captured-index")
-	if err := CopyIndex(r.IndexPath(), index); err != nil {
+	if err := clone.File(r.IndexPath(), index); err != nil {
 		t.Fatal(err)
 	}
 	testGit(t, r.Top, "update-index", "--force-remove", "statless")

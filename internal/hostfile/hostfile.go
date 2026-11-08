@@ -1,6 +1,7 @@
-// Package hostfile opens, renames and removes host files with POSIX semantics
-// on every platform. On Unix it is the os package. On Windows, files open with
-// FILE_SHARE_DELETE and renames and removes use POSIX semantics, so a file the
+// Package hostfile opens, renames and removes host files, and sets a symlink's
+// own times, with POSIX semantics on every platform. On Unix it is the os
+// package and utimensat. On Windows, files open with FILE_SHARE_DELETE and
+// renames and removes use POSIX semantics, so a file the
 // daemon holds open for a client can still be renamed, replaced or deleted, and
 // read-only files are replaced or deleted without touching their attribute, as
 // on Unix.

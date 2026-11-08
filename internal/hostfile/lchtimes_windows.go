@@ -1,6 +1,6 @@
 //go:build windows
 
-package overlay
+package hostfile
 
 import (
 	"io/fs"
@@ -9,10 +9,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// lchtimes sets the access and modification times of p itself, without
+// Lchtimes sets the access and modification times of p itself, without
 // following a reparse point; a zero time leaves that time unchanged, as for
 // os.Chtimes.
-func lchtimes(p string, atime, mtime time.Time) error {
+func Lchtimes(p string, atime, mtime time.Time) error {
 	name, err := windows.UTF16PtrFromString(p)
 	if err != nil {
 		return err

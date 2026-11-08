@@ -1031,7 +1031,7 @@ func (f *FS) Chown(name string, uid, gid int) error {
 // itself rather than its target; a zero time leaves that time unchanged, as
 // for os.Chtimes.
 func (f *FS) Chtimes(name string, atime, mtime time.Time) error {
-	return f.change(name, "chtimes", func(p string) error { return lchtimes(p, atime, mtime) },
+	return f.change(name, "chtimes", func(p string) error { return hostfile.Lchtimes(p, atime, mtime) },
 		func(m *memFile) {
 			if !atime.IsZero() {
 				m.atime = atime

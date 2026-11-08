@@ -1,6 +1,6 @@
 //go:build !windows && !darwin
 
-package overlay
+package hostfile
 
 import "golang.org/x/sys/unix"
 
