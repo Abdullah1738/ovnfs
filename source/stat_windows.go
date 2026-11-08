@@ -2,6 +2,7 @@ package source
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"unsafe"
@@ -15,6 +16,7 @@ import (
 // being served from the folder. Ctime stays 0: Git for Windows stores creation
 // time in the index ctime. Entries get ino 0 when the volume has no stable file
 // ids (FAT, exFAT), the enumeration fails, or the name appeared in between.
+// Subdirectories are statted themselves; see [freshDir].
 func readDir(dir string) ([]os.DirEntry, func(os.FileInfo) fileKey, error) {
 	f, err := os.Open(dir)
 	if err != nil {
@@ -25,8 +27,27 @@ func readDir(dir string) ([]os.DirEntry, func(os.FileInfo) fileKey, error) {
 	// Go's listing restarts the enumeration on the same handle.
 	entries, err := f.ReadDir(-1)
 	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	for i, e := range entries {
+		if e.IsDir() {
+			entries[i] = freshDir{DirEntry: e, path: filepath.Join(dir, e.Name())}
+		}
+	}
 	return entries, func(info os.FileInfo) fileKey { return fileKey{ino: ids[info.Name()]} }, err
 }
+
+// freshDir is a subdirectory entry whose Info is the directory's own
+// [os.Lstat]. NTFS refreshes the copy of a directory's timestamps kept in its
+// parent's index only once a handle to the changed directory closes, so listing
+// data would show a directory's mtime from before its last added or removed
+// entry until the walk itself opened it, keying an unchanged tree differently
+// on the next walk.
+type freshDir struct {
+	os.DirEntry
+	path string
+}
+
+// Info stats the directory itself rather than its parent's index entry.
+func (d freshDir) Info() (os.FileInfo, error) { return os.Lstat(d.path) }
 
 // fileIDs maps the names in directory h to their file ids, which equal the
 // FileIndexHigh<<32|FileIndexLow that GetFileInformationByHandle reports.
