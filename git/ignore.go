@@ -232,12 +232,12 @@ func NewIgnore(r *Repo) (*Ignore, error) {
 		return i, nil
 	}
 	ctx := context.Background()
-	caseSetting, err := r.optional(ctx, "config", "--bool", "--get", "core.ignorecase")
+	caseSetting, err := r.configValue(ctx, "--bool", "--get", "core.ignorecase")
 	if err != nil {
 		return nil, err
 	}
 	i.fold = caseSetting == "true"
-	global, err := r.optional(ctx, "config", "--path", "--get", "core.excludesFile")
+	global, err := r.configValue(ctx, "--path", "--get", "core.excludesFile")
 	if err != nil {
 		return nil, err
 	}

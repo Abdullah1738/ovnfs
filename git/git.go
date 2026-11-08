@@ -81,23 +81,36 @@ func (r *Repo) optional(ctx context.Context, args ...string) (string, error) {
 	return value, err
 }
 
-// Open resolves the work tree containing dir, its common directory and its own git directory.
+// Open resolves the work tree containing dir, its common directory and its own git
+// directory, remembering the answer while the .git entries it rests on are unchanged.
 func Open(dir string) (*Repo, error) {
 	absolute, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
 	r := &Repo{Top: absolute}
-	out, err := r.text(context.Background(), "rev-parse", "--path-format=absolute", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir", "--git-dir")
+	var found *Repo
+	out, err := recalled("open\x00"+absolute, func() (string, error) {
+		out, err := r.text(context.Background(), "rev-parse", "--path-format=absolute", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir", "--git-dir")
+		if err != nil {
+			return "", ErrNotRepo
+		}
+		found, err = parseOpen(out)
+		return out, err
+	}, func() ([]string, bool) { return openDeps(absolute, found), true })
 	if err != nil {
-		return nil, ErrNotRepo
+		return nil, err
 	}
+	return parseOpen(out)
+}
+
+// parseOpen reads Open's rev-parse answer.
+func parseOpen(out string) (*Repo, error) {
 	lines := strings.Split(out, "\n")
 	if len(lines) != 4 || lines[0] != "true" {
 		return nil, ErrNotRepo
 	}
-	r.Top, r.CommonDir, r.GitDir = filepath.Clean(lines[1]), filepath.Clean(lines[2]), filepath.Clean(lines[3])
-	return r, nil
+	return &Repo{Top: filepath.Clean(lines[1]), CommonDir: filepath.Clean(lines[2]), GitDir: filepath.Clean(lines[3])}, nil
 }
 
 // IsRoot reports whether dir holds a .git entry, the cheap check made before Open while walking.
@@ -154,9 +167,12 @@ func ReadIndex(name string) (Index, error) {
 	return out, nil
 }
 
-// Head returns the commit HEAD points at, or "" on an unborn branch.
+// Head returns the commit HEAD points at, or "" on an unborn branch, remembered while
+// HEAD and the ref it names are unchanged.
 func (r *Repo) Head(ctx context.Context) (string, error) {
-	return r.optional(ctx, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+	return recalled("head\x00"+r.GitDir, func() (string, error) {
+		return r.optional(ctx, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+	}, r.headDeps)
 }
 
 // Busy names an unfinished merge, rebase, cherry-pick or revert, whose index cannot be trusted as a base.
@@ -193,7 +209,7 @@ func (r *Repo) Remote(ctx context.Context, upstream string) (string, error) {
 	if name == "" {
 		name = "origin"
 	}
-	return r.optional(ctx, "config", "--get", "remote."+name+".url")
+	return r.configValue(ctx, "--get", "remote."+name+".url")
 }
 
 // Contains reports whether commit is reachable from tip.
