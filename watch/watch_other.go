@@ -19,5 +19,8 @@ func (w *Watcher) Remove(dir string) {}
 // Covers reports false.
 func (w *Watcher) Covers(dir string) bool { return false }
 
+// Sync reports errors.ErrUnsupported.
+func (w *Watcher) Sync() error { return errors.ErrUnsupported }
+
 // Close does nothing.
 func (w *Watcher) Close() error { return nil }

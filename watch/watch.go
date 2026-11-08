@@ -6,4 +6,5 @@
 // unknown changes anywhere below it: the backend lost individual events.
 // Covers tells whether the backend currently sees every change below an added
 // directory, so callers may cache what lies there until a report recalls it.
+// Sync returns once every change made before the call has reached fn.
 package watch

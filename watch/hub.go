@@ -42,9 +42,12 @@ type hub struct {
 	fn    func(paths []string)
 	roots atomic.Pointer[[]root] // stored by the backend whenever dirs or coverage change
 
-	mu      sync.Mutex
-	pending [][]item
-	stopped bool
+	mu        sync.Mutex
+	pending   [][]item
+	stopped   bool
+	queued    uint64    // batches ever reported
+	delivered uint64    // batches handed to fn and returned from it, or dropped
+	drained   sync.Cond // on mu; broadcast as delivered grows or at stop
 
 	wake   chan struct{} // nudges deliver; capacity 1
 	done   chan struct{} // closed by stop
@@ -54,11 +57,24 @@ type hub struct {
 // start begins delivering to fn.
 func (h *hub) start(fn func(paths []string)) {
 	h.fn = fn
+	h.drained.L = &h.mu
 	h.wake = make(chan struct{}, 1)
 	h.done = make(chan struct{})
 	h.exited = make(chan struct{})
 	h.roots.Store(&[]root{})
 	go h.deliver()
+}
+
+// drain returns once fn has returned for every batch reported before the call,
+// reporting false if the hub stopped first.
+func (h *hub) drain() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	target := h.queued
+	for h.delivered < target && !h.stopped {
+		h.drained.Wait()
+	}
+	return !h.stopped
 }
 
 // covers implements Watcher.Covers.
@@ -77,6 +93,7 @@ func (h *hub) report(evs []event) {
 	h.mu.Lock()
 	if !h.stopped {
 		h.pending = append(h.pending, b)
+		h.queued++
 	}
 	h.mu.Unlock()
 	select {
@@ -91,6 +108,7 @@ func (h *hub) stop() {
 	h.mu.Lock()
 	h.stopped = true
 	h.pending = nil
+	h.drained.Broadcast()
 	h.mu.Unlock()
 	close(h.done)
 	<-h.exited
@@ -118,6 +136,10 @@ func (h *hub) deliver() {
 			if paths := h.live(b); len(paths) > 0 {
 				h.fn(paths)
 			}
+			h.mu.Lock()
+			h.delivered++
+			h.drained.Broadcast()
+			h.mu.Unlock()
 		}
 	}
 }
