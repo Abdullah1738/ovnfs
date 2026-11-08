@@ -46,10 +46,9 @@ func readFile(path string) ([]byte, error) {
 var rtlGetLastNtStatus = windows.NewLazySystemDLL("ntdll.dll").NewProc("RtlGetLastNtStatus")
 
 // createExclusive creates path for reading and writing, failing with an
-// error wrapping fs.ErrExist if it exists. As in Git for Windows' mingw_open,
-// a file still being deleted exists: creating it fails with
-// ERROR_ACCESS_DENIED, and the thread's last NTSTATUS is
-// STATUS_DELETE_PENDING.
+// error wrapping fs.ErrExist if it exists. Concurrent writers releasing a
+// lock on the same name can make creation fail with ERROR_ACCESS_DENIED for
+// a moment, so that is retried as renames are.
 func createExclusive(path string) (*os.File, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err == nil {
@@ -60,6 +59,22 @@ func createExclusive(path string) (*os.File, error) {
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
+	var h windows.Handle
+	err = retryInUse(func() (err error) {
+		h, err = createNew(p)
+		return err
+	})
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
+// createNew creates the file at p, failing with ERROR_FILE_EXISTS if it
+// exists. As in Git for Windows' mingw_open, a file still being deleted
+// exists: creating it fails with ERROR_ACCESS_DENIED, and the thread's last
+// NTSTATUS is STATUS_DELETE_PENDING.
+func createNew(p *uint16) (windows.Handle, error) {
 	// The status must be read on the thread that made the call.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -71,28 +86,33 @@ func createExclusive(path string) (*os.File, error) {
 			err = windows.ERROR_FILE_EXISTS
 		}
 	}
-	if err != nil {
-		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
-	}
-	return os.NewFile(uintptr(h), path), nil
+	return h, err
 }
 
-// renameRetryDelays is how long Git for Windows waits before each retry of
-// a rename that failed because another process has a file open.
-var renameRetryDelays = [...]time.Duration{0, time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond}
+// retryDelays is how long Git for Windows waits before each retry of a file
+// operation that failed because another process had a file open
+// (retry_ask_yes_no in compat/mingw.c).
+var retryDelays = [...]time.Duration{0, time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond}
+
+// retryInUse runs op, retrying after each of retryDelays while it fails with
+// an error that another handle on the file can cause.
+func retryInUse(op func() error) error {
+	err := op()
+	for _, d := range retryDelays {
+		if err != windows.ERROR_ACCESS_DENIED && err != windows.ERROR_SHARING_VIOLATION {
+			break
+		}
+		time.Sleep(d)
+		err = op()
+	}
+	return err
+}
 
 // replaceFile renames oldpath over newpath as Git for Windows' mingw_rename
 // does: with POSIX semantics, retrying while a process that does not share
 // delete access holds either file open.
 func replaceFile(oldpath, newpath string) error {
-	err := renamePOSIX(oldpath, newpath)
-	for _, d := range renameRetryDelays {
-		if err != windows.ERROR_ACCESS_DENIED && err != windows.ERROR_SHARING_VIOLATION {
-			break
-		}
-		time.Sleep(d)
-		err = renamePOSIX(oldpath, newpath)
-	}
+	err := retryInUse(func() error { return renamePOSIX(oldpath, newpath) })
 	if err != nil {
 		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: err}
 	}
