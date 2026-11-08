@@ -73,6 +73,7 @@ ovnfs isolates files, not processes: it is not a sandbox.
 - [Internals](docs/internals.md): admin protocol for embedding, persistence, memory tiers
 - [Limitations](docs/limitations.md)
 - [Development](docs/development.md): tests and benchmarks
+- [Agent skill](skills/ovnfs/SKILL.md): teaches coding agents to work in checkouts; copy `skills/ovnfs` into your agent's skills directory
 
 ## License
 
