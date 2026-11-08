@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/stencil-hq/ovnfs/admin"
 	"github.com/stencil-hq/ovnfs/api"
@@ -62,6 +63,7 @@ func commands() []command {
 		{"link", "", "relay an attach session from ssh into this machine's daemon (run by attach)", true, runLink},
 		{"subscribe", "", "stream daemon events as JSON lines until interrupted", true, runSubscribe},
 		{"stop", "", "stop the daemon", false, runStop},
+		{"restart", "", "stop the daemon and start a new one from this binary", false, runRestart},
 		{"start", "[--json]", "make sure the daemon runs (starting it in the background); --json prints its status and socket", false, runStart},
 		{"ctl", "OP ['JSON']", "send one raw admin request and print the raw reply", true, runCtl},
 	}
@@ -188,9 +190,9 @@ func runLs(c *cli, args []string) error {
 		for _, s := range r.Snapshots {
 			snaps[s.Checkout]++
 		}
-		fmt.Fprintln(tw, "CHECKOUT\tSOURCE\tSNAPS\tCHANGED\tPATH")
+		fmt.Fprintln(tw, "CHECKOUT\tSOURCE\tSNAPS\tCHANGED\tTOUCHED\tPATH")
 		for _, h := range r.Checkouts {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", h.Name, h.Source, snaps[h.Name], yesNo(h.Dirty), h.Path)
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", h.Name, h.Source, snaps[h.Name], yesNo(h.Dirty), stamp(h.Touched), h.Path)
 		}
 		return nil
 	}
@@ -207,7 +209,7 @@ func runLs(c *cli, args []string) error {
 		if s.Tree != "" {
 			tree = abbrev(s.Tree, 12)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.ID, s.Label, s.Created.Local().Format("2006-01-02 15:04"), tree)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.ID, s.Label, stamp(s.Created), tree)
 	}
 	return nil
 }
@@ -833,6 +835,15 @@ func orDefault(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// stamp renders a time for tables, local and to the minute; "-" for none, as
+// from a daemon older than the field.
+func stamp(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Local().Format("2006-01-02 15:04")
 }
 
 // yesNo renders a flag for tables.

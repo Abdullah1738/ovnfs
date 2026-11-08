@@ -191,15 +191,9 @@ func runStart(c *cli, args []string) error {
 	return nil
 }
 
-// runStop asks the daemon to exit and waits until its socket stops accepting.
-func runStop(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("stop"), args, 0, 0); err != nil {
-		return err
-	}
-	if !accepting(c.state) {
-		fmt.Fprintln(os.Stderr, "not running")
-		return nil
-	}
+// stopDaemon asks the running daemon to exit and waits until its socket stops
+// accepting. It fails when the daemon refuses or outlives daemonWait.
+func stopDaemon(c *cli) error {
 	raw, err := c.call("stop", struct{}{})
 	if _, ok := errors.AsType[*admin.RemoteError](err); ok {
 		return err
@@ -221,7 +215,44 @@ func runStop(c *cli, args []string) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+	return nil
+}
+
+// runStop asks the daemon to exit and waits until its socket stops accepting.
+func runStop(c *cli, args []string) error {
+	if _, err := c.parse(c.flags("stop"), args, 0, 0); err != nil {
+		return err
+	}
+	if !accepting(c.state) {
+		fmt.Fprintln(os.Stderr, "not running")
+		return nil
+	}
+	if err := stopDaemon(c); err != nil {
+		return err
+	}
 	fmt.Fprintln(os.Stderr, "stopped ovnfs")
+	return nil
+}
+
+// runRestart replaces the running daemon with a fresh one spawned from this
+// invocation's binary, which is how a rebuilt or upgraded ovnfs takes over. It
+// starts the daemon when none runs, and leaves the old one untouched if it
+// refuses to stop.
+func runRestart(c *cli, args []string) error {
+	if _, err := c.parse(c.flags("restart"), args, 0, 0); err != nil {
+		return err
+	}
+	if accepting(c.state) {
+		if err := stopDaemon(c); err != nil {
+			return err
+		}
+	}
+	client, pid, err := startDaemon(c.ctx, c.state, c.mount)
+	if err != nil {
+		return err
+	}
+	c.conn = client
+	fmt.Fprintf(os.Stderr, "restarted ovnfs (pid %d, log %s)\n", pid, logPath(c.state))
 	return nil
 }
 

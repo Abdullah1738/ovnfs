@@ -30,9 +30,12 @@ ovnfs rm fix-auth                   # remove the checkout; its snapshots stay
 
 - Names: lowercase `[a-z0-9][a-z0-9._-]*`, up to 64 characters. Without
   `--name`, the checkout is named after the folder (`app`, then `app-2`, ...).
-- `ovnfs ls` lists checkouts; `ovnfs ls NAME` lists one checkout's snapshots.
+- `ovnfs ls` lists checkouts with when each last changed (TOUCHED: a write
+  through its folder or to its git state); `ovnfs ls NAME` lists one
+  checkout's snapshots.
 - Any verb starts the daemon if it isn't running. `ovnfs status` and
-  `ovnfs stop` manage it; its log is `serve.log` in the state directory.
+  `ovnfs stop` manage it, and `ovnfs restart` replaces it with one from the
+  current binary; its log is `serve.log` in the state directory.
 
 ## Choosing what the checkout starts from
 

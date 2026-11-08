@@ -174,6 +174,9 @@ func Open(c Config) (*Registry, error) {
 		}
 		h := &checkoutRecord{meta: disk.checkoutMeta, base: b, stack: append([]string{}, disk.Stack...), upper: upper, fs: fs}
 		h.generation.Store(1)
+		if !disk.Wrote.IsZero() {
+			h.wrote.Store(disk.Wrote.UnixNano())
+		}
 		r.checkouts[disk.Name] = h
 		r.retainLocked(b, h.stack)
 	}
@@ -509,7 +512,28 @@ func (r *Registry) checkoutLocked(h *checkoutRecord) api.Checkout {
 	if meta.Remote != nil {
 		src = meta.Remote.Source
 	}
-	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: src, Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, Dirty: err == nil && !empty, Created: h.meta.Created}
+	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: src, Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, Dirty: err == nil && !empty, Created: h.meta.Created, Touched: r.touched(h)}
+}
+
+// touched is when a checkout last changed: through its folder (see
+// [Session.Touch]) or in its private git directory, which git writes outside the
+// folder; its creation when neither changed since.
+func (r *Registry) touched(h *checkoutRecord) time.Time {
+	t := h.meta.Created
+	if wrote := time.Unix(0, h.wrote.Load()); wrote.After(t) {
+		t = wrote
+	}
+	if h.meta.Git {
+		// Replacing the index (staging, committing) changes the directory; moving
+		// HEAD appends to its log.
+		gitdir := r.gitdirPath(h.meta.dir())
+		for _, p := range [...]string{gitdir, filepath.Join(gitdir, "logs", "HEAD")} {
+			if info, err := os.Lstat(p); err == nil && info.ModTime().After(t) {
+				t = info.ModTime()
+			}
+		}
+	}
+	return t.UTC()
 }
 
 // snapshotOf describes a snapshot for replies.

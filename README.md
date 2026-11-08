@@ -47,7 +47,8 @@ ovnfs glob '*.go' app          # matching paths, recursively and ignore-aware
 ```
 
 `ovnfs help` lists every verb. Verbs start the daemon when none is running;
-`start`, `stop` and `status` manage it, `serve` runs it in the foreground.
+`start`, `stop`, `restart` and `status` manage it, `serve` runs it in the
+foreground. `restart` swaps in the daemon of the binary you run, e.g. after an upgrade.
 
 ## How it works
 

@@ -270,3 +270,32 @@ func TestFreezeCrashRecovery(t *testing.T) {
 		}
 	})
 }
+
+// TestTouchedSurvivesStop checks that a change through a checkout's folder moves
+// its Touched past its creation, and that a planned stop keeps it although file
+// calls never write state.
+func TestTouchedSurvivesStop(t *testing.T) {
+	f := newFixture(t)
+	f.newCheckout(folder(t, map[string]string{"a": "base"}), "c")
+	fresh := f.reg.Ls().Checkouts[0]
+	if !fresh.Touched.Equal(fresh.Created) {
+		t.Fatalf("fresh checkout touched %v, created %v", fresh.Touched, fresh.Created)
+	}
+	s, err := f.reg.Enter("c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Touch()
+	s.Done()
+	touched := f.reg.Ls().Checkouts[0].Touched
+	if !touched.After(fresh.Created) {
+		t.Fatalf("touched %v, not after creation %v", touched, fresh.Created)
+	}
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.open()
+	if got := f.reg.Ls().Checkouts[0].Touched; !got.Equal(touched) {
+		t.Fatalf("reopened touched %v, want %v", got, touched)
+	}
+}

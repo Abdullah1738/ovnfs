@@ -185,8 +185,9 @@ type checkoutRecord struct {
 	freeze     sync.RWMutex
 	generation atomic.Uint64
 	retired    atomic.Bool
-	merge      sync.Mutex // serializes apply and pull, which rewrite meta.MergeBases; taken before Registry.mu and freeze
-	git        gitCache   // stored files of the private git directory, for the next snapshot
+	merge      sync.Mutex   // serializes apply and pull, which rewrite meta.MergeBases; taken before Registry.mu and freeze
+	git        gitCache     // stored files of the private git directory, for the next snapshot
+	wrote      atomic.Int64 // unix nanoseconds of the last change through the checkout's folder (see Session.Touch); 0 for none
 }
 
 // snapRecord retains its full stack until explicitly dropped.
@@ -237,6 +238,9 @@ type Session struct {
 	record *checkoutRecord
 	once   sync.Once
 }
+
+// Touch records that the call changed the checkout, for [api.Checkout.Touched].
+func (s *Session) Touch() { s.record.wrote.Store(time.Now().UnixNano()) }
 
 // Done releases the freeze lock; repeated calls are harmless.
 func (s *Session) Done() {

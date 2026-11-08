@@ -73,7 +73,9 @@ a snapshot's parent. Builds that read only version 4 would cut store packs at
 frame kinds they do not know (chunks, chunk manifests, tree deltas), so version
 5 makes them refuse the state before they open the store; this build reads
 version 4 and rewrites it as 5 when it opens. State of any other version is
-refused.
+refused. File calls never write state: a checkout's last write through its
+folder (`ls` TOUCHED) is saved with the next operation or the planned stop, so
+a crash forgets the writes since.
 
 | path under state | holds |
 | --- | --- |

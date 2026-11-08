@@ -106,6 +106,7 @@ func (f *routerFile) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	defer s.Done()
+	s.Touch()
 	n, err := f.file.Write(p)
 	if f.flags&os.O_APPEND == 0 {
 		f.offset += int64(n)
@@ -129,6 +130,7 @@ func (f *routerFile) WriteAt(p []byte, off int64) (int, error) {
 		return 0, err
 	}
 	defer s.Done()
+	s.Touch()
 	if writer, ok := f.file.(io.WriterAt); ok {
 		return writer.WriteAt(p, off)
 	}
@@ -183,6 +185,7 @@ func (f *routerFile) Truncate(size int64) error {
 		return err
 	}
 	defer s.Done()
+	s.Touch()
 	return f.file.Truncate(size)
 }
 

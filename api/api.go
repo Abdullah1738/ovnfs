@@ -26,6 +26,7 @@ type Checkout struct {
 	Git     bool      `json:"git"`              // a working .git exists inside the checkout
 	Dirty   bool      `json:"dirty"`            // changes since the last snapshot
 	Created time.Time `json:"created"`
+	Touched time.Time `json:"touched"` // last change to its files or git state; Created until then
 }
 
 // Snapshot is an immutable state of a checkout; Tree is its content id once hashed.
