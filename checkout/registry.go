@@ -238,6 +238,7 @@ func Open(c Config) (*Registry, error) {
 	} else if !errors.Is(err, errors.ErrUnsupported) {
 		r.enqueueNotice(baseNotice{fault: "watch source folders: " + err.Error()})
 	}
+	r.syncAllRemotes()
 	r.mu.Lock()
 	r.scheduleHashesLocked()
 	r.storeHashedLayersLocked()

@@ -36,6 +36,10 @@ default it is mounted `noatime`, since the macOS NFS client otherwise sends a
 SETATTR for every exec of a checkout binary. A restart applies the setting to
 the mount the previous daemon left in place without unmounting it.
 
+By default a repository gets a git remote per checkout of it;
+`serve --no-git-remotes` (`OVNFS_GIT_REMOTES=0`) turns that off, see
+[checkouts](checkouts.md#git-remotes).
+
 ## Classes
 
 Opening a folder classifies every path into one of four classes:
@@ -156,6 +160,7 @@ env:
 | `fsync` | boolean | user file only: spill and sync memory-backed files on fsync |
 | `blob_cache` | size | user file only: memory budget for content-addressed blobs |
 | `atime` | boolean | user file only: allow access time updates |
+| `git_remotes` | boolean | user file only: give a repository a git remote `ovnfs/NAME` per checkout (default true) |
 
 `rules` is a block scalar (`rules: |`) with one `<class> <predicate>` per line.
 Blank lines and lines starting with `#` are skipped; `#` after whitespace
@@ -181,13 +186,15 @@ memory: 2G
 fsync: true
 blob_cache: 512M
 atime: false
+git_remotes: true
 ```
 
 For each setting, the explicit `serve` flag wins over its environment variable,
 which wins over the user file, which wins over the built-in default. The
-environment variables are `OVNFS_MEMORY`, `OVNFS_FSYNC`, `OVNFS_BLOB_CACHE`
-and `OVNFS_ATIME`; `proto` has no environment variable. Serve settings take
-effect when the daemon starts; restart it after changing them.
+environment variables are `OVNFS_MEMORY`, `OVNFS_FSYNC`, `OVNFS_BLOB_CACHE`,
+`OVNFS_ATIME` and `OVNFS_GIT_REMOTES`; `proto` has no environment variable.
+Serve settings take effect when the daemon starts; restart it after changing
+them.
 
 ### `ovnfs config`
 

@@ -92,22 +92,24 @@ func (b *byteSize) UnmarshalText(text []byte) error {
 // serveDefaults supplies user, environment and platform defaults to kong.
 func serveDefaults(conf manifest.Daemon) kong.Option {
 	return kong.Vars{
-		"default_proto":      cmp.Or(conf.Proto, defaultProto()),
-		"memory_default":     cmp.Or(os.Getenv("OVNFS_MEMORY"), conf.Memory, "1G"),
-		"fsync_default":      cmp.Or(os.Getenv("OVNFS_FSYNC"), conf.Fsync, "false"),
-		"blob_cache_default": cmp.Or(os.Getenv("OVNFS_BLOB_CACHE"), conf.BlobCache, "512M"),
-		"atime_default":      cmp.Or(os.Getenv("OVNFS_ATIME"), conf.Atime, "false"),
+		"default_proto":       cmp.Or(conf.Proto, defaultProto()),
+		"memory_default":      cmp.Or(os.Getenv("OVNFS_MEMORY"), conf.Memory, "1G"),
+		"fsync_default":       cmp.Or(os.Getenv("OVNFS_FSYNC"), conf.Fsync, "false"),
+		"blob_cache_default":  cmp.Or(os.Getenv("OVNFS_BLOB_CACHE"), conf.BlobCache, "512M"),
+		"atime_default":       cmp.Or(os.Getenv("OVNFS_ATIME"), conf.Atime, "false"),
+		"git_remotes_default": cmp.Or(os.Getenv("OVNFS_GIT_REMOTES"), conf.GitRemotes, "true"),
 	}
 }
 
 // serveCmd configures the foreground daemon.
 type serveCmd struct {
-	Proto     string   `help:"File server protocol: nfs, smb, fuse or winfsp." default:"${default_proto}" enum:"nfs,smb,fuse,winfsp"`
-	Listen    string   `help:"File server address; defaults to a free local port or a Unix socket for NFS on macOS."`
-	Memory    byteSize `help:"Memory budget for small written files; 0 writes every file to disk." default:"${memory_default}"`
-	Fsync     bool     `help:"Spill and sync memory files on fsync (NFS does not forward fsync)." default:"${fsync_default}"`
-	BlobCache byteSize `help:"Memory budget for small content-addressed blobs; 0 disables." default:"${blob_cache_default}"`
-	Atime     bool     `help:"Allow access time updates on the mount." default:"${atime_default}"`
+	Proto      string   `help:"File server protocol: nfs, smb, fuse or winfsp." default:"${default_proto}" enum:"nfs,smb,fuse,winfsp"`
+	Listen     string   `help:"File server address; defaults to a free local port or a Unix socket for NFS on macOS."`
+	Memory     byteSize `help:"Memory budget for small written files; 0 writes every file to disk." default:"${memory_default}"`
+	Fsync      bool     `help:"Spill and sync memory files on fsync (NFS does not forward fsync)." default:"${fsync_default}"`
+	BlobCache  byteSize `help:"Memory budget for small content-addressed blobs; 0 disables." default:"${blob_cache_default}"`
+	Atime      bool     `help:"Allow access time updates on the mount." default:"${atime_default}"`
+	GitRemotes bool     `help:"Give each source repository a git remote ovnfs/NAME per checkout of it." default:"${git_remotes_default}" negatable:""`
 }
 
 // eventHub fans persisted events out to connected admin subscribers.
@@ -191,7 +193,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 		return fmt.Errorf("node id: %w", err)
 	}
 	reg, err := checkout.Open(checkout.Config{State: state, Mount: mount, UserHome: userHome, Node: node, Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
-		Memory: mem, BlobCache: int64(cmd.BlobCache),
+		Memory: mem, BlobCache: int64(cmd.BlobCache), GitRemotes: cmd.GitRemotes,
 		Retire: func(name string) {
 			if checkoutShares != nil {
 				checkoutShares.Close(name)

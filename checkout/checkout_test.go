@@ -27,6 +27,7 @@ type fixture struct {
 	reg          *Registry
 	mu           sync.Mutex
 	invalidated  []invalidation // Config.Invalidate calls, in order
+	gitRemotes   bool           // Config.GitRemotes at the next open
 }
 
 // invalidation is one Config.Invalidate call; nil paths cover the whole checkout.
@@ -74,7 +75,7 @@ func newFixture(t *testing.T) *fixture {
 // open (re)opens the registry on the fixture's state.
 func (f *fixture) open() {
 	f.t.Helper()
-	reg, err := Open(Config{State: f.state, Mount: f.mount, Node: "n_" + filepath.Base(filepath.Dir(f.state)), Memory: overlay.NewMemory(64<<20, 1<<20, 0), BlobCache: 64 << 20,
+	reg, err := Open(Config{State: f.state, Mount: f.mount, Node: "n_" + filepath.Base(filepath.Dir(f.state)), Memory: overlay.NewMemory(64<<20, 1<<20, 0), BlobCache: 64 << 20, GitRemotes: f.gitRemotes,
 		Invalidate: func(checkout string, paths []string) {
 			f.mu.Lock()
 			f.invalidated = append(f.invalidated, invalidation{checkout: checkout, paths: slices.Clone(paths)})

@@ -3,11 +3,12 @@
 // Git is never required: a folder without a repository is captured the same
 // way, and repositories are read and written in process, without a git
 // installation. Only fetches run the git binary, when it is installed, falling
-// back to package fetch without it. Where a repository exists, it contributes
+// back to package fetch without it, and so does deleting the tracking refs git
+// fetched for checkout remotes. Where a repository exists, it contributes
 // facts (which paths are tracked or ignored, which commit is pushed), an object
 // database to read unchanged tracked content from, and a private git directory
 // that makes `git` work inside a checkout without writing to the user's
-// repository.
+// repository, except for checkout remotes (see SetCheckoutRemotes).
 //
 // The engines under git/internal implement git's formats and protocols from
 // git's documentation: object (objects and packs), config, refs, index, merge

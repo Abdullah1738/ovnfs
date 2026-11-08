@@ -128,6 +128,9 @@ type Config struct {
 	// paths: anything in the checkout), so the export recalls clients' caches.
 	// It is called without registry locks held.
 	Invalidate func(checkout string, paths []string)
+	// GitRemotes gives a source repository a git remote ovnfs/<name> for each
+	// live checkout of it (see Registry.syncRemotes); off, ovnfs removes them.
+	GitRemotes bool
 }
 
 // Registry owns the live checkout namespace and all retained snapshot objects.
@@ -157,6 +160,7 @@ type Registry struct {
 	noticeWake   chan struct{}
 	stop         chan struct{}
 	workers      sync.WaitGroup
+	remotesMu    sync.Mutex // serializes rewrites of source repositories' checkout remotes
 	noticeMu     sync.Mutex
 	notices      []baseNotice
 	closeOnce    sync.Once

@@ -5,8 +5,9 @@
 A checkout of a repository gets a private git directory: HEAD, refs, config and
 the index are copies taken at open, and objects borrow the repository's through
 alternates. Inside the checkout, `git status` matches the folder's, commits land
-in the checkout, and nothing is written to the user's repository until
-`ovnfs apply CHECKOUT --branch NAME` fetches the checkout's commits as a branch.
+in the checkout, and they reach the user's repository only when
+`ovnfs apply CHECKOUT --branch NAME` fetches them as a branch or you fetch the
+checkout's [git remote](#git-remotes) yourself.
 
 If NAME is checked out in the folder, apply fast-forwards it and updates only
 the index entries changed by those commits, never the working-tree files.
@@ -45,6 +46,29 @@ Each private gitdir records repo-local `ovnfs.checkout = NAME`, including
 forked checkouts with their own names. Existing checkouts gain this marker when
 the daemon next opens their registry. The marker is never written to the source
 repo.
+
+### Git remotes
+
+The folder's repository gets a remote `ovnfs/NAME` for each live checkout NAME
+of it, pointing at the checkout's private git directory; `git_remotes: false`
+in `~/.o2/ovnfs.yml` (or `serve --no-git-remotes`, `OVNFS_GIT_REMOTES=0`)
+turns this off. `git fetch ovnfs/NAME` (or `git fetch --all`) stores the
+checkout's HEAD as `refs/remotes/ovnfs/NAME/HEAD`, so `git log ovnfs/NAME`,
+`git diff main...ovnfs/NAME` and `git cherry-pick ovnfs/NAME` see the checkout's commits
+without an `apply`. Tags are neither fetched nor pruned, whatever
+`fetch.pruneTags` says: a checkout's tags are a stale copy of the folder's.
+
+The remotes live in `.git/ovnfs-remotes`, which ovnfs rewrites whenever a
+checkout of the repository is created or removed, and which `.git/config`
+includes. Creates stay fast: the folder watcher ignores that file, and
+checkouts, whose config is a copy of the folder's, include a file they do not
+have, so none sees the others' remotes. Removing a checkout (`rm`, `prune`,
+the end of `run`) removes its remote and the tracking refs fetched from it.
+Turning the setting off removes every checkout remote, the file and the
+include when the daemon restarts, for repositories with live checkouts, and
+otherwise at the repository's next create or removal. Manage these remotes
+through ovnfs: `git remote remove ovnfs/NAME` deletes the refs but fails to
+edit the included file.
 
 ## Starting from a revision: `--rev`
 

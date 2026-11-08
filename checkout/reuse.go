@@ -754,7 +754,7 @@ func (f *reuseFolder) affectedBy(rel string) bool {
 	if gitPath, ok := strings.CutPrefix(rel, ".git/"); ok {
 		switch {
 		case strings.HasPrefix(gitPath, "objects/"), strings.HasPrefix(gitPath, "logs/"),
-			strings.HasSuffix(gitPath, ".lock"), gitPath == "FETCH_HEAD":
+			strings.HasSuffix(gitPath, ".lock"), gitPath == "FETCH_HEAD", gitPath == git.RemotesFile:
 			return false
 		}
 		return true

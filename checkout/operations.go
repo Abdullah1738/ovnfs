@@ -863,8 +863,16 @@ func (r *Registry) createFromSnapshotLocked(ctx context.Context, name string, s 
 	return nil, errors.Join(err, os.RemoveAll(r.upperPath(name)), os.RemoveAll(r.gitdirPath(name)), r.persistLocked())
 }
 
-// created notifies export watchers and subscribers after publication is durable.
+// created adds the checkout's git remote (syncRemotes) and notifies export
+// watchers and subscribers after publication is durable.
 func (r *Registry) created(h api.Checkout) {
+	r.mu.RLock()
+	var repo *git.Repo
+	if rec := r.checkouts[h.Name]; rec != nil {
+		repo = localRepo(rec.base)
+	}
+	r.mu.RUnlock()
+	r.syncRemotes(repo)
 	r.emit(Event{Name: "created", Payload: map[string]any{"checkout": h}})
 	if r.config.Changed != nil {
 		r.config.Changed(h.Name, true)
@@ -1280,6 +1288,8 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time, st
 	if r.config.Retire != nil {
 		r.config.Retire(name)
 	}
+	// Taken while the checkout still holds its base, which collection may close once released.
+	repo := localRepo(h.base)
 	h.fs.Discard()
 	h.fs.CloseFiles()
 	delete(r.checkouts, name)
@@ -1304,6 +1314,7 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time, st
 		delete(r.reserved, name)
 	}
 	r.mu.Unlock()
+	r.syncRemotes(repo)
 	if err = errors.Join(err, removeErr); err != nil {
 		return true, coded(err)
 	}

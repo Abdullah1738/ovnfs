@@ -15,8 +15,9 @@ import (
 // A checkout of a repository gets a private git directory instead of a worktree of
 // the user's repository: HEAD, refs, config and the index are copies taken at
 // capture, and "objects" links to an object directory shared by every checkout on
-// the same base, which borrows the user's objects through alternates. Commits
-// made in a checkout land there; the user's repository is never written.
+// same base, which borrows the user's objects through alternates. Commits
+// made in a checkout land there; the user's repository is never written,
+// except for checkout remotes (see SetCheckoutRemotes).
 
 // PrepareObjects creates a base's shared object directory that reads the repository's objects through alternates.
 func (r *Repo) PrepareObjects(dir string) error {
@@ -233,15 +234,22 @@ func rewriteConfig(gitdir string, edit func(string) string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(gitdir, ".config-*")
+	return replaceFile(path, edited, info.Mode().Perm())
+}
+
+// replaceFile atomically replaces file name with data and mode perm. The
+// temporary file's name ends in .lock, which the folder watcher ignores in a
+// source repository's git directory.
+func replaceFile(name, data string, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(name), "."+filepath.Base(name)+"-*.lock")
 	if err != nil {
 		return err
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
-	_, err = f.WriteString(edited)
+	_, err = f.WriteString(data)
 	if err == nil {
-		err = f.Chmod(info.Mode().Perm())
+		err = f.Chmod(perm)
 	}
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
@@ -249,8 +257,8 @@ func rewriteConfig(gitdir string, edit func(string) string) error {
 	if err != nil {
 		return err
 	}
-	// The copy keeps a read-only config's mode, which Windows' plain rename refuses to replace.
-	return hostfile.Rename(tmp, path)
+	// hostfile.Rename replaces a read-only file, which Windows' plain rename refuses.
+	return hostfile.Rename(tmp, name)
 }
 
 // configEntry is one variable a config edit sets.
