@@ -31,8 +31,12 @@ ovnfs rm fix-auth                   # remove the checkout; its snapshots stay
 - Names: lowercase `[a-z0-9][a-z0-9._-]*`, up to 64 characters. Without
   `--name`, the checkout is named after the folder (`app`, then `app-2`, ...).
 - `ovnfs ls` lists checkouts with when each last changed (TOUCHED: a write
-  through its folder or to its git state); `ovnfs ls NAME` lists one
-  checkout's snapshots.
+  through its folder or to its git state); `ovnfs ls .` only those of the
+  current folder (a folder needs `.`, `..` or a slash); `ovnfs ls NAME` lists
+  one checkout's snapshots.
+- `ovnfs prune [DIR] [--idle 7d] [--no-diff] [--dry-run]` removes the
+  checkouts matching every criterion given; `ovnfs ls` takes the same flags
+  to preview.
 - Any verb starts the daemon if it isn't running. `ovnfs status` and
   `ovnfs stop` manage it, and `ovnfs restart` replaces it with one from the
   current binary; its log is `serve.log` in the state directory.
@@ -150,7 +154,8 @@ is always pruned.
 - Give each agent or job a unique name, such as a role prefix plus a random
   suffix (`agent-auth-3f9c1a`). Opening an existing name with `--name` fails
   with `exists: checkout NAME already exists`. Never `rm` a checkout you
-  didn't open, because that deletes another run's work.
+  didn't open, nor `prune` unless the user asks, because that deletes
+  another run's work.
 - `rm` on a missing checkout fails with `not_found`; treat that as already
   removed. Record the names you open so a crashed run can still clean up.
 - `--json` (before the verb or among its arguments) prints the raw reply. For
@@ -171,8 +176,8 @@ is always pruned.
   and symlinks still reach the host.
 - Run `ovnfs new` from the user's folder, not from inside the mount. In a
   checkout's root, `new` forks that checkout (with a warning). It refuses
-  folders below a checkout's root, and refuses `--rev`, `--take` or `--rule`
-  on a checkout.
+  folders below a checkout's root and folders holding the mount, and refuses
+  `--rev`, `--take` or `--rule` on a checkout.
 - Keep the daemon's state directory on the same volume as your repositories.
   Otherwise `new` warns, and files are copied instead of cloned.
 - On macOS (NFSv3), changes to `cache`/`local` paths in the folder can take up

@@ -1230,24 +1230,35 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 // in between leaves files no checkout names, which reopening removes. The name
 // stays reserved until they are gone.
 func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
+	_, err := r.remove(ctx, args.Checkout, time.Time{})
+	return err
+}
+
+// remove is Rm, except that with picked set it keeps a checkout whose Touched is
+// no longer picked, one changed since prune picked it, and reports false.
+func (r *Registry) remove(ctx context.Context, name string, picked time.Time) (bool, error) {
 	if err := checkContext(ctx); err != nil {
-		return err
+		return false, err
 	}
-	name := args.Checkout
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return failure("io", "registry is closed")
+		return false, failure("io", "registry is closed")
 	}
 	h := r.checkouts[name]
 	if h == nil {
 		r.mu.Unlock()
-		return failure("not_found", "no checkout %s", name)
+		return false, failure("not_found", "no checkout %s", name)
 	}
 	r.operations.Add(1)
 	defer r.operations.Done()
 	h.freeze.Lock()
 	defer h.freeze.Unlock()
+	// The freeze lock waits out file calls in flight, so none touches it from here.
+	if !picked.IsZero() && !r.touched(h).Equal(picked) {
+		r.mu.Unlock()
+		return false, nil
+	}
 	h.retired.Store(true)
 	if r.config.Retire != nil {
 		r.config.Retire(name)
@@ -1275,13 +1286,13 @@ func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
 	}
 	r.mu.Unlock()
 	if err = errors.Join(err, removeErr); err != nil {
-		return coded(err)
+		return true, coded(err)
 	}
 	r.emit(Event{Name: "removed", Payload: map[string]any{"name": name}})
 	if r.config.Changed != nil {
 		r.config.Changed(name, false)
 	}
-	return nil
+	return true, nil
 }
 
 // Drop releases a snapshot and its retained stack.

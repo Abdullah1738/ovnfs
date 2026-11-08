@@ -1,6 +1,7 @@
 package checkout
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -469,22 +470,28 @@ func (r *Registry) moveRootLocked() {
 	r.rootTime = now
 }
 
-// Ls lists live checkouts and retained snapshots in name and id order.
-func (r *Registry) Ls() api.LsReply {
+// Ls lists the live checkouts args picks with their retained snapshots, or every
+// retained snapshot without a selection, in name and id order.
+func (r *Registry) Ls(ctx context.Context, args api.LsArgs) (api.LsReply, error) {
+	checkouts, err := r.pick(ctx, args.Select)
+	if err != nil {
+		return api.LsReply{}, err
+	}
+	all := args.Select == (api.Select{})
+	listed := make(map[string]bool, len(checkouts))
+	for _, c := range checkouts {
+		listed[c.Name] = true
+	}
+	reply := api.LsReply{Checkouts: checkouts, Snapshots: []api.Snapshot{}}
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	reply := api.LsReply{Checkouts: []api.Checkout{}, Snapshots: []api.Snapshot{}}
-	for _, h := range r.checkouts {
-		if !h.retired.Load() {
-			reply.Checkouts = append(reply.Checkouts, r.checkoutLocked(h))
+	for _, s := range r.snapshots {
+		if all || listed[s.meta.Checkout] {
+			reply.Snapshots = append(reply.Snapshots, snapshotOf(s.meta))
 		}
 	}
-	for _, s := range r.snapshots {
-		reply.Snapshots = append(reply.Snapshots, snapshotOf(s.meta))
-	}
-	sort.Slice(reply.Checkouts, func(i, j int) bool { return reply.Checkouts[i].Name < reply.Checkouts[j].Name })
+	r.mu.RUnlock()
 	sort.Slice(reply.Snapshots, func(i, j int) bool { return snapshotLess(reply.Snapshots[i].ID, reply.Snapshots[j].ID) })
-	return reply
+	return reply, nil
 }
 
 // Counts fills a status reply with retained object counts, including objects
@@ -507,12 +514,17 @@ func (r *Registry) Counts(s *api.Status) {
 // checkoutLocked describes a checkout for replies.
 func (r *Registry) checkoutLocked(h *checkoutRecord) api.Checkout {
 	empty, err := r.upperEmpty(h)
+	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: h.source(), Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, Dirty: err == nil && !empty, Created: h.meta.Created, Touched: r.touched(h)}
+}
+
+// source is the folder a checkout was opened from; for one attached from another
+// machine, that machine's folder as its offer named it.
+func (h *checkoutRecord) source() string {
 	meta := h.base.view.Meta()
-	src := meta.Dir
 	if meta.Remote != nil {
-		src = meta.Remote.Source
+		return meta.Remote.Source
 	}
-	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: src, Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, Dirty: err == nil && !empty, Created: h.meta.Created, Touched: r.touched(h)}
+	return meta.Dir
 }
 
 // touched is when a checkout last changed: through its folder (see

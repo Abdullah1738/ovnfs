@@ -125,6 +125,16 @@ func (f *fixture) newCheckout(dir, name string, rules ...string) api.NewReply {
 	return reply
 }
 
+// ls lists every checkout and snapshot.
+func (f *fixture) ls() api.LsReply {
+	f.t.Helper()
+	reply, err := f.reg.Ls(context.Background(), api.LsArgs{})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return reply
+}
+
 // read returns a checkout file's content, or "<absent>".
 func (f *fixture) read(checkout, p string) string {
 	f.t.Helper()
@@ -364,7 +374,7 @@ func TestForkAndReopen(t *testing.T) {
 	if got := f.read("parent-2", "a.txt"); got != "child edit" {
 		t.Fatalf("child after reopen = %q", got)
 	}
-	ls := f.reg.Ls()
+	ls := f.ls()
 	if len(ls.Checkouts) != 2 || len(ls.Snapshots) != 1 {
 		t.Fatalf("ls after reopen = %+v", ls)
 	}
@@ -432,7 +442,7 @@ func TestNewInsideMount(t *testing.T) {
 			t.Errorf("%s: err = %v, want %s", tt.name, err, tt.code)
 		}
 	}
-	if n := len(f.reg.Ls().Checkouts); n != 3 {
+	if n := len(f.ls().Checkouts); n != 3 {
 		t.Fatalf("checkouts = %d, want parent, child and parent-2", n)
 	}
 

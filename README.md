@@ -44,6 +44,8 @@ ovnfs new --rev main           # start from a revision instead of the working tr
 ovnfs attach app --to devbox   # the same checkout on another machine, fetched lazily
 ovnfs grep 'TODO' app          # search in the daemon, without traversing the mount
 ovnfs glob '*.go' app          # matching paths, recursively and ignore-aware
+ovnfs ls .                     # the checkouts of this folder
+ovnfs prune . --idle 7d        # remove those untouched for a week (--dry-run first)
 ```
 
 `ovnfs help` lists every verb. Verbs start the daemon when none is running;

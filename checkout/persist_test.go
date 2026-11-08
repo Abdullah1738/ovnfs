@@ -206,7 +206,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.open()
-		if ls := f.reg.Ls(); len(ls.Snapshots) != 0 || !ls.Checkouts[0].Dirty {
+		if ls := f.ls(); len(ls.Snapshots) != 0 || !ls.Checkouts[0].Dirty {
 			t.Fatalf("rolled back freeze left %+v", ls)
 		}
 		if got := f.read("app", "tracked.txt"); got != "changed\n" {
@@ -228,7 +228,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.open()
-			ls := f.reg.Ls()
+			ls := f.ls()
 			if len(ls.Checkouts) != 1 || ls.Checkouts[0].Dirty || len(ls.Snapshots) != 1 || ls.Snapshots[0].ID != snapshot {
 				t.Fatalf("rolled forward freeze = %+v", ls)
 			}
@@ -277,7 +277,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 func TestTouchedSurvivesStop(t *testing.T) {
 	f := newFixture(t)
 	f.newCheckout(folder(t, map[string]string{"a": "base"}), "c")
-	fresh := f.reg.Ls().Checkouts[0]
+	fresh := f.ls().Checkouts[0]
 	if !fresh.Touched.Equal(fresh.Created) {
 		t.Fatalf("fresh checkout touched %v, created %v", fresh.Touched, fresh.Created)
 	}
@@ -287,7 +287,7 @@ func TestTouchedSurvivesStop(t *testing.T) {
 	}
 	s.Touch()
 	s.Done()
-	touched := f.reg.Ls().Checkouts[0].Touched
+	touched := f.ls().Checkouts[0].Touched
 	if !touched.After(fresh.Created) {
 		t.Fatalf("touched %v, not after creation %v", touched, fresh.Created)
 	}
@@ -295,7 +295,7 @@ func TestTouchedSurvivesStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.open()
-	if got := f.reg.Ls().Checkouts[0].Touched; !got.Equal(touched) {
+	if got := f.ls().Checkouts[0].Touched; !got.Equal(touched) {
 		t.Fatalf("reopened touched %v, want %v", got, touched)
 	}
 }

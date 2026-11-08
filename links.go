@@ -252,7 +252,11 @@ func (l *links) captureDir(ctx context.Context, dir string) (string, error) {
 	if err != nil {
 		return "", &checkout.Error{Code: "not_found", Message: err.Error()}
 	}
-	for _, h := range l.reg.Ls().Checkouts {
+	ls, err := l.reg.Ls(ctx, api.LsArgs{})
+	if err != nil {
+		return "", err
+	}
+	for _, h := range ls.Checkouts {
 		if h.Source != root {
 			continue
 		}

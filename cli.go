@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -43,7 +44,7 @@ type command struct {
 func commands() []command {
 	return []command{
 		{"status", "", "show the running daemon", false, runStatus},
-		{"ls", "[CHECKOUT]", "list checkouts, or one checkout's snapshots", true, runLs},
+		{"ls", "[CHECKOUT|DIR] [--idle DUR] [--no-diff]", "list checkouts (of DIR: . or a path with /), or one checkout's snapshots", true, runLs},
 		{"new", "[DIR] [--name N] [--rev REV | --from SNAP] [--take SRC:PATH]... [--rule LINE]...", "open a checkout on a folder (default .), git revision, or snapshot", true, runNew},
 		{"run", "[DIR] [--rev REV] [--take SRC:PATH]... [--keep] [--on HOST] -- CMD...", "run a command in a disposable checkout (also --name, --rule, --remote-bin)", true, runRun},
 		{"fork", "CHECKOUT [--name N] [-m LABEL]", "snapshot a checkout and open a second checkout on it", true, runFork},
@@ -53,6 +54,7 @@ func commands() []command {
 		{"glob", "PATTERN [DIR|CHECKOUT] [--type file|dir|symlink] [--limit N] [--mtime]", "list matching paths in the daemon, bypassing the checkout mount", true, runGlob},
 		{"apply", "CHECKOUT [--dry-run] [--branch B]", "merge a checkout's source changes back into its folder", true, runApply},
 		{"rm", "CHECKOUT", "remove a checkout; its snapshots stay", true, runRm},
+		{"prune", "[DIR] [--idle DUR] [--no-diff] [--dry-run]", "remove the checkouts matching all given: of DIR, untouched for DUR, without changes; snapshots stay", true, runPrune},
 		{"drop", "SNAP", "release a snapshot", true, runDrop},
 		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", true, runExplain},
 		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", true, runPlan},
@@ -170,19 +172,35 @@ func call[T any](c *cli, op string, args any) (T, error) {
 	return reply, nil
 }
 
-// runLs lists checkouts, or the snapshots of one checkout.
+// runLs lists checkouts, those of a folder or picked by flags, or the snapshots
+// of one checkout. A path spelling (".", "..", a slash) makes the argument a
+// folder, so a checkout named after a folder beside it stays reachable by name.
 func runLs(c *cli, args []string) error {
-	pos, err := c.parse(c.flags("ls"), args, 0, 1)
+	fs := c.flags("ls")
+	var a api.LsArgs
+	selectFlags(fs, &a.Select)
+	pos, err := c.parse(fs, args, 0, 1)
 	if err != nil {
 		return err
 	}
-	r, err := call[api.LsReply](c, "ls", struct{}{})
+	name := ""
+	if len(pos) == 1 && !pathArg(pos[0]) {
+		name = pos[0]
+		if a.Select != (api.Select{}) {
+			return fmt.Errorf("ls: --idle and --no-diff pick checkouts, not snapshots of %s", name)
+		}
+	} else if len(pos) == 1 {
+		if a.Dir, err = filepath.Abs(pos[0]); err != nil {
+			return fmt.Errorf("ls: resolving %s: %w", pos[0], err)
+		}
+	}
+	r, err := call[api.LsReply](c, "ls", a)
 	if err != nil || c.json {
 		return err
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer tw.Flush()
-	if len(pos) == 0 {
+	if name == "" {
 		if len(r.Checkouts) == 0 {
 			return nil
 		}
@@ -198,7 +216,7 @@ func runLs(c *cli, args []string) error {
 	}
 	header := false
 	for _, s := range r.Snapshots {
-		if s.Checkout != pos[0] {
+		if s.Checkout != name {
 			continue
 		}
 		if !header {
@@ -210,6 +228,78 @@ func runLs(c *cli, args []string) error {
 			tree = abbrev(s.Tree, 12)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.ID, s.Label, stamp(s.Created), tree)
+	}
+	if !header && !slices.ContainsFunc(r.Checkouts, func(h api.Checkout) bool { return h.Name == name }) {
+		if isDirArg(name) {
+			return fmt.Errorf("ls: no checkout %s; for the folder, ls ./%s", name, name)
+		}
+		return fmt.Errorf("ls: no checkout %s", name)
+	}
+	return nil
+}
+
+// selectFlags registers the flags ls and prune pick checkouts by (see api.Select).
+func selectFlags(fs *flag.FlagSet, sel *api.Select) {
+	fs.Var((*seconds)(&sel.Idle), "idle", "only checkouts untouched for this long: 90m, 12h, 7d, 2w")
+	fs.BoolVar(&sel.NoDiff, "no-diff", false, "only checkouts without source changes since their base (an empty diff)")
+}
+
+// seconds is a duration flag held in seconds, as api fields are; besides Go
+// durations (90m, 12h) it takes whole days and weeks (7d, 2w).
+type seconds float64
+
+// String renders the duration for flag defaults.
+func (s *seconds) String() string { return time.Duration(float64(*s) * float64(time.Second)).String() }
+
+// Set parses one duration.
+func (s *seconds) Set(v string) error {
+	d, err := time.ParseDuration(v)
+	for suffix, unit := range map[string]time.Duration{"d": 24 * time.Hour, "w": 7 * 24 * time.Hour} {
+		if n, ok := strings.CutSuffix(v, suffix); ok {
+			var whole uint64
+			whole, err = strconv.ParseUint(n, 10, 12) // up to 4095 weeks, within a Duration
+			d = time.Duration(whole) * unit
+		}
+	}
+	if err != nil || d < 0 {
+		return fmt.Errorf("invalid duration %q", v)
+	}
+	*s = seconds(d.Seconds())
+	return nil
+}
+
+// runPrune removes the checkouts a folder and flags pick and prints their names.
+func runPrune(c *cli, args []string) error {
+	fs := c.flags("prune")
+	var a api.PruneArgs
+	selectFlags(fs, &a.Select)
+	fs.BoolVar(&a.DryRun, "dry-run", false, "print what would be removed; remove nothing")
+	pos, err := c.parse(fs, args, 0, 1)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 1 {
+		if a.Dir, err = filepath.Abs(pos[0]); err != nil {
+			return fmt.Errorf("prune: resolving %s: %w", pos[0], err)
+		}
+	}
+	if a.Select == (api.Select{}) {
+		return fmt.Errorf("prune: pick checkouts by DIR, --idle or --no-diff\n%s", c.usage())
+	}
+	r, err := call[api.PruneReply](c, "prune", a)
+	if err != nil || c.json {
+		return err
+	}
+	for _, h := range r.Removed {
+		fmt.Println(h.Name)
+	}
+	switch n := plural(len(r.Removed), "checkout", "checkouts"); {
+	case len(r.Removed) == 0:
+		fmt.Fprintln(os.Stderr, "no checkout matches")
+	case a.DryRun:
+		fmt.Fprintf(os.Stderr, "would remove %s\n", n)
+	default:
+		fmt.Fprintf(os.Stderr, "removed %s; snapshots stay until dropped\n", n)
 	}
 	return nil
 }
@@ -600,11 +690,16 @@ func runPlan(c *cli, args []string) error {
 
 // isDirArg reports whether a DIR|CHECKOUT argument names a folder rather than a checkout.
 func isDirArg(s string) bool {
-	if s == "." || s == ".." || strings.ContainsRune(s, '/') || strings.ContainsRune(s, filepath.Separator) {
+	if pathArg(s) {
 		return true
 	}
 	info, err := os.Stat(s)
 	return err == nil && info.IsDir()
+}
+
+// pathArg reports whether an argument is spelled as a path: ".", "..", or with a separator.
+func pathArg(s string) bool {
+	return s == "." || s == ".." || strings.ContainsRune(s, '/') || strings.ContainsRune(s, filepath.Separator)
 }
 
 // resolveTarget turns an optional DIR|CHECKOUT argument into exactly one of an absolute dir or a checkout name.

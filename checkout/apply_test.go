@@ -22,7 +22,7 @@ func TestApplyDryRunKeepsNoSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply --dry-run: %v", err)
 	}
-	if n := len(f.reg.Ls().Snapshots); n != 0 {
+	if n := len(f.ls().Snapshots); n != 0 {
 		t.Errorf("snapshots after a dry run = %d, want 0", n)
 	}
 	if dry.Snapshot.ID != "" {
@@ -39,7 +39,7 @@ func TestApplyDryRunKeepsNoSnapshot(t *testing.T) {
 	if len(real.Applied) != 1 || real.Applied[0].Path != "a.txt" || real.Snapshot.ID == "" {
 		t.Errorf("apply = %+v, want a.txt from a kept snapshot", real)
 	}
-	if n := len(f.reg.Ls().Snapshots); n != 1 {
+	if n := len(f.ls().Snapshots); n != 1 {
 		t.Errorf("snapshots after apply = %d, want 1", n)
 	}
 }
@@ -70,7 +70,7 @@ func TestApplyDryRunCanceledKeepsNoSnapshot(t *testing.T) {
 	if !errors.As(err, &public) || public.Code != "unavailable" {
 		t.Fatalf("canceled apply --dry-run: %v", err)
 	}
-	if n := len(f.reg.Ls().Snapshots); n != 0 {
+	if n := len(f.ls().Snapshots); n != 0 {
 		t.Errorf("snapshots after a canceled dry run = %d, want 0", n)
 	}
 }

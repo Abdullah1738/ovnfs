@@ -9,12 +9,12 @@ package api
 import "time"
 
 // Ops lists every operation the daemon serves, in CLI help order.
-var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "drop", "explain", "plan", "attach", "pull", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
+var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "attach", "pull", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
 
 // Features names optional request fields this daemon honors, so clients can rely on
-// them without a new protocol generation: "new.base" (NewArgs.Base) and
-// "diff.binary" (DiffArgs.Binary).
-var Features = []string{"new.base", "diff.binary"}
+// them without a new protocol generation: "new.base" (NewArgs.Base),
+// "diff.binary" (DiffArgs.Binary) and "ls.select" (LsArgs.Select).
+var Features = []string{"new.base", "diff.binary", "ls.select"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
@@ -70,7 +70,26 @@ type Usage struct {
 	Limit int64 `json:"limit"`
 }
 
-// LsReply lists live checkouts and retained snapshots.
+// Select picks checkouts for ls and prune: every criterion set must hold, and
+// the zero Select picks every checkout.
+type Select struct {
+	// Dir (absolute) picks the checkouts of folders related to it: the folder
+	// itself, a folder inside it, or the folder holding it. Inside the mount it
+	// picks the checkouts sharing the source of the checkout it is in.
+	Dir string `json:"dir,omitempty"`
+	// Idle picks checkouts untouched (Checkout.Touched) for at least this many seconds.
+	Idle float64 `json:"idle_s,omitempty"`
+	// NoDiff picks checkouts without source changes since their base: an empty diff.
+	NoDiff bool `json:"no_diff,omitempty"`
+}
+
+// LsArgs selects the checkouts ls lists.
+type LsArgs struct {
+	Select
+}
+
+// LsReply lists live checkouts and retained snapshots; under a selection, only
+// the checkouts picked and their snapshots.
 type LsReply struct {
 	Checkouts []Checkout `json:"checkouts"`
 	Snapshots []Snapshot `json:"snapshots"`
@@ -193,6 +212,19 @@ type ApplyReply struct {
 // RmArgs removes a checkout; its snapshots stay until dropped.
 type RmArgs struct {
 	Checkout string `json:"checkout"`
+}
+
+// PruneArgs removes the checkouts Select picks; their snapshots stay until
+// dropped. It needs a criterion: the zero Select is refused, not taken as all.
+// A checkout touched after it was picked stays.
+type PruneArgs struct {
+	Select
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// PruneReply lists the checkouts prune removed (or would remove, for a dry run).
+type PruneReply struct {
+	Removed []Checkout `json:"removed"`
 }
 
 // DropArgs releases a snapshot.
