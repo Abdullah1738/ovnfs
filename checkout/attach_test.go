@@ -466,6 +466,53 @@ func TestAttachFetchesLazily(t *testing.T) {
 	}
 }
 
+// TestMissingIsAllTheLinkServes: Missing lists each blob a remote checkout
+// still needs from its source once (files, symlinks and checkout edits; not
+// cache or local paths), and once those are fetched everything reads with the
+// link down.
+func TestMissingIsAllTheLinkServes(t *testing.T) {
+	src := newFixture(t)
+	dir := folder(t, map[string]string{"a/one.txt": "one", "dup.txt": "one", "b/two.txt": "two", ".env": "local", "node_modules/x.js": "x"})
+	if err := os.Symlink("a/one.txt", filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	src.newCheckout(dir, "app")
+	src.put("app", "a/new.txt", "written in the checkout")
+	l := attachOverPipe(t, src, "app")
+	key := LinkKey(l.offer.Node, l.offer.Source)
+	missing := l.reg.Missing(key)
+	var paths []string
+	for _, w := range missing {
+		paths = append(paths, w.Path)
+	}
+	// dup.txt shares a/one.txt's blob.
+	if want := []string{"a/new.txt", "a/one.txt", "b/two.txt", "link"}; !slices.Equal(paths, want) {
+		t.Fatalf("missing %v, want %v", paths, want)
+	}
+	if err := l.reg.config.Fetch(context.Background(), key, missing); err != nil {
+		t.Fatal(err)
+	}
+	if left := l.reg.Missing(key); len(left) != 0 {
+		t.Fatalf("still missing after fetching: %v", left)
+	}
+
+	l.stop()
+	dst := &fixture{t: t, reg: l.reg}
+	for p, want := range map[string]string{"a/one.txt": "one", "dup.txt": "one", "b/two.txt": "two", "a/new.txt": "written in the checkout"} {
+		if got := dst.read(l.name, p); got != want {
+			t.Errorf("%s with the link down = %q, want %q", p, got, want)
+		}
+	}
+	view, err := l.reg.Enter(l.name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Done()
+	if target, err := view.FS.Readlink("link"); err != nil || target != "a/one.txt" {
+		t.Fatalf("readlink with the link down = %q, %v", target, err)
+	}
+}
+
 // pushedRepo makes a repository folder whose commit is on a bare upstream, then
 // edits one tracked file and adds an untracked one. It returns the folder and the upstream.
 func pushedRepo(t *testing.T) (dir, upstream string) {

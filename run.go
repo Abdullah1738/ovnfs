@@ -119,7 +119,7 @@ func runRemote(c *cli, o runOptions, cwd string, signals <-chan os.Signal) error
 	}
 	fmt.Fprintf(os.Stderr, "lane %s → %s:%s\n", r.Checkout, o.on, r.RemotePath)
 	remoteDir := path.Join(r.RemotePath, filepath.ToSlash(runRelativeDir(root, cwd)))
-	cmd := exec.Command("ssh", "-o", "BatchMode=yes", o.on, runRemoteCommand(remoteDir, o.command))
+	cmd := sshCommand(o.on, runRemoteCommand(remoteDir, o.command))
 	return runChild(cmd, signals)
 }
 
@@ -161,14 +161,13 @@ func runLaneName(root string) string {
 
 // runRemoteCommand protects every argument from the remote login shell.
 func runRemoteCommand(dir string, args []string) string {
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	var b strings.Builder
 	b.WriteString("cd ")
-	b.WriteString(quote(dir))
+	b.WriteString(shellQuote(dir))
 	b.WriteString(" && exec")
 	for _, arg := range args {
 		b.WriteByte(' ')
-		b.WriteString(quote(arg))
+		b.WriteString(shellQuote(arg))
 	}
 	return b.String()
 }

@@ -4,6 +4,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -94,8 +95,9 @@ func run(args []string) error {
 		printUsage(os.Stdout)
 		return nil
 	case "version":
-		fmt.Println(version())
-		return nil
+		// version reads no configuration, so it runs where none parses.
+		c.cmd, _ = lookupCommand(verb)
+		return c.cmd.run(c, rest)
 	}
 	if err := c.resolveDirs(); err != nil {
 		return err
@@ -130,15 +132,30 @@ func (c *cli) resolveDirs() error {
 	return nil
 }
 
-// version names this build: the module version Go stamped into it (the release
-// tag under go install …@vX.Y.Z, a VCS pseudo-version when built in a clone),
-// then the toolchain and platform.
-func version() string {
-	v := "(devel)"
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
-		v = bi.Main.Version
+// build names this binary as `ovnfs --json version` prints it: the module
+// version Go stamped into it (the release tag under go install …@vX.Y.Z, a VCS
+// pseudo-version when built in a clone, else "(devel)"), the toolchain and the platform.
+type build struct {
+	Version string `json:"version"`
+	Go      string `json:"go"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+}
+
+// runVersion prints this binary's build on one line, or as JSON under --json.
+func runVersion(c *cli, args []string) error {
+	if _, err := c.parse(c.flags("version"), args, 0, 0); err != nil {
+		return err
 	}
-	return fmt.Sprintf("ovnfs %s %s %s/%s", v, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	b := build{Version: "(devel)", Go: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		b.Version = bi.Main.Version
+	}
+	if c.json {
+		return json.NewEncoder(os.Stdout).Encode(b)
+	}
+	fmt.Printf("ovnfs %s %s %s/%s\n", b.Version, b.Go, b.OS, b.Arch)
+	return nil
 }
 
 // printUsage lists every verb, daemon operations first in api.Ops order.
@@ -159,7 +176,6 @@ func printUsage(w io.Writer) {
 	}
 	fmt.Fprintf(tw, "  serve [-proto nfs|smb|fuse|winfsp] [-listen ADDR]\trun the daemon in the foreground\n")
 	fmt.Fprintf(tw, "  help\tshow this help\n")
-	fmt.Fprintf(tw, "  version\tprint the version and toolchain this binary was built from\n")
 	tw.Flush()
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "options (before the verb or among its arguments):")

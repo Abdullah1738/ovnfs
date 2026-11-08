@@ -35,7 +35,8 @@ link. Commits stay in the mirror across restarts and for later attaches; delete
 `mirror.git` to reclaim its space.
 
 The link reconnects with backoff while the source daemon runs. Without it,
-cached content stays readable and uncached reads fail with EIO. A slow download
+cached content stays readable and uncached reads fail with EIO; [push](#push)
+first to cache all of it. A slow download
 for an open does not hold the overlay's namespace lock: unrelated reads and
 writes can proceed. Re-attaching the same snapshot reuses the remote checkout.
 A newer snapshot updates the same
@@ -57,6 +58,35 @@ usual path order. If the link fails a batch, grep reads those files through the
 checkout instead, fetching them as any read does. Searching repeatedly costs a
 round trip each time, since scanned files are never fetched.
 
+## Send
+
+`ovnfs send [DIR|CHECKOUT] HOST[:PATH]` attaches to a machine you reach by ssh,
+preparing it first, so one command takes a folder to a fresh box:
+
+```sh
+ovnfs send . devbox:src/app    # devbox:~/src/app now shows this folder
+```
+
+1. Without ovnfs on HOST (`--remote-bin`, else on its PATH, else
+   `~/.local/bin/ovnfs`), send downloads the release binary for HOST's
+   `uname` (Linux or macOS, amd64 or arm64) here from `build.stencil.so` and
+   installs it as `~/.local/bin/ovnfs` over ssh, so HOST needs no network
+   access of its own.
+   The release is this binary's own, so both ends speak the same protocols,
+   or the latest one when this is a development build.
+2. It starts HOST's daemon and, unless HOST is already a member, joins it to
+   this machine's [mesh](#mesh), setting one up here first if this machine is
+   in none. The two machines must then reach each other directly or through
+   the relay.
+3. It attaches over the mesh. The remote name defaults to the folder's name,
+   as for `run --on`, so repeated sends keep one lane name.
+4. With `:PATH`, it points a symlink at PATH on HOST (relative to its home;
+   `~/` expands there) to the attached checkout, replacing one from an earlier
+   send. Anything else at PATH stops send before it attaches.
+
+ssh runs in batch mode, so HOST must accept a key without prompting, and the
+scripts send runs there need a POSIX `sh`.
+
 ## Pull
 
 `ovnfs pull CHECKOUT [--from HOST] [--dry-run]` brings the attached remote
@@ -71,6 +101,34 @@ and the link must be up.
 
 Then `ovnfs apply CHECKOUT` merges the local checkout back into the folder.
 Attaching a folder prints the local checkout name to use for pull and apply.
+
+## Push
+
+`ovnfs push [CHECKOUT] [--to HOST]` makes attached machines independent of this
+one: each fetches, over its link, every blob it would still read from here, so
+its checkouts keep working after this machine sleeps, leaves the network or
+stops its daemon.
+
+```sh
+ovnfs attach app --to devbox
+ovnfs push app                 # devbox now holds all of app's source content
+```
+
+Without arguments push covers every attachment; `CHECKOUT` and `--to` narrow
+it. On the remote it covers every checkout and snapshot attached from the same
+source folder, whichever lane holds it, including symlinks and files only the
+local checkout had; files its [git mirror](#committed-content-from-the-git-upstream)
+holds, cache roots, and local or hidden paths stay out. The remote fetches with
+ordinary verified requests, in batches of at most 8 MiB or 1024 blobs, so its
+reads keep being answered during a long push. On a terminal, push draws one
+progress line on stderr summing its attachments; `subscribe` streams the same
+reports as `pushing` events (`checkout`, `to`, `blobs`, `bytes`, `total_blobs`,
+`total_bytes`), the totals first and then at most four a second per
+attachment. Each attachment reports the blobs and bytes it fetched; one that
+is disconnected or fails is reported, with how far it got, without stopping the
+others, and push then exits 1. Blobs fetched before a failure or
+an interrupt stay, so pushing again resumes. Push changes nothing the remote's
+checkouts show; edits made here after the attach still need another `attach`.
 
 ## Share
 

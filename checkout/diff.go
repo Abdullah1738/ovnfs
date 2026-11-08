@@ -465,7 +465,8 @@ func head(b []byte) []byte { return b[:min(len(b), 8000)] }
 // text files changed on both sides are merged, with conflict markers where both changed
 // the same lines, and everything else is a conflict left untouched. A path whose markers
 // the user resolved merges later changes against the version it was marked with
-// (see checkoutMeta.MergeBases). With Branch it instead copies the checkout's commits.
+// (see checkoutMeta.MergeBases). Applies into one folder take turns, each merging
+// against what the last one wrote. With Branch it instead copies the checkout's commits.
 func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.ApplyReply, err error) {
 	h, err := r.lookupCheckout(args.Checkout)
 	if err != nil {
@@ -539,6 +540,11 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.App
 		return api.ApplyReply{}, coded(err)
 	}
 	maps.Copy(from, bases)
+	release, err := r.applying.lock(ctx, root)
+	if err != nil {
+		return api.ApplyReply{}, err
+	}
+	defer release()
 	s := sides{ours: "in the source folder", theirs: "in the checkout",
 		labels: git.Labels{Ours: "folder", Base: "base", Theirs: "checkout " + h.meta.Name}}
 	seen := map[string]bool{}

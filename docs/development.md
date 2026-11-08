@@ -21,7 +21,10 @@ Linux and macOS, real FUSE mounts on Linux, real WinFsp drives on Windows).
 Pushing a `v*` tag runs the same checks, then
 [`release.yml`](../.github/workflows/release.yml) has GoReleaser
 ([`.goreleaser.yaml`](../.goreleaser.yaml)) publish a GitHub release with
-archives for Linux, macOS and Windows on amd64 and arm64:
+archives for Linux, macOS and Windows on amd64 and arm64, and
+[`internal/release/upload`](../internal/release/upload/main.go) publish the
+same binaries to Stencil's build service, `build.stencil.so`, which takes the
+run's GitHub OIDC token as proof of the tag:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
@@ -29,6 +32,14 @@ git tag v0.2.0 && git push origin v0.2.0
 
 Go stamps the tag into the build info, so `ovnfs version` reports it for release
 archives and `go install …@v0.2.0` alike, and a VCS pseudo-version in a clone.
+
+[`install.sh`](../install.sh) and [`install.ps1`](../install.ps1), which
+`https://stencil.so/ovnfs.sh` and `/ovnfs.ps1` redirect to on `main`, `update`
+and `send` download release binaries from the build service and check their
+SHA-256 there; `OVNFS_BUILD_URL` points all of them, and the upload, at another
+origin. The service hosts `ovnfs` because its product table
+(`apps/build/products.go` in the Stencil repository) lets `stencil-hq/ovnfs`
+publish `v<version>` tags.
 
 ## Benchmark
 

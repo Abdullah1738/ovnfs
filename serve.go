@@ -184,7 +184,7 @@ func serve(args []string) error {
 	var smbServer *smb.Server
 	var checkoutShares *shares
 	userHome, _ := os.UserHomeDir()
-	lk := newLinks()
+	lk := newLinks(hub.emit)
 	md, err := openMesh(*state, lk)
 	if err != nil {
 		return fmt.Errorf("mesh: %w", err)
@@ -333,14 +333,6 @@ func mountInProcess(proto string, e *export.Export, mount string) (inProcessMoun
 			return nil, fmt.Errorf("mount: %w", err)
 		}
 		return srv, nil
-	}
-	// The state lock is ours, so a dead FUSE mount here is an earlier run's
-	// that was killed; without this a restart fails until someone unmounts it.
-	if err := ovnfuse.ClearStale(mount); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(mount, 0o755); err != nil {
-		return nil, fmt.Errorf("mount directory: %w", err)
 	}
 	srv, err := ovnfuse.Mount(e, mount, ovnfuse.Options{})
 	if err != nil {

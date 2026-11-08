@@ -1,14 +1,15 @@
 package fuse
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
-	"strings"
-	"syscall"
 
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/stencil-hq/ovnfs/export"
+	"golang.org/x/sys/unix"
 )
 
 // Server is an active FUSE mount of the export root.
@@ -17,10 +18,18 @@ type Server struct {
 	mountpoint string
 }
 
-// Mount serves e at the existing directory mountpoint until Unmount. It
-// mounts through fusermount3 (or fusermount), so it needs no root where the
-// distribution allows unprivileged FUSE mounts.
+// Mount serves e at mountpoint until Unmount, creating the directory. A dead
+// mount left there by a server that was killed before it unmounted (kill -9,
+// the OOM killer) is detached first, since it fails both mkdir and a new
+// mount. It mounts through fusermount3 (or fusermount), so it needs no root
+// where the distribution allows unprivileged FUSE mounts.
 func Mount(e *export.Export, mountpoint string, opts Options) (*Server, error) {
+	if err := detachDead(mountpoint); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		return nil, fmt.Errorf("fuse: mount directory: %w", err)
+	}
 	fsName := opts.FsName
 	if fsName == "" {
 		fsName = "ovnfs"
@@ -46,6 +55,29 @@ func Mount(e *export.Export, mountpoint string, opts Options) (*Server, error) {
 	return &Server{srv: srv, mountpoint: mountpoint}, nil
 }
 
+// detachDead lazily unmounts mountpoint when it is a FUSE mount whose server
+// is gone, which the kernel answers with ENOTCONN; anything else, a live mount
+// included, is left alone. Lazily, because processes may still hold the dead
+// mount as their working directory.
+func detachDead(mountpoint string) error {
+	// Forced: a plain stat is answered from attributes the kernel still caches
+	// for up to TTL after the server died.
+	var stx unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, mountpoint, unix.AT_STATX_FORCE_SYNC, unix.STATX_TYPE, &stx); !errors.Is(err, unix.ENOTCONN) {
+		return nil
+	}
+	bin, err := exec.LookPath("fusermount3")
+	if err != nil {
+		if bin, err = exec.LookPath("fusermount"); err != nil {
+			return fmt.Errorf("fuse: detach dead mount %s: %w", mountpoint, err)
+		}
+	}
+	if out, err := exec.Command(bin, "-u", "-z", mountpoint).CombinedOutput(); err != nil {
+		return fmt.Errorf("fuse: detach dead mount %s: %w: %s", mountpoint, err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
 // Unmount detaches the mount; it fails while files on it are in use.
 func (s *Server) Unmount() error {
 	if err := s.srv.Unmount(); err != nil {
@@ -56,27 +88,3 @@ func (s *Server) Unmount() error {
 
 // Wait blocks until the mount is gone, by Unmount or an external umount.
 func (s *Server) Wait() { s.srv.Wait() }
-
-// ClearStale detaches a dead FUSE mount left at mountpoint by a daemon that
-// exited without unmounting (killed, or crashed). Such a mount answers every
-// call with ENOTCONN, so the mount point can be neither created nor mounted
-// over until it is detached. It asks with statfs, which the kernel always
-// sends to the server: stat can be answered from the attribute cache for a
-// second after the server died. A lazy unmount detaches it at once; processes
-// still holding a path below it keep a dead handle. A live mount, whoever
-// serves it, is left alone.
-func ClearStale(mountpoint string) error {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(mountpoint, &st); !errors.Is(err, syscall.ENOTCONN) {
-		return nil
-	}
-	var errs []error
-	for _, helper := range []string{"fusermount3", "fusermount"} {
-		out, err := exec.Command(helper, "-u", "-z", mountpoint).CombinedOutput()
-		if err == nil {
-			return nil
-		}
-		errs = append(errs, fmt.Errorf("%s: %w: %s", helper, err, strings.TrimSpace(string(out))))
-	}
-	return fmt.Errorf("fuse: detach stale mount %s: %w", mountpoint, errors.Join(errs...))
-}

@@ -194,7 +194,36 @@ func (b *Base) Uncached(p string) (Want, bool) {
 	}
 	p = cleanPath(p)
 	e, ok := b.sources[p]
-	if !ok || !e.mode.IsRegular() || b.config.Store.Has(e.oid) || b.mirrored(e.oid) {
+	if !ok || !e.mode.IsRegular() {
+		return Want{}, false
+	}
+	return b.want(p, e)
+}
+
+// Missing lists, in no particular order, the blobs a remote base would still
+// fetch over the link: those of its regular files and symlinks that neither the
+// store nor the git mirror holds. Once they are fetched, the base reads without
+// the link. Local bases miss nothing.
+func (b *Base) Missing() []Want {
+	if b.remote == nil {
+		return nil
+	}
+	var wants []Want
+	for p, e := range b.sources {
+		if !e.mode.IsRegular() && e.mode&os.ModeSymlink == 0 {
+			continue
+		}
+		if w, ok := b.want(p, e); ok {
+			wants = append(wants, w)
+		}
+	}
+	return wants
+}
+
+// want is the fetch the blob of entry e at p needs, unless the store or the
+// git mirror already holds it.
+func (b *Base) want(p string, e entry) (Want, bool) {
+	if b.config.Store.Has(e.oid) || b.mirrored(e.oid) {
 		return Want{}, false
 	}
 	return Want{ID: e.oid, Path: p, Size: b.capture.Info[p].Size}, true

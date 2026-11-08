@@ -122,13 +122,13 @@ func (r *Registry) MergePull(ctx context.Context, args api.PullArgs, from store.
 // it goes; it also returns the paths it wrote, which the caller invalidates
 // once the locks are released.
 func (r *Registry) mergePull(ctx context.Context, h *checkoutRecord, args api.PullArgs, pulled peer.Pulled, bases map[string]store.File) (reply api.PullReply, placed []string, err error) {
+	h.freeze.Lock()
+	defer h.freeze.Unlock()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.checkouts[args.Checkout] != h || h.retired.Load() {
 		return api.PullReply{}, nil, failure("not_found", "no checkout %s", args.Checkout)
 	}
-	h.freeze.Lock()
-	defer h.freeze.Unlock()
 	if r.closed {
 		return api.PullReply{}, nil, failure("io", "registry is closed")
 	}

@@ -68,7 +68,7 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 			return s, nil
 		})
 	case "ls":
-		return dispatch(ctx, raw, func(context.Context, struct{}) (api.LsReply, error) { return h.reg.Ls(), nil })
+		return dispatch(ctx, raw, h.reg.Ls)
 	case "new":
 		return dispatch(ctx, raw, h.reg.New)
 	case "fork":
@@ -85,6 +85,8 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 		return dispatch(ctx, raw, h.reg.Apply)
 	case "rm":
 		return dispatch(ctx, raw, done(h.reg.Rm))
+	case "prune":
+		return dispatch(ctx, raw, h.reg.Prune)
 	case "drop":
 		return dispatch(ctx, raw, done(h.reg.Drop))
 	case "explain":
@@ -95,6 +97,8 @@ func (h *opsHandler) Call(ctx context.Context, op string, raw json.RawMessage) (
 		return dispatch(ctx, raw, h.links.attach)
 	case "pull":
 		return dispatch(ctx, raw, h.links.pull)
+	case "push":
+		return dispatch(ctx, raw, h.links.push)
 	case "share":
 		return dispatch(ctx, raw, h.shares.Share)
 	case "mesh.setup":

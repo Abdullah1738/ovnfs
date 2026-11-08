@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,6 +44,32 @@ func (r *Registry) remoteConfig(id string, remote *base.Remote) base.Config {
 		return r.config.Fetch(ctx, key, wants)
 	}
 	return config
+}
+
+// Missing lists, by path and each id once, the blobs that bases attached
+// through the link key still read through it (see base.Base.Missing): every
+// checkout and snapshot attached from that source, whichever lane holds it.
+// A push fetches them so this machine can read all of them without the link.
+func (r *Registry) Missing(key string) []base.Want {
+	r.mu.RLock()
+	var views []*base.Base
+	for _, b := range r.bases {
+		if m := b.view.Meta().Remote; m != nil && LinkKey(m.Node, m.Source) == key {
+			views = append(views, b.view)
+		}
+	}
+	r.mu.RUnlock()
+	var wants []base.Want
+	for _, v := range views {
+		wants = append(wants, v.Missing()...)
+	}
+	slices.SortFunc(wants, func(x, y base.Want) int { return strings.Compare(x.Path, y.Path) })
+	seen := make(map[store.OID]bool, len(wants))
+	return slices.DeleteFunc(wants, func(w base.Want) bool {
+		dup := seen[w.ID]
+		seen[w.ID] = true
+		return dup
+	})
 }
 
 // offerOrigins names, for each repository of a capture with an upstream, a
@@ -169,18 +196,30 @@ func (r *Registry) AttachRemote(ctx context.Context, o peer.Offer) (api.Checkout
 	if name == "" {
 		name = sanitizeName(path.Base(o.Source))
 	}
-	r.mu.Lock()
-	for _, h := range r.checkouts {
-		m := h.base.view.Meta()
-		if m.Remote == nil || m.Remote.Node != o.Node || m.Remote.Source != o.Source || h.meta.Name != name {
-			continue
-		}
-		if m.Tree == o.Tree {
+	// A checkout of that name attached from the same source takes the offer in
+	// place while its upper holds only cache paths.
+	r.mu.RLock()
+	h := r.checkouts[name]
+	if h != nil {
+		switch m := h.base.view.Meta(); {
+		case m.Remote == nil || m.Remote.Node != o.Node || m.Remote.Source != o.Source:
+			h = nil
+		case m.Tree == o.Tree:
 			reply := r.checkoutLocked(h)
+			r.mu.RUnlock()
+			return reply, nil
+		}
+	}
+	r.mu.RUnlock()
+	if h == nil || r.freezeAndLock(h) != nil {
+		r.mu.Lock()
+	} else {
+		if h.base.view.Meta().Tree == o.Tree {
+			reply := r.checkoutLocked(h)
+			h.freeze.Unlock()
 			r.mu.Unlock()
 			return reply, nil
 		}
-		h.freeze.Lock()
 		clean, err := r.cacheOnlyLocked(h)
 		if err != nil {
 			h.freeze.Unlock()

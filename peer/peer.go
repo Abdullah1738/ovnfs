@@ -25,6 +25,13 @@
 // or 'F' with an error message. Metadata is JSON Pulled without Data; blobs
 // travel as raw bytes, each chunk at most 256 KiB. Pulls and fetches interleave.
 //
+// Source-initiated pushes use 'U' (tag): the remote then fetches, with ordinary
+// requests in batches, every blob its checkouts attached from the source still
+// lack. It reports 'Y' progress (tag, then blobs, bytes, total blobs and total
+// bytes as u64) once before fetching and then at most every 250 ms, and ends
+// with 'V' (the same fields, final) or 'G' (tag and an error message). 'K'
+// cancels a push as it does a pull; pull and push tags share one sequence.
+//
 // Tags are chosen by the remote, one per requested blob. The source streams up
 // to four blobs at once, interleaving their chunks; a blob is complete once
 // its announced size has arrived. Every frame other than the offer is capped
@@ -52,6 +59,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"time"
 
 	"github.com/stencil-hq/ovnfs/api"
@@ -62,7 +70,7 @@ import (
 )
 
 // Version is the link protocol version; both sides refuse others.
-const Version = 4
+const Version = 5
 
 // Entry is one leaf of an offered snapshot (blob, symlink, or empty dir as store.ModeDir/store.EmptyTree).
 type Entry struct {
@@ -99,6 +107,37 @@ type Pulled struct {
 	Data     map[store.OID][]byte  `json:"data"`
 }
 
+// Pushed is how far a push got: the blobs fetched so far and their offered
+// sizes, out of those the remote lacked when it started.
+type Pushed struct {
+	Blobs, Bytes           int64
+	TotalBlobs, TotalBytes int64
+}
+
+// appendPushed encodes p as the four u64 of a progress or completion frame.
+func appendPushed(b []byte, p Pushed) []byte {
+	for _, n := range []int64{p.Blobs, p.Bytes, p.TotalBlobs, p.TotalBytes} {
+		b = binary.BigEndian.AppendUint64(b, uint64(n))
+	}
+	return b
+}
+
+// decodePushed reads the four u64 of a progress or completion frame.
+func decodePushed(body []byte) (Pushed, error) {
+	if len(body) != 32 {
+		return Pushed{}, errors.New("protocol error: invalid push progress")
+	}
+	var n [4]int64
+	for i := range n {
+		v := binary.BigEndian.Uint64(body[8*i:])
+		if v > math.MaxInt64 {
+			return Pushed{}, errors.New("protocol error: push progress out of range")
+		}
+		n[i] = int64(v)
+	}
+	return Pushed{Blobs: n[0], Bytes: n[1], TotalBlobs: n[2], TotalBytes: n[3]}, nil
+}
+
 // Accepted is the remote side's answer to an offer.
 type Accepted struct {
 	Checkout string `json:"checkout"`
@@ -116,13 +155,17 @@ const (
 	frameError   byte = 'X'
 	frameBye     byte = 'Q'
 	framePull    byte = 'P' // tag and base tree id
-	frameCancel  byte = 'K' // pull tag
+	framePush    byte = 'U' // tag
+	frameCancel  byte = 'K' // pull or push tag
 	frameMeta    byte = 'M' // tag and metadata chunk
 	frameMetaEnd byte = 'N' // tag, ends metadata
 	frameBlob    byte = 'J' // tag, blob id, size
 	frameChunk   byte = 'L' // tag and blob chunk
 	framePulled  byte = 'E' // tag, completes pull
 	framePullErr byte = 'F' // tag and error message
+	framePushing byte = 'Y' // tag and push progress
+	framePushed  byte = 'V' // tag and final push progress; completes push
+	framePushErr byte = 'G' // tag and error message
 	frameSearch  byte = 'S' // tag, query and wanted blobs
 	frameAbort   byte = 'C' // search tag
 	frameHits    byte = 'H' // tag and results chunk

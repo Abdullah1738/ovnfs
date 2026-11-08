@@ -125,6 +125,16 @@ func (f *fixture) newCheckout(dir, name string, rules ...string) api.NewReply {
 	return reply
 }
 
+// ls lists every checkout and snapshot.
+func (f *fixture) ls() api.LsReply {
+	f.t.Helper()
+	reply, err := f.reg.Ls(context.Background(), api.LsArgs{})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return reply
+}
+
 // read returns a checkout file's content, or "<absent>".
 func (f *fixture) read(checkout, p string) string {
 	f.t.Helper()
@@ -364,7 +374,7 @@ func TestForkAndReopen(t *testing.T) {
 	if got := f.read("parent-2", "a.txt"); got != "child edit" {
 		t.Fatalf("child after reopen = %q", got)
 	}
-	ls := f.reg.Ls()
+	ls := f.ls()
 	if len(ls.Checkouts) != 2 || len(ls.Snapshots) != 1 {
 		t.Fatalf("ls after reopen = %+v", ls)
 	}
@@ -410,12 +420,19 @@ func TestNewInsideMount(t *testing.T) {
 		t.Fatalf("new through a symlink = %+v, %v", linked, err)
 	}
 
+	// A repository holding the mount: new on a folder in it resolves to its root.
+	holder := filepath.Dir(f.mount)
+	write(t, filepath.Join(holder, "src", "a.txt"), "a")
+	gitRun(t, holder, "init", "-q")
+
 	for _, tt := range []struct {
 		name string
 		args api.NewArgs
 		code string
 	}{
 		{"mount root", api.NewArgs{Dir: f.mount}, "invalid"},
+		{"folder holding the mount", api.NewArgs{Dir: holder}, "invalid"},
+		{"repository holding the mount", api.NewArgs{Dir: filepath.Join(holder, "src")}, "invalid"},
 		{"below a checkout", api.NewArgs{Dir: filepath.Join(f.mount, "parent", "sub")}, "invalid"},
 		{"folder-only flags", api.NewArgs{Dir: filepath.Join(f.mount, "parent"), Rules: []string{"local sub/**"}}, "invalid"},
 		{"no such checkout", api.NewArgs{Dir: filepath.Join(f.mount, "gone")}, "not_found"},
@@ -425,8 +442,23 @@ func TestNewInsideMount(t *testing.T) {
 			t.Errorf("%s: err = %v, want %s", tt.name, err, tt.code)
 		}
 	}
-	if n := len(f.reg.Ls().Checkouts); n != 3 {
+	if n := len(f.ls().Checkouts); n != 3 {
 		t.Fatalf("checkouts = %d, want parent, child and parent-2", n)
+	}
+
+	// A case-insensitive volume reaches the mount in another letter case, which
+	// only file identity tells from an outside folder.
+	upper := strings.ToUpper(f.mount)
+	if !exists(upper) {
+		return
+	}
+	variant, err := f.reg.New(ctx, api.NewArgs{Dir: filepath.Join(upper, "parent"), Name: "variant"})
+	if err != nil || variant.Checkout.Parent == "" || variant.Checkout.Base != parent.Base {
+		t.Fatalf("new on a checkout in another letter case = %+v, %v", variant, err)
+	}
+	_, err = f.reg.New(ctx, api.NewArgs{Dir: strings.ToUpper(holder)})
+	if coded := (*Error)(nil); !errors.As(err, &coded) || coded.Code != "invalid" {
+		t.Fatalf("folder holding the mount in another letter case: err = %v, want invalid", err)
 	}
 }
 
@@ -517,5 +549,75 @@ func TestRepoCheckoutAndPlan(t *testing.T) {
 	}
 	if checkoutPlan.Origin.Files != 2 || checkoutPlan.Here.Files != 2 {
 		t.Fatalf("checkout plan = origin %+v here %+v", checkoutPlan.Origin, checkoutPlan.Here)
+	}
+}
+
+// TestFreezeWaitsOutsideRegistryLock checks that snap, fork and rm wait out a
+// checkout's file calls without the registry lock, so a slow call stalls only
+// its own checkout and every other one keeps serving.
+func TestFreezeWaitsOutsideRegistryLock(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"a.txt": "a"})
+	f.newCheckout(dir, "other")
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name string
+		op   func(name string) error
+	}{
+		{"snap", func(name string) error { _, err := f.reg.Snap(ctx, api.SnapArgs{Checkout: name}); return err }},
+		{"fork", func(name string) error {
+			_, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: name, Name: name + "-child"})
+			return err
+		}},
+		{"rm", func(name string) error { return f.reg.Rm(ctx, api.RmArgs{Checkout: name}) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f.newCheckout(dir, tt.name)
+			call, err := f.reg.Enter(tt.name) // a slow file call in flight
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.reg.mu.RLock()
+			h := f.reg.checkouts[tt.name]
+			f.reg.mu.RUnlock()
+			done := make(chan error, 1)
+			go func() { done <- tt.op(tt.name) }()
+			// A writer queued for the freeze lock makes TryRLock fail.
+			for deadline := time.Now().Add(5 * time.Second); h.freeze.TryRLock(); {
+				h.freeze.RUnlock()
+				select {
+				case err := <-done:
+					call.Done()
+					t.Fatalf("%s finished during a file call: %v", tt.name, err)
+				default:
+				}
+				if time.Now().After(deadline) {
+					call.Done()
+					t.Fatalf("%s never waited for the file call", tt.name)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			entered := make(chan error, 1)
+			go func() {
+				s, err := f.reg.Enter("other")
+				if err == nil {
+					s.Done()
+				}
+				entered <- err
+			}()
+			select {
+			case err := <-entered:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				call.Done()
+				t.Fatalf("checkout other stalled while %s waited for a file call", tt.name)
+			}
+			call.Done()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

@@ -34,7 +34,8 @@ substantially slows cold Cargo builds on macOS.
 
 `serve -proto fuse` (the Linux default) mounts through `fusermount3`, with the
 export's stable node ids as inode numbers and one-second entry and attribute
-timeouts.
+timeouts. A mount left behind by a daemon that died without unmounting (`kill
+-9`, the OOM killer) is detached when the next one starts.
 
 ## SMB
 

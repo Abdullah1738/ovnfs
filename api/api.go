@@ -9,12 +9,12 @@ package api
 import "time"
 
 // Ops lists every operation the daemon serves, in CLI help order.
-var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "drop", "explain", "plan", "attach", "pull", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
+var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "attach", "pull", "push", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
 
 // Features names optional request fields this daemon honors, so clients can rely on
-// them without a new protocol generation: "new.base" (NewArgs.Base) and
-// "diff.binary" (DiffArgs.Binary).
-var Features = []string{"new.base", "diff.binary"}
+// them without a new protocol generation: "new.base" (NewArgs.Base),
+// "diff.binary" (DiffArgs.Binary) and "ls.select" (LsArgs.Select).
+var Features = []string{"new.base", "diff.binary", "ls.select"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
@@ -26,6 +26,7 @@ type Checkout struct {
 	Git     bool      `json:"git"`              // a working .git exists inside the checkout
 	Dirty   bool      `json:"dirty"`            // changes since the last snapshot
 	Created time.Time `json:"created"`
+	Touched time.Time `json:"touched"` // last change to its files or git state; Created until then
 }
 
 // Snapshot is an immutable state of a checkout; Tree is its content id once hashed.
@@ -69,7 +70,26 @@ type Usage struct {
 	Limit int64 `json:"limit"`
 }
 
-// LsReply lists live checkouts and retained snapshots.
+// Select picks checkouts for ls and prune: every criterion set must hold, and
+// the zero Select picks every checkout.
+type Select struct {
+	// Dir (absolute) picks the checkouts of folders related to it: the folder
+	// itself, a folder inside it, or the folder holding it. Inside the mount it
+	// picks the checkouts sharing the source of the checkout it is in.
+	Dir string `json:"dir,omitempty"`
+	// Idle picks checkouts untouched (Checkout.Touched) for at least this many seconds.
+	Idle float64 `json:"idle_s,omitempty"`
+	// NoDiff picks checkouts without source changes since their base: an empty diff.
+	NoDiff bool `json:"no_diff,omitempty"`
+}
+
+// LsArgs selects the checkouts ls lists.
+type LsArgs struct {
+	Select
+}
+
+// LsReply lists live checkouts and retained snapshots; under a selection, only
+// the checkouts picked and their snapshots.
 type LsReply struct {
 	Checkouts []Checkout `json:"checkouts"`
 	Snapshots []Snapshot `json:"snapshots"`
@@ -194,6 +214,19 @@ type RmArgs struct {
 	Checkout string `json:"checkout"`
 }
 
+// PruneArgs removes the checkouts Select picks; their snapshots stay until
+// dropped. It needs a criterion: the zero Select is refused, not taken as all.
+// A checkout touched after it was picked stays.
+type PruneArgs struct {
+	Select
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// PruneReply lists the checkouts prune removed (or would remove, for a dry run).
+type PruneReply struct {
+	Removed []Checkout `json:"removed"`
+}
+
 // DropArgs releases a snapshot.
 type DropArgs struct {
 	Snapshot string `json:"snapshot"`
@@ -247,6 +280,33 @@ type PullArgs struct {
 
 // PullReply reports changes merged into the local checkout and its conflicts.
 type PullReply = ApplyReply
+
+// PushArgs has the machines checkouts are attached to fetch every blob they
+// still read from this one over the link, so their checkouts keep working once
+// it is gone. Empty fields match every attachment.
+type PushArgs struct {
+	Checkout string `json:"checkout,omitempty"` // the local checkout attached
+	To       string `json:"to,omitempty"`       // host passed to attach
+}
+
+// PushReply reports each matching attachment's push, sorted by checkout and host.
+// While it runs, subscribers receive its progress as "pushing" events, each one
+// attachment's Pushed without Error.
+type PushReply struct {
+	Pushed []Pushed `json:"pushed"`
+}
+
+// Pushed is how far one attachment's push got: the distinct blobs its machine
+// fetched and their offered sizes, out of those it lacked when the push started.
+type Pushed struct {
+	Checkout   string `json:"checkout"`
+	To         string `json:"to"`
+	Blobs      int64  `json:"blobs"`
+	Bytes      int64  `json:"bytes"`
+	TotalBlobs int64  `json:"total_blobs"`
+	TotalBytes int64  `json:"total_bytes"`
+	Error      string `json:"error,omitempty"` // set when the push failed; blobs fetched before stay
+}
 
 // Mesh is this machine's mesh: the machines that reach each other by node key,
 // directly or through the relay. An empty Mesh id means it is in none.

@@ -91,7 +91,8 @@ func routerDenied(op, name string) error {
 	return &fs.PathError{Op: op, Path: name, Err: os.ErrPermission}
 }
 
-// mutate runs a path mutation while holding the checkout's shared freeze lock.
+// mutate runs a path mutation while holding the checkout's shared freeze lock,
+// touching the checkout when it succeeds.
 func (r *Router) mutate(op, name string, fn func(*overlay.FS, string) error) error {
 	co, p := splitRouterPath(name)
 	if co == "" || p == "" {
@@ -102,7 +103,11 @@ func (r *Router) mutate(op, name string, fn func(*overlay.FS, string) error) err
 		return err
 	}
 	defer s.Done()
-	return fn(s.FS, p)
+	if err := fn(s.FS, p); err != nil {
+		return err
+	}
+	s.Touch()
+	return nil
 }
 
 // Create creates or truncates a file within an existing checkout.
@@ -132,6 +137,9 @@ func (r *Router) OpenFile(name string, flag int, perm os.FileMode) (billy.File, 
 	f, err := s.FS.OpenFile(p, flag, perm)
 	if err != nil {
 		return nil, err
+	}
+	if flag&(os.O_CREATE|os.O_TRUNC) != 0 {
+		s.Touch()
 	}
 	return &routerFile{router: r, co: co, path: p, flags: flag, perm: perm, gen: s.Gen, file: f, life: r.life(co)}, nil
 }
@@ -210,6 +218,7 @@ func (r *Router) TempFile(dir, prefix string) (billy.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.Touch()
 	return &routerFile{router: r, co: co, path: overlay.Clean(f.Name()), flags: os.O_RDWR, perm: 0o600, gen: s.Gen, file: f, life: r.life(co)}, nil
 }
 
@@ -240,12 +249,7 @@ func (r *Router) Rename(oldname, newname string) error {
 		}
 		return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: syscall.EXDEV}
 	}
-	s, err := r.enter(oldco, "rename", oldname)
-	if err != nil {
-		return err
-	}
-	defer s.Done()
-	return s.FS.Rename(oldp, newp)
+	return r.mutate("rename", oldname, func(f *overlay.FS, p string) error { return f.Rename(p, newp) })
 }
 
 // Link creates a hard link within one checkout and rejects cross-checkout links.
@@ -265,12 +269,7 @@ func (r *Router) Link(oldname, newname string) error {
 		}
 		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: syscall.EXDEV}
 	}
-	s, err := r.enter(oldco, "link", oldname)
-	if err != nil {
-		return err
-	}
-	defer s.Done()
-	return s.FS.Link(oldp, newp)
+	return r.mutate("link", oldname, func(f *overlay.FS, p string) error { return f.Link(p, newp) })
 }
 
 // Symlink creates a symlink below a checkout root without rewriting its target.

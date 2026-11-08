@@ -140,3 +140,29 @@ func TestResolveDirs(t *testing.T) {
 		t.Errorf("flag over env = %q", c.state)
 	}
 }
+
+// TestSecondsFlag checks the --idle units: Go durations plus whole days and weeks,
+// refusing negatives, fractions of days and durations a time.Duration cannot hold.
+func TestSecondsFlag(t *testing.T) {
+	for _, tt := range []struct {
+		in   string
+		want float64
+		bad  bool
+	}{
+		{in: "90m", want: 5400},
+		{in: "7d", want: 7 * 86400},
+		{in: "2w", want: 14 * 86400},
+		{in: "0", want: 0},
+		{in: "-1h", bad: true},
+		{in: "1.5d", bad: true},
+		{in: "5000w", bad: true},
+		{in: "d", bad: true},
+		{in: "", bad: true},
+	} {
+		var s seconds
+		err := s.Set(tt.in)
+		if (err != nil) != tt.bad || !tt.bad && float64(s) != tt.want {
+			t.Errorf("Set(%q) = %v, %v; want %v, error %v", tt.in, float64(s), err, tt.want, tt.bad)
+		}
+	}
+}

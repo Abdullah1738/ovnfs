@@ -1,6 +1,7 @@
 package fuse
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -371,6 +372,52 @@ func TestInodesAreStableNodeIDs(t *testing.T) {
 		t.Fatalf("remount changed inode %d -> %d", ino, got)
 	}
 	f.read(t, "alpha/renamed", "upper")
+}
+
+// deadMountEnv names the mountpoint TestMountReplacesDeadMount's helper process
+// mounts before it is killed.
+const deadMountEnv = "OVNFS_TEST_DEAD_MOUNT"
+
+// TestMountReplacesDeadMount checks that the mount a server killed before it
+// unmounted leaves behind (the daemon after kill -9) does not block the next
+// Mount there, where it fails both mkdir and fusermount3, also while the
+// kernel still caches the dead mount's attributes.
+func TestMountReplacesDeadMount(t *testing.T) {
+	if dir := os.Getenv(deadMountEnv); dir != "" {
+		f := newFixture(t, map[string]string{"file": "lower"})
+		f.unmount(t)
+		f.mnt = dir
+		f.mount(t)
+		fmt.Println("mounted")
+		time.Sleep(time.Minute) // until the parent kills this process
+		t.Fatal("helper was not killed")
+	}
+	f := newFixture(t, map[string]string{"file": "lower"})
+	f.unmount(t)
+	helper := exec.Command(os.Args[0], "-test.run=^TestMountReplacesDeadMount$")
+	helper.Env = append(os.Environ(), deadMountEnv+"="+f.mnt, "TMPDIR="+t.TempDir())
+	helper.Stderr = os.Stderr
+	out, err := helper.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if line == "mounted\n" {
+		// Any use before the kill leaves the root's attributes cached for TTL.
+		_, err = os.Stat(f.path("alpha/file"))
+	}
+	helper.Process.Kill()
+	helper.Wait()
+	t.Cleanup(func() { detachDead(f.mnt) })
+	if line != "mounted\n" || err != nil {
+		t.Fatalf("helper mount: %q, %v", line, err)
+	}
+
+	f.mount(t)
+	f.read(t, "alpha/file", "lower")
 }
 
 // TestChangesUnderneathShowWithinTTL checks that edits and checkout removals made

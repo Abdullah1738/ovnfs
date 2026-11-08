@@ -279,7 +279,7 @@ func TestUnnamedFolderCreates(t *testing.T) {
 	}
 	f.open()
 	var live []string
-	for _, c := range f.reg.Ls().Checkouts {
+	for _, c := range f.ls().Checkouts {
 		live = append(live, c.Name)
 	}
 	var want []string

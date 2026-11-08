@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/stencil-hq/ovnfs/base"
 	"github.com/stencil-hq/ovnfs/internal/durable"
@@ -38,10 +39,13 @@ type diskState struct {
 }
 
 // diskCheckout records a checkout; Head or Parent identifies its immutable stack, and
-// Stack is written only when that snapshot's stack does not rebuild it.
+// Stack is written only when that snapshot's stack does not rebuild it. Wrote is the
+// last change through the checkout's folder (checkoutRecord.wrote) as of this write:
+// file calls do not write state, so a crash loses the ones since.
 type diskCheckout struct {
 	checkoutMeta
-	Stack []string `json:"stack,omitempty"`
+	Stack []string  `json:"stack,omitempty"`
+	Wrote time.Time `json:"wrote,omitzero"`
 }
 
 // diskSnapshot records one layer and its snapshot ancestry. Stack is rebuilt at open
@@ -103,6 +107,9 @@ func (r *Registry) stateLocked() diskState {
 	}
 	for _, h := range r.checkouts {
 		disk := diskCheckout{checkoutMeta: cloneCheckoutMeta(h.meta)}
+		if n := h.wrote.Load(); n != 0 {
+			disk.Wrote = time.Unix(0, n).UTC()
+		}
 		if s := lineage[checkoutSnapshot(h.meta)]; s == nil || !sameStack(s.stack, h.stack) {
 			disk.Stack = append([]string(nil), h.stack...)
 		}

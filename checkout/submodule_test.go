@@ -180,7 +180,7 @@ func TestSubmoduleGitdirs(t *testing.T) {
 	if got := gitRun(t, filepath.Join(childExported, "vendor", "sub"), "config", "--get", "ovnfs.checkout"); got != "child" {
 		t.Fatalf("fork's submodule marker = %q", got)
 	}
-	for _, c := range f.reg.Ls().Checkouts {
+	for _, c := range f.ls().Checkouts {
 		if c.Dirty {
 			t.Errorf("checkout %s reports changes; its gitfiles are infrastructure", c.Name)
 		}
@@ -383,7 +383,7 @@ func TestSubmoduleDirMetadataIsAChange(t *testing.T) {
 // dirty reports whether a checkout lists changes.
 func (f *fixture) dirty(checkout string) bool {
 	f.t.Helper()
-	for _, c := range f.reg.Ls().Checkouts {
+	for _, c := range f.ls().Checkouts {
 		if c.Name == checkout {
 			return c.Dirty
 		}

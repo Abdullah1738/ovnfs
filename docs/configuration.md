@@ -25,16 +25,17 @@ Opening a folder classifies every path into one of four classes:
 | class | in the checkout | in a snapshot | on another machine |
 | --- | --- | --- | --- |
 | `source` | as captured at open | hashed: the snapshot's identity | sent by content id |
-| `cache` | the folder, live and read-only | not hashed | an empty directory, rebuilt there |
-| `local` | the folder, live and read-only | not hashed | absent |
+| `cache` | the folder, live until the checkout writes the path | not hashed | an empty directory, rebuilt there |
+| `local` | the folder, live until the checkout writes the path | not hashed | absent |
 | `hidden` | absent | — | absent |
 
 Nothing is copied to make this view. A source file is the folder's own file
 while its size, mtime and inode still match the capture, and its captured
 content (from the store or the repository's objects) once they do not; a file
-the user adds later stays out. Cache and local paths are simply the folder as
-it is now. Writes in the checkout copy up into its own upper, so the folder is
-never written.
+the user adds later stays out. Cache and local paths are the folder as it is
+now. Writes in the checkout copy up into its own upper, so the folder is never
+written: a cache or local path the checkout wrote or deleted is its own from
+then on, no longer follows the folder, and is ignored by `diff` and `apply`.
 
 ## Rules
 

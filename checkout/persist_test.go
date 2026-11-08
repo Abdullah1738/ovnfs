@@ -206,7 +206,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.open()
-		if ls := f.reg.Ls(); len(ls.Snapshots) != 0 || !ls.Checkouts[0].Dirty {
+		if ls := f.ls(); len(ls.Snapshots) != 0 || !ls.Checkouts[0].Dirty {
 			t.Fatalf("rolled back freeze left %+v", ls)
 		}
 		if got := f.read("app", "tracked.txt"); got != "changed\n" {
@@ -228,7 +228,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.open()
-			ls := f.reg.Ls()
+			ls := f.ls()
 			if len(ls.Checkouts) != 1 || ls.Checkouts[0].Dirty || len(ls.Snapshots) != 1 || ls.Snapshots[0].ID != snapshot {
 				t.Fatalf("rolled forward freeze = %+v", ls)
 			}
@@ -269,4 +269,33 @@ func TestFreezeCrashRecovery(t *testing.T) {
 			t.Fatalf("rehashed %+v, %v; want tree %s", reply, err, tree)
 		}
 	})
+}
+
+// TestTouchedSurvivesStop checks that a change through a checkout's folder moves
+// its Touched past its creation, and that a planned stop keeps it although file
+// calls never write state.
+func TestTouchedSurvivesStop(t *testing.T) {
+	f := newFixture(t)
+	f.newCheckout(folder(t, map[string]string{"a": "base"}), "c")
+	fresh := f.ls().Checkouts[0]
+	if !fresh.Touched.Equal(fresh.Created) {
+		t.Fatalf("fresh checkout touched %v, created %v", fresh.Touched, fresh.Created)
+	}
+	s, err := f.reg.Enter("c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Touch()
+	s.Done()
+	touched := f.ls().Checkouts[0].Touched
+	if !touched.After(fresh.Created) {
+		t.Fatalf("touched %v, not after creation %v", touched, fresh.Created)
+	}
+	if err := f.reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.open()
+	if got := f.ls().Checkouts[0].Touched; !got.Equal(touched) {
+		t.Fatalf("reopened touched %v, want %v", got, touched)
+	}
 }

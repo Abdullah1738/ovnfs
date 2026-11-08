@@ -42,6 +42,8 @@ type Session struct {
 	nextSearch  uint32
 	pullHandler func(context.Context, store.OID) (Pulled, error)
 	pull        *remotePull
+	pushHandler func() []Want
+	pushes      map[uint32]context.CancelFunc // running pushes by tag
 
 	// outbox feeds the writer goroutine so Fetch never blocks on the stream.
 	outMu      sync.Mutex
@@ -111,6 +113,7 @@ func Accept(conn io.ReadWriteCloser, st *store.Store) (*Session, Offer, error) {
 				inflight:   map[store.OID]*call{},
 				transfers:  map[uint32]*transfer{},
 				searches:   map[uint32]*searchCall{},
+				pushes:     map[uint32]context.CancelFunc{},
 				wake:       make(chan struct{}, 1),
 				writerDone: make(chan struct{}),
 			}
@@ -141,6 +144,15 @@ func (s *Session) SetPullHandler(fn func(context.Context, store.OID) (Pulled, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pullHandler = fn
+}
+
+// SetPushHandler configures what source-initiated pushes fetch: every blob this
+// machine still reads through the link, which fn lists. It must be called
+// before Reply; a nil handler refuses pushes.
+func (s *Session) SetPushHandler(fn func() []Want) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pushHandler = fn
 }
 
 // Reply sends the acceptance and starts serving fetches; Refuse sends err's message and closes.
@@ -186,6 +198,12 @@ func (s *Session) Refuse(err error) error {
 // Fetch makes every wanted blob present in st. Ids already in st are skipped, ids already in flight (from any caller) are waited for, not requested twice. Fails when the link ends, ctx is done, or the source cannot produce a blob (the source's error message is kept). A blob whose bytes do not hash to its id is an error, never stored.
 // A Fetch abandoned by ctx leaves its blobs in flight; they still land in st.
 func (s *Session) Fetch(ctx context.Context, wants []Want) error {
+	return s.fetch(ctx, wants, nil)
+}
+
+// fetch is Fetch calling landed, unless nil, once for each want as its blob is
+// present: first those already stored, then the rest in want order.
+func (s *Session) fetch(ctx context.Context, wants []Want, landed func(Want)) error {
 	for _, w := range wants {
 		if !w.ID.Valid() {
 			return fmt.Errorf("fetch %s: malformed id %q", w.Path, w.ID)
@@ -196,8 +214,11 @@ func (s *Session) Fetch(ctx context.Context, wants []Want) error {
 	}
 	missing := make([]Want, 0, len(wants))
 	for _, w := range wants {
-		if !s.st.Has(w.ID) {
+		switch {
+		case !s.st.Has(w.ID):
 			missing = append(missing, w)
+		case landed != nil:
+			landed(w)
 		}
 	}
 	if len(missing) == 0 {
@@ -242,6 +263,9 @@ func (s *Session) Fetch(ctx context.Context, wants []Want) error {
 		case <-c.done:
 			if c.err != nil {
 				return fmt.Errorf("fetch %s (%s): %w", missing[i].Path, missing[i].ID, c.err)
+			}
+			if landed != nil {
+				landed(missing[i])
 			}
 		case <-ctx.Done():
 			return fmt.Errorf("fetch %s (%s): %w", missing[i].Path, missing[i].ID, ctx.Err())
@@ -309,6 +333,9 @@ func (s *Session) end(reason error) {
 	clear(s.searches)
 	if s.pull != nil {
 		s.pull.cancel()
+	}
+	for _, cancel := range s.pushes {
+		cancel()
 	}
 	close(s.done)
 	s.mu.Unlock()
@@ -406,8 +433,8 @@ func (s *Session) receive() error {
 		if typ == frameBye {
 			return errBye
 		}
-		if typ == framePull || typ == frameCancel {
-			if err := s.pullRequest(typ, p); err != nil {
+		if typ == framePull || typ == framePush || typ == frameCancel {
+			if err := s.request(typ, p); err != nil {
 				return err
 			}
 			continue
@@ -461,20 +488,37 @@ func (s *Session) receive() error {
 	}
 }
 
-// pullRequest starts or cancels snapshot work without blocking the fetch reader.
-func (s *Session) pullRequest(typ byte, body []byte) error {
-	if (typ == framePull && len(body) != 24) || (typ == frameCancel && len(body) != 4) {
-		return errors.New("protocol error: invalid pull request")
+// request starts or cancels a pull or push without blocking the fetch reader.
+func (s *Session) request(typ byte, body []byte) error {
+	size := 4
+	if typ == framePull {
+		size += 20
+	}
+	if len(body) != size {
+		return fmt.Errorf("protocol error: invalid %q request", typ)
 	}
 	tag := binary.BigEndian.Uint32(body)
-	s.mu.Lock()
-	if typ == frameCancel {
+	switch typ {
+	case framePull:
+		s.startPull(tag, store.OID(fmt.Sprintf("%x", body[4:])))
+	case framePush:
+		return s.startPush(tag)
+	case frameCancel:
+		s.mu.Lock()
 		if s.pull != nil && s.pull.tag == tag {
 			s.pull.cancel()
 		}
+		if cancel := s.pushes[tag]; cancel != nil {
+			cancel()
+		}
 		s.mu.Unlock()
-		return nil
 	}
+	return nil
+}
+
+// startPull snapshots the checkout in the background and streams its changes since from.
+func (s *Session) startPull(tag uint32, from store.OID) {
+	s.mu.Lock()
 	fn := s.pullHandler
 	if s.pull != nil || fn == nil || s.ended {
 		msg := "remote checkout does not support snapshots"
@@ -483,13 +527,12 @@ func (s *Session) pullRequest(typ byte, body []byte) error {
 		}
 		s.mu.Unlock()
 		s.post(frame(framePullErr, binary.BigEndian.AppendUint32(nil, tag), clip(msg)))
-		return nil
+		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &remotePull{tag: tag, ctx: ctx, cancel: cancel}
 	s.pull = r
 	s.mu.Unlock()
-	from := store.OID(fmt.Sprintf("%x", body[4:]))
 	go func() {
 		defer cancel()
 		p, err := fn(ctx, from)
@@ -509,7 +552,87 @@ func (s *Session) pullRequest(typ byte, body []byte) error {
 			}
 		}
 	}()
+}
+
+// Push batch limits: a push fetches at most this much at a time, so a read on
+// this machine waits behind one batch at the source, not the whole push.
+// Progress goes to the source at most every pushReport.
+const (
+	pushBatchBlobs = 1024
+	pushBatchBytes = 8 << 20
+	pushReport     = 250 * time.Millisecond
+)
+
+// startPush fetches, in the background, every blob the push handler lists and
+// answers with their count and size, or the first failure. Reusing the tag of
+// a running push is a protocol error.
+func (s *Session) startPush(tag uint32) error {
+	answer := func(typ byte, parts ...[]byte) {
+		s.post(frame(typ, append([][]byte{binary.BigEndian.AppendUint32(nil, tag)}, parts...)...))
+	}
+	s.mu.Lock()
+	fn := s.pushHandler
+	if s.pushes[tag] != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("protocol error: push %d is already running", tag)
+	}
+	if fn == nil {
+		s.mu.Unlock()
+		answer(framePushErr, []byte("remote checkout does not take pushes"))
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.pushes[tag] = cancel
+	s.mu.Unlock()
+	go func() {
+		defer cancel()
+		pushed, err := s.push(ctx, fn(), func(p Pushed) { answer(framePushing, appendPushed(nil, p)) })
+		s.mu.Lock()
+		delete(s.pushes, tag)
+		s.mu.Unlock()
+		switch {
+		case ctx.Err() != nil: // canceled by the source, or the link ended
+		case err != nil:
+			answer(framePushErr, clip(err.Error()))
+		default:
+			answer(framePushed, appendPushed(nil, pushed))
+		}
+	}()
 	return nil
+}
+
+// push fetches wants in batches of at most pushBatchBlobs blobs and
+// pushBatchBytes bytes (a larger blob alone), stopping at the first failure.
+// It reports the totals before fetching, then progress at most every
+// pushReport as blobs land.
+func (s *Session) push(ctx context.Context, wants []Want, report func(Pushed)) (Pushed, error) {
+	var p Pushed
+	for _, w := range wants {
+		p.TotalBlobs++
+		p.TotalBytes += w.Size
+	}
+	report(p)
+	last := time.Now()
+	landed := func(w Want) {
+		p.Blobs++
+		p.Bytes += w.Size
+		if time.Since(last) >= pushReport {
+			report(p)
+			last = time.Now()
+		}
+	}
+	for len(wants) > 0 {
+		n, size := 1, wants[0].Size
+		for n < len(wants) && n < pushBatchBlobs && size+wants[n].Size <= pushBatchBytes {
+			size += wants[n].Size
+			n++
+		}
+		if err := s.fetch(ctx, wants[:n], landed); err != nil {
+			return p, err
+		}
+		wants = wants[n:]
+	}
+	return p, nil
 }
 
 // sendPull queues one bounded response frame and waits for the writer to drain

@@ -119,14 +119,14 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	if !filepath.IsAbs(args.Dir) {
 		return api.NewReply{}, failure("invalid", "folder path must be absolute")
 	}
-	if reply, inMount, err := r.forkMounted(ctx, args.Dir, args); inMount {
+	if reply, overlaps, err := r.newOverlappingMount(ctx, args.Dir, args); overlaps {
 		return reply, err
 	}
 	root, err := r.resolveRoot(args.Dir)
 	if err != nil {
 		return api.NewReply{}, coded(err)
 	}
-	if reply, inMount, err := r.forkMounted(ctx, root, args); inMount {
+	if reply, overlaps, err := r.newOverlappingMount(ctx, root, args); overlaps {
 		return reply, err
 	}
 	var revision *git.Revision
@@ -357,14 +357,18 @@ func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseReco
 	return reply, nil
 }
 
-// forkMounted handles New on a folder inside the daemon's own mount, reporting
-// inMount false for any other folder. A checkout sourced from another checkout
+// newOverlappingMount handles New on a folder that overlaps the daemon's own
+// mount, reporting overlaps false for any other folder. A base on such a folder
 // would be served by reading through the mount from the mount's own request
 // handlers, which can deadlock the whole mount, so a checkout's root forks that
-// checkout instead; the mount root and folders below a checkout's root fail.
-func (r *Registry) forkMounted(ctx context.Context, dir string, args api.NewArgs) (reply api.NewReply, inMount bool, err error) {
-	rel, inMount := r.underMount(dir)
-	if !inMount {
+// checkout instead; the mount root, folders below a checkout's root and folders
+// holding the mount fail.
+func (r *Registry) newOverlappingMount(ctx context.Context, dir string, args api.NewArgs) (reply api.NewReply, overlaps bool, err error) {
+	rel, inMount, holds := r.mountOverlap(dir)
+	switch {
+	case holds:
+		return api.NewReply{}, true, failure("invalid", "%s holds the checkout mount %s; open a folder outside it", dir, r.config.Mount)
+	case !inMount:
 		return api.NewReply{}, false, nil
 	}
 	name, sub, _ := strings.Cut(filepath.ToSlash(rel), "/")
@@ -391,6 +395,60 @@ func (r *Registry) underMount(dir string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// mountOverlap reports how folder dir overlaps the daemon's mount: rel names
+// dir from the mount when dir is the mount or below it (inside), and holds
+// reports dir holding the mount. Spellings unlike the mount's own (letter case
+// a volume ignores, a firmlink, a bind mount) are told by file identity, which
+// asks the mount for its root: the caller holds no registry lock, since the
+// mount's server takes them.
+func (r *Registry) mountOverlap(dir string) (rel string, inside, holds bool) {
+	if rel, inside = r.underMount(dir); inside {
+		return rel, true, false
+	}
+	for _, m := range r.mounts {
+		if _, holds = below(dir, m); holds {
+			return "", false, true
+		}
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", false, false
+	}
+	info, err := os.Stat(real)
+	if err != nil {
+		return "", false, false
+	}
+	// The resolved spelling, so that every real ancestor of the mount is walked.
+	mount := r.mounts[len(r.mounts)-1]
+	if _, holds = ancestorAt(filepath.Dir(mount), info); holds {
+		return "", false, true
+	}
+	root, err := os.Stat(mount)
+	if err != nil {
+		return "", false, false
+	}
+	top, inside := ancestorAt(real, root)
+	if !inside {
+		return "", false, false
+	}
+	rel, err = filepath.Rel(top, real)
+	return rel, err == nil, false
+}
+
+// ancestorAt returns the nearest of path p and its ancestors that is the file want.
+func ancestorAt(p string, want os.FileInfo) (string, bool) {
+	for {
+		if info, err := os.Stat(p); err == nil && os.SameFile(info, want) {
+			return p, true
+		}
+		up := filepath.Dir(p)
+		if up == p {
+			return "", false
+		}
+		p = up
+	}
 }
 
 // mountPaths spells the mount as configured and with its parent's symlinks
@@ -826,12 +884,11 @@ func (r *Registry) Snap(ctx context.Context, args api.SnapArgs) (api.SnapReply, 
 	if err != nil {
 		return api.SnapReply{}, coded(err)
 	}
-	r.mu.Lock()
-	if err = r.stillLiveLocked(h); err != nil {
-		r.mu.Unlock()
+	if err = r.freezeAndLock(h); err != nil {
 		return api.SnapReply{}, err
 	}
 	s, err := r.freezeLocked(ctx, h, args.Label, tree, true)
+	h.freeze.Unlock()
 	var result snapMeta
 	if s != nil {
 		result = cloneSnapMeta(s.meta)
@@ -884,20 +941,22 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 		return api.ForkReply{}, coded(err)
 	}
 	defer discardGit(ready)
-	r.mu.Lock()
-	if err = r.stillLiveLocked(h); err == nil && h.meta.Base != baseID {
-		err = failure("conflict", "checkout %s moved to another base while forking; retry", h.meta.Name)
-	}
-	if err != nil {
-		r.mu.Unlock()
+	if err = r.freezeAndLock(h); err != nil {
 		return api.ForkReply{}, err
 	}
-	child, err := r.pickNameLocked(args.Name, args.Checkout)
+	child := ""
+	if h.meta.Base != baseID {
+		err = failure("conflict", "checkout %s moved to another base while forking; retry", h.meta.Name)
+	} else {
+		child, err = r.pickNameLocked(args.Name, args.Checkout)
+	}
 	if err != nil {
+		h.freeze.Unlock()
 		r.mu.Unlock()
 		return api.ForkReply{}, err
 	}
 	s, err := r.freezeLocked(ctx, h, args.Label, tree, false)
+	h.freeze.Unlock()
 	if err != nil {
 		r.mu.Unlock()
 		return api.ForkReply{}, coded(err)
@@ -1019,13 +1078,26 @@ func (r *Registry) stillLiveLocked(h *checkoutRecord) error {
 	return nil
 }
 
+// freezeAndLock takes h's freeze lock exclusively and then the registry lock,
+// in that order (see checkoutRecord.freeze), and confirms h is still live; on
+// failure it holds neither.
+func (r *Registry) freezeAndLock(h *checkoutRecord) error {
+	h.freeze.Lock()
+	r.mu.Lock()
+	if err := r.stillLiveLocked(h); err != nil {
+		r.mu.Unlock()
+		h.freeze.Unlock()
+		return err
+	}
+	return nil
+}
+
 // freezeLocked freezes an upper into a snapshot whose private git directory saveGit
 // stored as gitTree; fork defers its durable commit into child publication. Only a
 // freeze that moves the upper publishes a recovery intent first; with no layer the
-// snapshot is all metadata and simply does not exist until committed.
+// snapshot is all metadata and simply does not exist until committed. The caller
+// holds h's freeze lock and the registry lock (see freezeAndLock).
 func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label string, gitTree store.OID, commit bool) (*snapRecord, error) {
-	h.freeze.Lock()
-	defer h.freeze.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -1172,24 +1244,38 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 // in between leaves files no checkout names, which reopening removes. The name
 // stays reserved until they are gone.
 func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
+	_, err := r.remove(ctx, args.Checkout, time.Time{})
+	return err
+}
+
+// remove is Rm, except that with picked set it keeps a checkout whose Touched is
+// no longer picked, one changed since prune picked it, and reports false.
+func (r *Registry) remove(ctx context.Context, name string, picked time.Time) (bool, error) {
 	if err := checkContext(ctx); err != nil {
-		return err
+		return false, err
 	}
-	name := args.Checkout
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return failure("io", "registry is closed")
+		return false, failure("io", "registry is closed")
 	}
 	h := r.checkouts[name]
 	if h == nil {
 		r.mu.Unlock()
-		return failure("not_found", "no checkout %s", name)
+		return false, failure("not_found", "no checkout %s", name)
 	}
 	r.operations.Add(1)
 	defer r.operations.Done()
-	h.freeze.Lock()
+	r.mu.Unlock()
+	if err := r.freezeAndLock(h); err != nil {
+		return false, err
+	}
 	defer h.freeze.Unlock()
+	// The freeze lock waits out file calls in flight, so none touches it from here.
+	if !picked.IsZero() && !r.touched(h).Equal(picked) {
+		r.mu.Unlock()
+		return false, nil
+	}
 	h.retired.Store(true)
 	if r.config.Retire != nil {
 		r.config.Retire(name)
@@ -1217,13 +1303,13 @@ func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
 	}
 	r.mu.Unlock()
 	if err = errors.Join(err, removeErr); err != nil {
-		return coded(err)
+		return true, coded(err)
 	}
 	r.emit(Event{Name: "removed", Payload: map[string]any{"name": name}})
 	if r.config.Changed != nil {
 		r.config.Changed(name, false)
 	}
-	return nil
+	return true, nil
 }
 
 // Drop releases a snapshot and its retained stack.

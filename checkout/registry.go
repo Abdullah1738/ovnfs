@@ -1,6 +1,7 @@
 package checkout
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -174,6 +176,9 @@ func Open(c Config) (*Registry, error) {
 		}
 		h := &checkoutRecord{meta: disk.checkoutMeta, base: b, stack: append([]string{}, disk.Stack...), upper: upper, fs: fs}
 		h.generation.Store(1)
+		if !disk.Wrote.IsZero() {
+			h.wrote.Store(disk.Wrote.UnixNano())
+		}
 		r.checkouts[disk.Name] = h
 		r.retainLocked(b, h.stack)
 	}
@@ -382,12 +387,16 @@ func (r *Registry) Close() error {
 		}
 		r.mu.Unlock()
 		r.discardPrepared(prepared)
-		r.mu.Lock()
-		for _, h := range r.checkouts {
+		// Closed and drained, the registry gains and loses no checkout from here.
+		r.mu.RLock()
+		checkouts := slices.Collect(maps.Values(r.checkouts))
+		r.mu.RUnlock()
+		for _, h := range checkouts {
 			h.freeze.Lock()
 		}
+		r.mu.Lock()
 		// A planned stop keeps memory files: they reach the uppers before exit.
-		for _, h := range r.checkouts {
+		for _, h := range checkouts {
 			if err := h.fs.Flush(); r.closeErr == nil {
 				r.closeErr = err
 			}
@@ -400,7 +409,7 @@ func (r *Registry) Close() error {
 				r.closeErr = err
 			}
 		}
-		for _, h := range r.checkouts {
+		for _, h := range checkouts {
 			h.retired.Store(true)
 			h.freeze.Unlock()
 		}
@@ -466,22 +475,28 @@ func (r *Registry) moveRootLocked() {
 	r.rootTime = now
 }
 
-// Ls lists live checkouts and retained snapshots in name and id order.
-func (r *Registry) Ls() api.LsReply {
+// Ls lists the live checkouts args picks with their retained snapshots, or every
+// retained snapshot without a selection, in name and id order.
+func (r *Registry) Ls(ctx context.Context, args api.LsArgs) (api.LsReply, error) {
+	checkouts, err := r.pick(ctx, args.Select)
+	if err != nil {
+		return api.LsReply{}, err
+	}
+	all := args.Select == (api.Select{})
+	listed := make(map[string]bool, len(checkouts))
+	for _, c := range checkouts {
+		listed[c.Name] = true
+	}
+	reply := api.LsReply{Checkouts: checkouts, Snapshots: []api.Snapshot{}}
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	reply := api.LsReply{Checkouts: []api.Checkout{}, Snapshots: []api.Snapshot{}}
-	for _, h := range r.checkouts {
-		if !h.retired.Load() {
-			reply.Checkouts = append(reply.Checkouts, r.checkoutLocked(h))
+	for _, s := range r.snapshots {
+		if all || listed[s.meta.Checkout] {
+			reply.Snapshots = append(reply.Snapshots, snapshotOf(s.meta))
 		}
 	}
-	for _, s := range r.snapshots {
-		reply.Snapshots = append(reply.Snapshots, snapshotOf(s.meta))
-	}
-	sort.Slice(reply.Checkouts, func(i, j int) bool { return reply.Checkouts[i].Name < reply.Checkouts[j].Name })
+	r.mu.RUnlock()
 	sort.Slice(reply.Snapshots, func(i, j int) bool { return snapshotLess(reply.Snapshots[i].ID, reply.Snapshots[j].ID) })
-	return reply
+	return reply, nil
 }
 
 // Counts fills a status reply with retained object counts, including objects
@@ -504,12 +519,38 @@ func (r *Registry) Counts(s *api.Status) {
 // checkoutLocked describes a checkout for replies.
 func (r *Registry) checkoutLocked(h *checkoutRecord) api.Checkout {
 	empty, err := r.upperEmpty(h)
+	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: h.source(), Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, Dirty: err == nil && !empty, Created: h.meta.Created, Touched: r.touched(h)}
+}
+
+// source is the folder a checkout was opened from; for one attached from another
+// machine, that machine's folder as its offer named it.
+func (h *checkoutRecord) source() string {
 	meta := h.base.view.Meta()
-	src := meta.Dir
 	if meta.Remote != nil {
-		src = meta.Remote.Source
+		return meta.Remote.Source
 	}
-	return api.Checkout{Name: h.meta.Name, Path: filepath.Join(r.config.Mount, h.meta.Name), Source: src, Base: h.meta.Base, Parent: deref(h.meta.Parent), Git: h.meta.Git, Dirty: err == nil && !empty, Created: h.meta.Created}
+	return meta.Dir
+}
+
+// touched is when a checkout last changed: through its folder (see
+// [Session.Touch]) or in its private git directory, which git writes outside the
+// folder; its creation when neither changed since.
+func (r *Registry) touched(h *checkoutRecord) time.Time {
+	t := h.meta.Created
+	if wrote := time.Unix(0, h.wrote.Load()); wrote.After(t) {
+		t = wrote
+	}
+	if h.meta.Git {
+		// Replacing the index (staging, committing) changes the directory; moving
+		// HEAD appends to its log.
+		gitdir := r.gitdirPath(h.meta.dir())
+		for _, p := range [...]string{gitdir, filepath.Join(gitdir, "logs", "HEAD")} {
+			if info, err := os.Lstat(p); err == nil && info.ModTime().After(t) {
+				t = info.ModTime()
+			}
+		}
+	}
+	return t.UTC()
 }
 
 // snapshotOf describes a snapshot for replies.

@@ -22,6 +22,3 @@ func (*Server) Unmount() error { return fmt.Errorf("fuse: unsupported on %s", ru
 
 // Wait returns at once because no mount can exist on this OS.
 func (*Server) Wait() {}
-
-// ClearStale has nothing to detach on this OS.
-func ClearStale(string) error { return nil }

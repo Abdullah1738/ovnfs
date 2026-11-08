@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Lets the upload mint the GitHub OIDC token (audience build.stencil.so)
+      # the build service authenticates this repository's tag runs with.
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,9 +26,14 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          version: "~> v2"
-          args: release --clean
+      # goreleaser is built from the Go module proxy rather than downloaded from
+      # GitHub releases, whose 504s once held a release back; keep the version
+      # in step with ci.yml (dependabot does not see it).
+      - name: goreleaser
+        run: go run github.com/goreleaser/goreleaser/v2@v2.20.0 release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The installers, `ovnfs update` and `ovnfs send` download release
+      # binaries from build.stencil.so, not from the GitHub release.
+      - name: publish to build.stencil.so
+        run: go run ./internal/release/upload "$GITHUB_REF_NAME"

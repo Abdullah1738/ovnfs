@@ -15,14 +15,34 @@ extension beyond WinFsp where you install it.
 
 ## Install
 
+Linux and macOS:
+
+```sh
+curl -fsSL https://stencil.so/ovnfs.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://stencil.so/ovnfs.ps1 | iex
+```
+
+The installers download the latest release binary (Linux, macOS and Windows on
+amd64 and arm64) from `build.stencil.so`, check its SHA-256 and put it in
+`~/.local/bin`, or on Windows in `%LOCALAPPDATA%\Programs\ovnfs`, added to the
+user PATH. `OVNFS_INSTALL_DIR` picks another folder, `--version v0.2.3`
+(`-Version` on Windows) another release. With Go (see `go.mod`):
+
 ```sh
 go install github.com/stencil-hq/ovnfs@latest
 ```
 
-needs Go (see `go.mod`). [Releases](https://github.com/stencil-hq/ovnfs/releases)
-have prebuilt binaries for Linux, macOS and Windows on amd64 and arm64, and
 `go build -o bin/ovnfs .` builds a clone. ovnfs runs git, and on Linux needs
-`fusermount3` (the `fuse3` package). `ovnfs version` prints the build.
+`fusermount3` (the `fuse3` package). `ovnfs version` prints the build;
+`ovnfs update` replaces it with the latest, through `go install` when that
+built it, and `ovnfs restart` then moves the daemon onto it.
+[GitHub releases](https://github.com/stencil-hq/ovnfs/releases) carry the same
+binaries as archives.
 
 ## Quick start
 
@@ -42,19 +62,26 @@ More, from `~/src/app`:
 ovnfs run -- make test         # a disposable checkout: run, then remove
 ovnfs new --rev main           # start from a revision instead of the working tree
 ovnfs attach app --to devbox   # the same checkout on another machine, fetched lazily
+ovnfs send . devbox:src/app    # attach over ssh, installing ovnfs and joining the mesh there first
+ovnfs push app                 # copy what devbox still reads from here, so it works with this machine off
 ovnfs grep 'TODO' app          # search in the daemon, without traversing the mount
 ovnfs glob '*.go' app          # matching paths, recursively and ignore-aware
+ovnfs ls .                     # the checkouts of this folder
+ovnfs prune . --idle 7d        # remove those untouched for a week (--dry-run first)
 ```
 
 `ovnfs help` lists every verb. Verbs start the daemon when none is running;
-`start`, `stop` and `status` manage it, `serve` runs it in the foreground.
+`start`, `stop`, `restart` and `status` manage it, `serve` runs it in the
+foreground. `restart` swaps in the daemon of the binary you run, e.g. after an upgrade.
 
 ## How it works
 
 Opening a folder sorts every path into a class. `source` paths are captured:
 they are what `diff`, `apply` and snapshots see, and the only bytes that leave
 the machine. `cache` and `local` paths (build outputs, ignored files, secrets)
-show the live folder, read-only. `hidden` paths are absent. Built-in rules
+show the live folder until the checkout writes them: a path it writes or
+deletes stays its own from then on, and `apply` never carries it back.
+`hidden` paths are absent. Built-in rules
 handle the common cases; `.o2/ovnfs.yml` and `--rule` override them, and
 `ovnfs explain PATH` says which rule decided.
 
@@ -68,7 +95,7 @@ ovnfs isolates files, not processes: it is not a sandbox.
 
 - [Configuration](docs/configuration.md): classes, rules, `.o2/ovnfs.yml`, where state and checkouts live
 - [Checkouts](docs/checkouts.md): `--rev`, `--take`, `run`, snapshots, forks, `diff` and `apply`
-- [Remote checkouts](docs/remote.md): `attach`, `pull`, `share`, the mesh
+- [Remote checkouts](docs/remote.md): `attach`, `send`, `pull`, `share`, the mesh
 - [Platforms](docs/platforms.md): NFS, FUSE, SMB and WinFsp frontends
 - [Internals](docs/internals.md): admin protocol for embedding, persistence, memory tiers
 - [Limitations](docs/limitations.md)

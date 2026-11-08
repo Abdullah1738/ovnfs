@@ -118,7 +118,26 @@ rollback means a new checkout from a snapshot.
 `new` (and `run`) on a checkout's own folder forks that checkout: capturing it
 would make the daemon serve the new checkout by reading through its own mount,
 which can deadlock the mount. `new` refuses the mount itself, a folder below a
-checkout's root, and `--rev`, `--take` or `--rule` with a checkout.
+checkout's root, a folder (or repository) holding the mount, and `--rev`,
+`--take` or `--rule` with a checkout. These folders are told by file identity,
+so a symlink, another letter case or a bind mount does not get around the rule.
+
+## Listing and cleanup: `ls` and `prune`
+
+`ls` shows each checkout's TOUCHED time: its last write through its folder or
+to its private git directory, else its creation. `ls DIR` lists only the
+checkouts of DIR: those opened on the folder, on a folder inside it, or on the
+folder holding it; inside the mount, those sharing the source of the checkout
+DIR is in. DIR needs a path spelling (`.`, `..`, a slash), since a bare word
+names a checkout, whose snapshots `ls NAME` lists.
+
+`prune [DIR] [--idle DUR] [--no-diff]` removes, as `rm` does, every checkout
+matching all the criteria given: of DIR, untouched for DUR (`90m`, `12h`, `7d`,
+`2w`), without source changes since its base (an empty `diff`). Without a
+criterion it refuses, `--dry-run` lists what it would remove, and a checkout
+touched after it was picked stays. Their snapshots stay until dropped. `ls`
+takes the same flags to preview a prune in full. `--no-diff` alone also picks
+checkouts just opened, before their first write; add `--idle` to spare them.
 
 ## Search: `grep` and `glob`
 
@@ -203,4 +222,5 @@ alone. Once resolved, the checkout's later edits to that file merge against the
 version that was marked, so the resolution is kept, across daemon restarts too.
 Anything else (deletion against an edit, binary or symlink changes on both
 sides) is reported as a conflict and left untouched. Applying twice is a no-op.
-`--dry-run` writes nothing.
+`--dry-run` writes nothing. Applies of several checkouts into one folder take
+turns, each merging against what the previous one wrote.
