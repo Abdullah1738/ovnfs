@@ -51,6 +51,30 @@ func maxChain(r *testRepo) int {
 	return best
 }
 
+func TestReadMaintenanceLoosePack(t *testing.T) {
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			src := newRepo(t, "--object-format="+format)
+			src.fastImportLoose(history(src.format, 5, "maintenance"))
+			want := src.allObjects()
+			id := src.id(src.gitString("rev-parse", "main"))
+
+			dst := newRepo(t, "--bare", "--object-format="+format)
+			db := dst.open()
+			prefix := filepath.Join(dst.objects(), "pack", "loose")
+			hash := strings.TrimSpace(string(src.git(nil, "pack-objects", "--all", "-q", prefix)))
+			if _, err := os.Stat(prefix + "-" + hash + ".idx"); err != nil {
+				t.Fatalf("loose pack index: %v", err)
+			}
+			if _, _, err := db.Read(id); err != nil {
+				t.Fatalf("Read after loose pack creation: %v", err)
+			}
+			checkAllObjects(t, db, want)
+			checkAllObjects(t, dst.open(), want)
+		})
+	}
+}
+
 func TestReadAggressivePack(t *testing.T) {
 	for _, format := range []string{"sha1", "sha256"} {
 		t.Run(format, func(t *testing.T) {

@@ -199,7 +199,7 @@ func (db *DB) rescanDir(d *objectDir) {
 	ents, _ := os.ReadDir(packDir)
 	present := map[string]bool{}
 	for _, e := range ents {
-		if n := e.Name(); strings.HasPrefix(n, "pack-") && strings.HasSuffix(n, ".idx") {
+		if n := e.Name(); strings.HasSuffix(n, ".idx") {
 			present[filepath.Join(packDir, n)] = true
 		}
 	}
