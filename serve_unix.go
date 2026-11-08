@@ -28,7 +28,8 @@ func serveNFS(l net.Listener, e *export.Export) error {
 // rather than after its attribute timeout: the FSSTAT reply carries the
 // root's attributes, and its changed mtime purges the client's cached names,
 // including a negative entry for a checkout created a moment ago. The caller
-// must hold no registry lock, since the server answers the FSSTAT.
+// must hold no registry lock, since the server answers the FSSTAT, and must run
+// it through fileListener.serving, since without a server it hangs.
 func refreshRoot(mount string) {
 	var st syscall.Statfs_t
 	_ = syscall.Statfs(mount, &st)

@@ -181,6 +181,8 @@ func serve(args []string) error {
 	var e *export.Export
 	// Folder events may invalidate before the export exists; they are dropped then.
 	var exported atomic.Pointer[export.Export]
+	// The system client's connections, from listenAndMount on; nil for in-process mounts.
+	var files atomic.Pointer[fileListener]
 	var smbServer *smb.Server
 	var checkoutShares *shares
 	userHome, _ := os.UserHomeDir()
@@ -212,8 +214,8 @@ func serve(args []string) error {
 					smbServer.Retire(name)
 				}
 			}
-			if *proto == "nfs" {
-				refreshRoot(*mount)
+			if l := files.Load(); l != nil && *proto == "nfs" {
+				l.serving(func() { refreshRoot(*mount) })
 			}
 		}})
 	if err != nil {
@@ -235,7 +237,6 @@ func serve(args []string) error {
 	served := make(chan error, 2)
 	port := 0
 	release := func(force bool) error { return unmount(*mount, force) }
-	var files *fileListener // the system client's connections; nil for in-process mounts
 	if *proto == "fuse" || *proto == "winfsp" {
 		srv, mountErr := mountInProcess(*proto, e, *mount)
 		if mountErr != nil {
@@ -247,8 +248,12 @@ func serve(args []string) error {
 			_ = release(true)
 			return fmt.Errorf("persist listen: %w", err)
 		}
-	} else if port, files, err = listenAndMount(reg, e, *proto, *address, *state, *mount, served, func(s *smb.Server) { smbServer = s }); err != nil {
-		return err
+	} else {
+		var l *fileListener
+		if port, l, err = listenAndMount(reg, e, *proto, *address, *state, *mount, served, func(s *smb.Server) { smbServer = s }); err != nil {
+			return err
+		}
+		files.Store(l)
 	}
 	log.Printf("mounted at %s", *mount)
 	adminListener, err := admin.Listen(filepath.Join(*state, "admin.sock"))
@@ -291,11 +296,11 @@ func serve(args []string) error {
 		case req = <-stops:
 		case <-sigs:
 		}
-		if req.keepMount && files != nil {
+		if l := files.Load(); req.keepMount && l != nil {
 			// Cut before the export closes, which would answer the kernel
 			// client "not found": it retries the cut connections instead, until
 			// the next daemon serves this port.
-			files.cut()
+			l.cut()
 			log.Printf("left %s mounted for the next daemon", *mount)
 			req.done <- nil
 			return nil
@@ -327,6 +332,22 @@ type fileListener struct {
 	net.Listener
 	mu    sync.Mutex
 	conns map[*fileConn]struct{} // nil once cut
+	calls sync.RWMutex           // held shared by serving's calls, exclusively by cut
+}
+
+// serving runs f, a call into the mount such as refreshRoot, unless the
+// listener is cut, and holds off the cut until f returns. Once cut, the mount
+// has no server until the next daemon starts, which waits for this one to
+// exit: a call then would hang this daemon's shutdown, and the restart with it.
+func (l *fileListener) serving(f func()) {
+	l.calls.RLock()
+	defer l.calls.RUnlock()
+	l.mu.Lock()
+	cut := l.conns == nil
+	l.mu.Unlock()
+	if !cut {
+		f()
+	}
 }
 
 // Accept tracks the connection, or refuses it once the listener is cut.
@@ -346,12 +367,15 @@ func (l *fileListener) Accept() (net.Conn, error) {
 	return c, nil
 }
 
-// cut closes the listener and every connection it accepted.
+// cut closes the listener and every connection it accepted, once the calls
+// serving runs have returned.
 func (l *fileListener) cut() {
+	l.calls.Lock()
 	l.mu.Lock()
 	conns := l.conns
 	l.conns = nil
 	l.mu.Unlock()
+	l.calls.Unlock()
 	l.Listener.Close()
 	for c := range conns {
 		c.Conn.Close()

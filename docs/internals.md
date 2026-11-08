@@ -158,7 +158,10 @@ On restart the server binds its persisted port and serves before touching the
 mount path, so hard-mounted NFS I/O resumes with existing handles and cwd.
 `restart` therefore leaves an NFS or SMB mount in place (`stop` with
 `keep_mount`): the old daemon cuts its file connections before it closes the
-export, and the client retries until the new one serves. A plain `stop`
+export, and the client retries until the new one serves. From the cut on the
+old daemon makes no call into the mount, such as the NFS root refresh after a
+create or removal: with no server it would wait for the new daemon, which
+waits for the old one to exit. A plain `stop`
 unmounts before it replies; while the mount is busy it fails and the daemon
 keeps running, and the next `stop` forces the unmount. The daemon closes its
 admin socket before its final flush, hash drain and state write, which can take
