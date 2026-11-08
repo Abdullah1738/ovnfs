@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -94,7 +95,10 @@ func TestQueriesMatchGit(t *testing.T) {
 				}
 				return
 			}
-			check("--path", pres, pv, found, err)
+			// Git for Windows turns the expanded home directory's
+			// backslashes into slashes; we keep the native spelling.
+			pres.out = filepath.FromSlash(pres.out)
+			check("--path", pres, filepath.FromSlash(pv), found, err)
 		})
 	}
 }

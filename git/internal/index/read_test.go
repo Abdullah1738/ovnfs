@@ -174,7 +174,8 @@ func TestReadMatchesGit(t *testing.T) {
 			if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf 'tok123\\0'\nprintf 'top\\0'\n"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			cfg := []string{"-c", "core.untrackedCache=true", "-c", "core.fsmonitor=" + hook}
+			// git runs the hook through sh, which would eat Windows backslashes.
+			cfg := []string{"-c", "core.untrackedCache=true", "-c", "core.fsmonitor=" + filepath.ToSlash(hook)}
 			r.git(append(cfg, "status", "--porcelain")...)
 			r.git(append(cfg, "status", "--porcelain")...)
 			name := r.path(".git/index")

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -100,16 +101,17 @@ func TestIncludesMatchGit(t *testing.T) {
 	}
 	o.write("inc/sub/rel.inc", mark("rel")+"[include]\n\tpath = ../nested.inc\n")
 	o.write("home/home.inc", mark("home"))
-	o.write("home/work/Repo/dot.cfg", "[includeIf \"gitdir:./\"]\n\tpath = "+o.path("inc/dot.inc")+"\n")
-	inc := func(n string) string { return o.path("inc/" + n + ".inc") }
+	o.write("home/work/Repo/dot.cfg", "[includeIf \"gitdir:./\"]\n\tpath = "+o.cfgPath("inc/dot.inc")+"\n")
+	inc := func(n string) string { return o.cfgPath("inc/" + n + ".inc") }
+	gitDir, top := filepath.ToSlash(r.gitDir), filepath.ToSlash(r.top)
 
 	scenarios := map[string]string{
-		"plain includes":     "[include]\n\tpath = " + o.path("inc/sub/rel.inc") + "\n\tpath = " + inc("abs") + "\n\tpath = ~/home.inc\n\tpath = missing.inc\n",
+		"plain includes":     "[include]\n\tpath = " + o.cfgPath("inc/sub/rel.inc") + "\n\tpath = " + inc("abs") + "\n\tpath = ~/home.inc\n\tpath = missing.inc\n",
 		"empty include path": "[include]\n\tpath =\n",
 		"relative include":   "[include]\n\tpath = ../../../../inc/sub/rel.inc\n",
 		"gitdir": "[includeIf \"gitdir:Repo/\"]\n\tpath = " + inc("gd") + "\n" +
-			"[includeIf \"gitdir:" + r.gitDir + "\"]\n\tpath = " + inc("gdexact") + "\n" +
-			"[includeIf \"gitdir:" + r.top + "\"]\n\tpath = " + inc("gdnomatch") + "\n" +
+			"[includeIf \"gitdir:" + gitDir + "\"]\n\tpath = " + inc("gdexact") + "\n" +
+			"[includeIf \"gitdir:" + top + "\"]\n\tpath = " + inc("gdnomatch") + "\n" +
 			"[includeIf \"gitdir/i:REPO/\"]\n\tpath = " + inc("gdi") + "\n" +
 			"[includeIf \"gitdir:REPO/\"]\n\tpath = " + inc("gdcase") + "\n" +
 			"[includeIf \"gitdir:~/work/\"]\n\tpath = " + inc("tilde") + "\n" +
@@ -121,26 +123,26 @@ func TestIncludesMatchGit(t *testing.T) {
 			"[includeIf \"onbranch:f*/*\"]\n\tpath = " + inc("obglob") + "\n" +
 			"[includeIf \"onbranch:feature/\"]\n\tpath = " + inc("obdir") + "\n" +
 			"[includeIf \"onbranch:refs/heads/feature/x\"]\n\tpath = " + inc("obfull") + "\n",
-		"worktree": "[includeIf \"worktree:" + r.top + "\"]\n\tpath = " + inc("wt") + "\n" +
-			"[includeIf \"worktree/i:" + strings.ToUpper(r.top) + "\"]\n\tpath = " + inc("wti") + "\n" +
-			"[includeIf \"worktree:" + r.top + "/\"]\n\tpath = " + inc("wtslash") + "\n",
+		"worktree": "[includeIf \"worktree:" + top + "\"]\n\tpath = " + inc("wt") + "\n" +
+			"[includeIf \"worktree/i:" + strings.ToUpper(top) + "\"]\n\tpath = " + inc("wti") + "\n" +
+			"[includeIf \"worktree:" + top + "/\"]\n\tpath = " + inc("wtslash") + "\n",
 		"hasconfig": "[includeIf \"hasconfig:remote.*.url:https://example.com/**\"]\n\tpath = " + inc("hc") + "\n" +
 			"[includeIf \"hasconfig:remote.*.url:https://example.com/*\"]\n\tpath = " + inc("hcno") + "\n" +
 			"[includeIf \"hasconfig:remote.*.url:git@later:*\"]\n\tpath = " + inc("hclater") + "\n" +
 			"[includeIf \"hasconfig:remote.*.url:count://*\"]\n\tpath = " + inc("hccount") + "\n" +
 			"[includeIf \"hasconfig:remote.*.pushurl:*\"]\n\tpath = " + inc("unknown") + "\n" +
 			"[remote \"origin\"]\n\turl = https://example.com/a/b\n" +
-			"[include]\n\tpath = " + o.write("inc/remote.inc", "[remote \"later\"]\n\turl = git@later:x\n") + "\n",
-		"hasconfig url in included file": "[includeIf \"hasconfig:remote.*.url:https://nomatch/**\"]\n\tpath = " + o.write("inc/hcremote.inc", "[remote \"x\"]\n\turl = https://nomatch/x\n") + "\n",
+			"[include]\n\tpath = " + filepath.ToSlash(o.write("inc/remote.inc", "[remote \"later\"]\n\turl = git@later:x\n")) + "\n",
+		"hasconfig url in included file": "[includeIf \"hasconfig:remote.*.url:https://nomatch/**\"]\n\tpath = " + filepath.ToSlash(o.write("inc/hcremote.inc", "[remote \"x\"]\n\turl = https://nomatch/x\n")) + "\n",
 		"hasconfig url behind other includeIf": "[includeIf \"hasconfig:remote.*.url:https://q/**\"]\n\tpath = " + inc("hc") + "\n" +
-			"[includeIf \"onbranch:feature/x\"]\n\tpath = " + o.path("inc/hcremote.inc") + "\n",
+			"[includeIf \"onbranch:feature/x\"]\n\tpath = " + o.cfgPath("inc/hcremote.inc") + "\n",
 		"hasconfig url behind false includeIf": "[includeIf \"hasconfig:remote.*.url:https://q/**\"]\n\tpath = " + inc("hc") + "\n" +
-			"[includeIf \"onbranch:main\"]\n\tpath = " + o.path("inc/hcremote.inc") + "\n",
-		"cycle":                          "[include]\n\tpath = " + o.write("inc/self.inc", "[include]\n\tpath = self.inc\n") + "\n",
+			"[includeIf \"onbranch:main\"]\n\tpath = " + o.cfgPath("inc/hcremote.inc") + "\n",
+		"cycle":                          "[include]\n\tpath = " + filepath.ToSlash(o.write("inc/self.inc", "[include]\n\tpath = self.inc\n")) + "\n",
 		"missing value":                  "[include]\n\tpath\n",
 		"missing value, false condition": "[includeIf \"onbranch:main\"]\n\tpath\n",
 		"missing value, true condition":  "[includeIf \"onbranch:feature/x\"]\n\tpath\n",
-		"bad include":                    "[include]\n\tpath = " + o.write("inc/bad.inc", "[t]\n\tok = 1\n[broken\n") + "\n",
+		"bad include":                    "[include]\n\tpath = " + filepath.ToSlash(o.write("inc/bad.inc", "[t]\n\tok = 1\n[broken\n")) + "\n",
 		"unknown user":                   "[include]\n\tpath = ~nosuchuser-ovnfs/x\n",
 	}
 	countEnv := o.with(map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "remote.c.url", "GIT_CONFIG_VALUE_0": "count://x"})
@@ -213,7 +215,8 @@ func TestIncludesMatchGit(t *testing.T) {
 
 func TestNoRepository(t *testing.T) {
 	o := newOracle(t)
-	o.write("xdg/git/config", "[includeIf \"gitdir:**\"]\n\tpath = "+o.write("gd.inc", "[t]\n\tgd = 1\n")+"\n[includeIf \"onbranch:*\"]\n\tpath = "+o.path("gd.inc")+"\n[u]\n\tv = 1\n")
+	o.write("gd.inc", "[t]\n\tgd = 1\n")
+	o.write("xdg/git/config", "[includeIf \"gitdir:**\"]\n\tpath = "+o.cfgPath("gd.inc")+"\n[includeIf \"onbranch:*\"]\n\tpath = "+o.cfgPath("gd.inc")+"\n[u]\n\tv = 1\n")
 	env := o.with(map[string]string{"-GIT_CONFIG_GLOBAL": ""})
 	want, res := o.gitList(o.mkdir("norepo"), env)
 	if res.code != 0 {
@@ -312,14 +315,15 @@ func TestConcurrentQueries(t *testing.T) {
 
 // TestIncludePathsResolveLikeGit covers relative config file names and
 // symlinks: include paths are joined to the includer's directory textually
-// (so "link/.." is resolved by the OS), while a "./" condition pattern stands
-// for the real directory of the config file.
+// (so "link/.." is resolved by the OS: physically on Unix, textually on
+// Windows), while a "./" condition pattern stands for the real directory of
+// the config file.
 func TestIncludePathsResolveLikeGit(t *testing.T) {
 	o := newOracle(t)
 	work := o.initRepo("work/repo")
 	other := o.initRepo("a/repo")
-	marker := o.write("inc/marker.inc", "[t]\n\tdot = 1\n")
-	dotCfg := "[includeIf \"gitdir:./repo/\"]\n\tpath = " + marker + "\n"
+	o.write("inc/marker.inc", "[t]\n\tdot = 1\n")
+	dotCfg := "[includeIf \"gitdir:./repo/\"]\n\tpath = " + o.cfgPath("inc/marker.inc") + "\n"
 	o.write("work/global.cfg", dotCfg)
 	o.write("a/dot.cfg", dotCfg)
 	o.write("a/shared.cfg", "[s]\n\tv = physical\n")
@@ -333,6 +337,10 @@ func TestIncludePathsResolveLikeGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(o.path("work"))
+	viaDotDot, linkDot := "physical", "1"
+	if runtime.GOOS == "windows" {
+		viaDotDot, linkDot = "cleaned", "" // link/../dot.cfg is the missing <root>/dot.cfg
+	}
 
 	for _, c := range []struct {
 		name, global string
@@ -341,8 +349,8 @@ func TestIncludePathsResolveLikeGit(t *testing.T) {
 	}{
 		{"relative config file", "global.cfg", work, "t.dot", "1"},
 		{"relative config file via ..", "../work/global.cfg", work, "t.dot", "1"},
-		{"include through symlink and ..", o.path("viadotdot.cfg"), work, "s.v", "physical"},
-		{"config reached via symlink and ..", o.path("link") + "/../dot.cfg", other, "t.dot", "1"},
+		{"include through symlink and ..", o.path("viadotdot.cfg"), work, "s.v", viaDotDot},
+		{"config reached via symlink and ..", o.path("link") + "/../dot.cfg", other, "t.dot", linkDot},
 		{"config file symlink", "filelink.cfg", other, "t.dot", "1"},
 		{"config file symlink, link's directory", "filelink.cfg", work, "t.dot", ""},
 	} {

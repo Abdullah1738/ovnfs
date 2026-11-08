@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"os/user"
+	"runtime"
 	"strings"
 )
 
@@ -139,18 +140,17 @@ func expandTilde(p string, env func(string) (string, bool)) (string, error) {
 	name, rest, _ := strings.Cut(p[1:], "/")
 	slash := len(p) > 1+len(name)
 	var home string
-	if name == "" {
-		h, ok := homeDir(env)
-		if !ok {
-			return "", fmt.Errorf("failed to expand user dir in: '%s'", p)
+	ok := false
+	switch {
+	case name == "":
+		home, ok = homeDir(env)
+	case runtime.GOOS != "windows": // Git for Windows never expands "~user".
+		if u, err := user.Lookup(name); err == nil {
+			home, ok = u.HomeDir, true
 		}
-		home = h
-	} else {
-		u, err := user.Lookup(name)
-		if err != nil {
-			return "", fmt.Errorf("failed to expand user dir in: '%s'", p)
-		}
-		home = u.HomeDir
+	}
+	if !ok {
+		return "", fmt.Errorf("failed to expand user dir in: '%s'", p)
 	}
 	if !slash {
 		return home, nil

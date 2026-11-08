@@ -48,6 +48,10 @@ func newOracle(t *testing.T) *oracle {
 
 func (o *oracle) path(rel string) string { return filepath.Join(o.root, filepath.FromSlash(rel)) }
 
+// cfgPath is o.path spelled for a config file value or condition, where
+// Windows backslashes would be read as escapes.
+func (o *oracle) cfgPath(rel string) string { return filepath.ToSlash(o.path(rel)) }
+
 func (o *oracle) mkdir(rel string) string {
 	o.t.Helper()
 	p := o.path(rel)
