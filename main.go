@@ -93,8 +93,9 @@ func run(args []string) error {
 	if args[0] == "help" {
 		return printHelp(c, args[1:])
 	}
-	// version and mesh read no configuration, so they run where none parses.
-	if verb := args[0]; verb != "version" && verb != "mesh" {
+	// version and mesh read no configuration, so they run where none parses;
+	// config reads it itself, so a broken file can still be fixed with it.
+	if verb := args[0]; verb != "version" && verb != "mesh" && verb != "config" {
 		if err := c.resolveDirs(); err != nil {
 			return err
 		}

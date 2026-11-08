@@ -153,6 +153,10 @@ is always pruned.
     local   data/**      # keep a dataset out of snapshots
   ```
 
+  `ovnfs config set --append rules 'source .env.local'` adds a rule line to
+  the folder's file without editing YAML (`--global` for the user's);
+  `ovnfs config list` shows both files' settings.
+
 ## Scripting and multiple agents
 
 - Give each agent or job a unique name, such as a role prefix plus a random

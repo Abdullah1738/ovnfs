@@ -101,7 +101,7 @@ ovnfs isolates files, not processes: it is not a sandbox.
 
 ## Documentation
 
-- [Configuration](docs/configuration.md): classes, rules, `.o2/ovnfs.yml`, where state and checkouts live
+- [Configuration](docs/configuration.md): classes, rules, `.o2/ovnfs.yml` and `ovnfs config`, where state and checkouts live
 - [Checkouts](docs/checkouts.md): `--rev`, `--take`, `run`, snapshots, forks, `diff` and `apply`
 - [Remote checkouts](docs/remote.md): `attach`, `send`, `pull`, `push`, `share`
 - [Platforms](docs/platforms.md): NFS, FUSE, SMB and WinFsp frontends

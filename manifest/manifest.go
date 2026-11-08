@@ -65,6 +65,27 @@ type Manifest struct {
 	Files []string         // manifest files read, highest precedence first (display form)
 }
 
+// daemonKeys are the settings only the user-wide manifest may set, each with
+// the YAML type it accepts besides a string or null ("" for none).
+var daemonKeys = map[string]string{
+	"state": "", "mount": "", "proto": "",
+	"memory": "!!int", "fsync": "!!bool", "blob_cache": "!!int", "atime": "!!bool",
+}
+
+// UserOnly reports whether key is a daemon setting, which only ~/.o2/ovnfs.yml
+// may set; `ovnfs config` writes such keys there unless told otherwise.
+func UserOnly(key string) bool {
+	_, ok := daemonKeys[key]
+	return ok
+}
+
+// cacheRoot cleans a cache key as written ("./web/dist") into the root path it
+// names ("web/dist"); ok is false for a key naming no path.
+func cacheRoot(k string) (string, bool) {
+	root := strings.TrimPrefix(path.Clean(strings.TrimPrefix(k, "./")), "/")
+	return root, root != "" && root != "."
+}
+
 // layer is one parsed manifest file.
 type layer struct {
 	rules  []rules.Rule
@@ -86,18 +107,17 @@ func Load(root, userHome string, overrides []string) (Manifest, error) {
 		m.Rules.Rules = append(m.Rules.Rules, r)
 	}
 
-	projectPath := filepath.Join(root, filepath.FromSlash(File))
-	userPath := filepath.Join(userHome, filepath.FromSlash(File))
 	// A root that is the user's home has one manifest, not two layers of the same file.
-	home := userHome != "" && filepath.Clean(userPath) == filepath.Clean(projectPath)
-	project, okProject, err := readLayer(projectPath, File, home)
+	folder := FolderDoc(root, userHome)
+	project, okProject, err := readLayer(folder.Path, folder.Name, folder.user)
 	if err != nil {
 		return Manifest{}, err
 	}
 	var user layer
 	var okUser bool
-	if userHome != "" && !home {
-		user, okUser, err = readLayer(userPath, userFile, true)
+	if userHome != "" && !folder.user {
+		u := UserDoc(userHome)
+		user, okUser, err = readLayer(u.Path, u.Name, true)
 		if err != nil {
 			return Manifest{}, err
 		}
@@ -134,7 +154,8 @@ func Load(root, userHome string, overrides []string) (Manifest, error) {
 // ~/ standing for userHome. A missing file or key leaves the field empty; the
 // whole file is checked, so any manifest error fails here too.
 func UserDaemon(userHome string) (Daemon, error) {
-	l, _, err := readLayer(filepath.Join(userHome, filepath.FromSlash(File)), userFile, true)
+	u := UserDoc(userHome)
+	l, _, err := readLayer(u.Path, u.Name, true)
 	if err != nil {
 		return Daemon{}, err
 	}
@@ -224,9 +245,8 @@ func parseLayer(data []byte, display string, user bool) (layer, error) {
 			if !user {
 				return layer{}, fmt.Errorf("%s:%d: %q is read only from %s", display, root.Content[i].Line, k, userFile)
 			}
-			valid := v.Kind == yaml.ScalarNode && (v.Tag == "!!str" || v.Tag == "!!null" ||
-				((k == "memory" || k == "blob_cache") && v.Tag == "!!int") ||
-				((k == "fsync" || k == "atime") && v.Tag == "!!bool"))
+			typ := daemonKeys[k]
+			valid := v.Kind == yaml.ScalarNode && (v.Tag == "!!str" || v.Tag == "!!null" || typ != "" && v.Tag == typ)
 			if !valid {
 				return layer{}, fmt.Errorf("%s:%d: invalid value type for %s", display, v.Line, k)
 			}
@@ -256,8 +276,8 @@ func parseLayer(data []byte, display string, user bool) (layer, error) {
 		Fsync: f.Fsync, BlobCache: f.BlobCache, Atime: f.Atime,
 	}}
 	for k, c := range f.Cache {
-		key := strings.TrimPrefix(path.Clean(strings.TrimPrefix(k, "./")), "/")
-		if key == "" || key == "." {
+		key, ok := cacheRoot(k)
+		if !ok {
 			return layer{}, fmt.Errorf("%s: invalid cache key %q", display, k)
 		}
 		if l.cache == nil {

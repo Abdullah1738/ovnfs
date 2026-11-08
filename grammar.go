@@ -133,6 +133,7 @@ type verbs struct {
 	Subscribe  subscribeCmd              `cmd:"" group:"daemon" help:"stream daemon events as JSON lines until interrupted"`
 	Ctl        ctlCmd                    `cmd:"" group:"daemon" help:"send one raw admin request and print the raw reply"`
 	Profile    profileCmd                `cmd:"" group:"daemon" help:"capture a runtime profile from the daemon (cpu, heap, allocs, goroutine, block, mutex, threadcreate)"`
+	Config     configCmd                 `cmd:"" group:"ovnfs itself" help:"get and set .o2/ovnfs.yml settings by key, as git config does"`
 	Version    versionCmd                `cmd:"" group:"ovnfs itself" help:"print the version and toolchain this binary was built from"`
 	Update     updateCmd                 `cmd:"" group:"ovnfs itself" help:"replace this binary with the latest ovnfs, by go install if it built it, else from the latest release"`
 	Mesh       meshCmd                   `cmd:"" group:"ovnfs itself" hidden:"" help:"removed"`
@@ -154,6 +155,7 @@ func newCLIParser(c *cli, args []string, commands *verbs) (*kong.Kong, error) {
 	return kong.New(commands,
 		kong.Name("ovnfs"),
 		serveDefaults(conf),
+		kong.Vars{"key_help": keyHelp},
 		kong.Description("Checkouts for agents: isolated, copy-on-write views of any folder, a git repository or not, opened without copying it."),
 		kong.Writers(stdout, stderr),
 		kong.Bind(c),

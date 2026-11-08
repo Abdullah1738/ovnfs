@@ -189,6 +189,48 @@ environment variables are `OVNFS_MEMORY`, `OVNFS_FSYNC`, `OVNFS_BLOB_CACHE`
 and `OVNFS_ATIME`; `proto` has no environment variable. Serve settings take
 effect when the daemon starts; restart it after changing them.
 
+### `ovnfs config`
+
+`ovnfs config` reads and writes these files by key, as `git config` does its
+files:
+
+```sh
+ovnfs config set --append rules 'source .env.local'    # add a rule line to the folder's file
+ovnfs config set cache.node_modules.rebuild 'bun install --frozen-lockfile'
+ovnfs config set env.setup 'bun install' 'bun run build'
+ovnfs config set proto smb                              # a daemon setting: ~/.o2/ovnfs.yml
+ovnfs config get rules --show-origin
+ovnfs config list
+ovnfs config unset cache.node_modules.rebuild
+ovnfs config edit --global
+```
+
+The keys are `rules`, `cache.ROOT.rebuild`, `cache.ROOT.key`, `env.image`,
+`env.setup` and the daemon settings `state`, `mount`, `proto`, `memory`,
+`fsync`, `blob_cache` and `atime`. A cache root may hold dots
+(`cache.web/.next.key`) and matches its entry however it is spelled
+(`cache.web/dist.rebuild` finds `./web/dist`). `rules`, `env.setup` and
+`cache.ROOT.key` take several values, one rule line or item each, and
+`set --append` adds to them; every other key takes one.
+
+`--local` picks the `.o2/ovnfs.yml` at the source root of the current
+directory, `--global` picks `~/.o2/ovnfs.yml`. Without either, `list` prints
+the settings of both as `KEY=VALUE`, the folder's first, and `get` prints a
+key's values as a checkout opened here would take them: rules from both files,
+a `cache.ROOT` field from the first file with an entry for ROOT, any other key
+from the first file that sets it. Writes go to the folder's file, except daemon
+settings, which go to the user's. `--show-origin` prefixes each value with its
+file and a tab; `--json` prints `[{"file", "key", "value"}, …]`.
+
+`set` and `unset` keep comments but rewrite indentation and blank lines, and
+refuse, writing nothing, a result that would not load, such as an invalid
+predicate; `unset` also removes the sections it empties. `edit` opens the file
+in `$VISUAL` or `$EDITOR` (default `vi`, `notepad` on Windows), which creates
+it if missing, then reports any error in it. As with git, `get` exits 1 when
+the key is unset and `unset` exits 5 when the file does not set it. `config`
+needs no loadable `~/.o2/ovnfs.yml` to start, so `ovnfs config edit --global`
+repairs one that makes every other verb fail.
+
 ### Cache and env
 
 A `cache` key names a cache root: a path from the source root (`web/.next`),
