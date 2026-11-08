@@ -195,24 +195,28 @@ func Open(c Config, m Meta) (*Base, error) {
 	return load(c, m, res)
 }
 
-// load indexes the capture's leaves and their implied directories.
+// load indexes the capture's leaves and their implied directories. A capture
+// just taken brings the domains it read; one loaded from disk reads them again.
 func load(c Config, m Meta, res *source.Result) (*Base, error) {
 	m.ForkTime = m.ForkTime.UTC()
-	// A repository that vanished since capture only loses its facts and objects;
-	// the base stays readable from pins and the store.
-	var repos []source.Repo
-	for _, r := range res.Repos {
-		if _, err := git.Open(filepath.Join(m.Dir, filepath.FromSlash(r.Path))); err == nil {
-			repos = append(repos, r)
-		} else if c.OnFault != nil {
-			c.OnFault(fmt.Sprintf("base %s: repository %q unavailable: %v", m.ID, r.Path, err))
+	domains := res.Domains
+	if domains == nil {
+		// A repository that vanished since capture only loses its facts and objects;
+		// the base stays readable from pins and the store.
+		var repos []source.Repo
+		for _, r := range res.Repos {
+			if _, err := git.Open(filepath.Join(m.Dir, filepath.FromSlash(r.Path))); err == nil {
+				repos = append(repos, r)
+			} else if c.OnFault != nil {
+				c.OnFault(fmt.Sprintf("base %s: repository %q unavailable: %v", m.ID, r.Path, err))
+			}
 		}
+		var err error
+		if domains, err = source.NewDomains(m.Dir, repos); err != nil {
+			return nil, err
+		}
+		res.Domains = domains
 	}
-	domains, err := source.NewDomains(m.Dir, repos)
-	if err != nil {
-		return nil, err
-	}
-	res.Domains = domains
 	b := &Base{config: c, meta: m, capture: res, domains: domains, sources: map[string]entry{"": {mode: os.ModeDir | 0o755}}, children: make(map[string][]string), classes: res.Roots, cats: make(map[string]*git.CatFile)}
 	if b.classes == nil {
 		b.classes = map[string]rules.Class{}

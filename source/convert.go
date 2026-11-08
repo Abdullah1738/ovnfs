@@ -66,6 +66,7 @@ type verifier struct {
 	ctx     context.Context
 	repo    *git.Repo
 	path    string        // the repository's root-relative work tree
+	started bool          // git was asked to start; walk goroutine only
 	ready   chan struct{} // closed once conv and attrs are set
 	conv    git.Conversion
 	attrs   *git.Stream[candidate, []string] // nil when git could not be asked
@@ -77,30 +78,46 @@ type verifier struct {
 }
 
 // verifier returns the verifier of the repository whose work tree is root-relative
-// path, starting its git processes in the background so the walk need not wait.
+// path. Its git processes start in the background so the walk need not wait: at
+// once for a capture without a stat cache, where most tracked files become
+// candidates, else with its first candidate, so a capture the stat cache serves
+// whole starts none.
 func (w *walker) verifier(ctx context.Context, path string, repo *git.Repo) *verifier {
 	if v := w.verifiers[path]; v != nil {
 		return v
 	}
-	v := &verifier{w: w, ctx: ctx, repo: repo, path: path, ready: make(chan struct{})}
+	v := &verifier{w: w, repo: repo, path: path, ready: make(chan struct{})}
 	w.verifiers[path] = v
+	if w.cold {
+		v.start(ctx)
+	}
+	return v
+}
+
+// start asks git for the repository's conversion settings and opens the
+// attribute stream; walk goroutine only.
+func (v *verifier) start(ctx context.Context) {
+	if v.started {
+		return
+	}
+	v.started, v.ctx = true, ctx
 	go func() {
 		defer close(v.ready)
-		conv, err := repo.Conversion(ctx)
+		conv, err := v.repo.Conversion(ctx)
 		if err == nil {
 			v.conv = conv
-			v.attrs, err = git.CheckAttr(ctx, repo, convertAttrs, v.classified)
+			v.attrs, err = git.CheckAttr(ctx, v.repo, convertAttrs, v.classified)
 		}
 		if err != nil {
 			v.attrs = nil
 			v.warnOnce(err)
 		}
 	}()
-	return v
 }
 
 // add queues one candidate by its repository-relative path; walk goroutine only.
-func (v *verifier) add(rel, oid string, j hashJob) {
+func (v *verifier) add(ctx context.Context, rel, oid string, j hashJob) {
+	v.start(ctx)
 	<-v.ready
 	if v.attrs == nil {
 		v.w.jobs <- j
@@ -186,6 +203,9 @@ func (v *verifier) warnOnce(err error) {
 // finishVerifiers waits until every candidate is taken or queued for hashing.
 func (w *walker) finishVerifiers() {
 	for _, v := range w.verifiers {
+		if !v.started {
+			continue
+		}
 		if <-v.ready; v.attrs != nil {
 			v.attrs.Close()
 		}
@@ -199,7 +219,12 @@ func (w *walker) finishVerifiers() {
 	defer w.mu.Unlock()
 	for _, v := range w.verifiers {
 		for _, c := range v.taken {
-			w.res.Files[c.j.p] = store.File{Mode: c.j.mode, ID: store.OID(c.oid)}
+			// The index blob is the file's bytes: a work-tree content id the stat
+			// cache keeps, whatever attributes say later, while git keeps the blob.
+			id := store.OID(c.oid)
+			w.res.Files[c.j.p] = store.File{Mode: c.j.mode, ID: id}
+			w.cacheOut[c.j.p] = newStatEntry(c.j.info, c.j.key, c.j.mode, id)
+			w.repoHeld = true
 		}
 		v.taken = nil
 	}

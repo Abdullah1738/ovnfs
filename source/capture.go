@@ -102,6 +102,11 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 	// Reading the stat cache's tree overlaps the start of the walk.
 	go w.loadCache(epoch)
 	defer func() { <-w.cacheReady }()
+	if o.Cache == "" {
+		w.cold = true
+	} else if _, err := os.Stat(o.Cache); err != nil {
+		w.cold = true
+	}
 	var repos []Repo
 	if repo, err := git.Open(o.Root); err == nil && repo.Top == o.Root {
 		r, err := w.copyRepo(ctx, repo, "")
@@ -127,7 +132,9 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 		w.unproven = true
 	}
 	w.startPool()
+	w.startReaders()
 	_, walkErr := w.dir(ctx, "")
+	w.stopReaders()
 	if walkErr == nil {
 		<-w.cacheReady
 		w.resolvePending(ctx)
@@ -142,6 +149,11 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 			return Result{}, err
 		}
 		if o.Cache != "" {
+			// Files whose blobs the repository holds, not the store, make the next
+			// capture check every entry: a file git no longer tracks may lose its blob.
+			if w.repoHeld {
+				epoch = ""
+			}
 			if err := saveStatCache(o.Cache, w.res.Tree, w.res.Files, w.cacheOut, start, epoch); err != nil {
 				w.warn("stat cache not saved: " + err.Error())
 			}
@@ -184,11 +196,14 @@ type walker struct {
 	cacheReady  chan struct{}        // closed once the stat cache is loaded
 	pending     []hashJob            // files met before cacheReady, in walk order; walk goroutine only
 	cacheOut    map[string]statEntry
+	repoHeld    bool // cacheOut names blobs the repository holds; guarded by mu
 	dropped     int
 	repos       int                  // index copies taken so far, naming their directories
+	cold        bool                 // no stat cache: git's content checks start with the walk
 	verifiers   map[string]*verifier // by repository path; created before and during the walk, read after it
 	jobs        chan hashJob
 	workers     sync.WaitGroup
+	ahead       readAhead  // directories read ahead of the walk
 	identity    *reuseHash // walked entries' stat data in walk order; walk goroutine only
 	unproven    bool       // an entry's stat data is missing from identity; walk goroutine only
 }
@@ -245,18 +260,52 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	entries, keyOf, err := readDir(w.abs(rel))
-	if err != nil {
-		return false, err
+	l := w.listing(rel)
+	if l.err != nil {
+		return false, l.err
 	}
+	entries, keyOf := l.entries, l.keyOf
+	w.ahead.open[rel] = l
+	defer delete(w.ahead.open, rel)
 	if rel != "" && slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == ".git" }) {
 		// Before any entry is classified, so they get the nested repository's facts.
 		if err := w.nested(ctx, rel); err != nil {
 			w.warn(fmt.Sprintf("%s: nested repository ignored: %v", rel, err))
 		}
 	}
+	// Every entry is classified first, so the source directories among them are
+	// read ahead while the walk descends into the first. Only those: listing a
+	// directory the walk leaves alone can update its access time, an edit the
+	// folder's watcher would report.
+	type decision struct {
+		info  os.FileInfo
+		key   fileKey
+		class rules.Class
+		err   error
+	}
+	decided := make([]decision, len(entries))
+	for i, e := range entries {
+		if e.Name() == ".git" {
+			continue
+		}
+		info, err := l.infos[i], l.errs[i]
+		if err != nil {
+			decided[i].err = err
+			continue
+		}
+		p := path.Join(rel, e.Name())
+		info = hostfile.Linked(w.abs(p), info)
+		d := decision{info: info, key: keyOf(info), class: rules.Source}
+		if rule, ok := w.o.Rules.Match(p, w.domains.Facts(walkView{w}, p, info)); ok {
+			d.class = rule.Class
+		}
+		if d.class == rules.Source && info.IsDir() {
+			w.queueAhead(p)
+		}
+		decided[i] = d
+	}
 	any := false
-	for _, e := range entries {
+	for i, e := range entries {
 		name := e.Name()
 		p := path.Join(rel, name)
 		if name == ".git" {
@@ -274,21 +323,16 @@ func (w *walker) dir(ctx context.Context, rel string) (bool, error) {
 			}
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			if os.IsNotExist(err) {
+		d := decided[i]
+		if d.err != nil {
+			if os.IsNotExist(d.err) {
 				continue
 			}
-			w.warn(fmt.Sprintf("%s: %v", p, err))
+			w.warn(fmt.Sprintf("%s: %v", p, d.err))
 			w.root(p, rules.Hidden, nil, fileKey{})
 			continue
 		}
-		info = hostfile.Linked(w.abs(p), info)
-		key := keyOf(info)
-		class := rules.Source
-		if rule, ok := w.o.Rules.Match(p, w.domains.Facts(Dir(w.o.Root), p, info)); ok {
-			class = rule.Class
-		}
+		info, key, class := d.info, d.key, d.class
 		if class != rules.Source {
 			w.identity.stat(p, class, info, key)
 			w.root(p, class, info, key)
@@ -432,20 +476,27 @@ func (w *walker) resolvePending(ctx context.Context) {
 
 // resolve reuses a known blob id when stat data proves the content unchanged,
 // else queues hashing. The stat cache comes first: it holds work-tree content
-// ids, so files git converts need no question to git once captured.
+// ids, so files git converts need no question to git once captured. Its blob is
+// in the store, or, for a tracked file git stores unconverted, in the
+// repository while the index still names it.
 func (w *walker) resolve(ctx context.Context, j hashJob) {
-	if e, ok := w.cacheIn[j.p]; ok && e.matches(j.info, j.key, j.mode) && (w.o.Store == nil || w.cacheStored || w.o.Store.Has(e.OID)) {
-		w.mu.Lock()
-		w.res.Files[j.p] = store.File{Mode: j.mode, ID: e.OID}
-		w.cacheOut[j.p] = e
-		w.mu.Unlock()
-		return
-	}
 	dom := w.domains.For(j.p)
 	rel := dom.rel(j.p)
-	if e, ok := dom.index[rel]; ok && indexClean(e, j.info, j.key, j.mode, dom.indexAt.Modified) {
+	entry, tracked := dom.index[rel]
+	if e, ok := w.cacheIn[j.p]; ok && e.matches(j.info, j.key, j.mode) {
+		indexed := tracked && entry.OID == string(e.OID)
+		if indexed || w.o.Store == nil || w.cacheStored || w.o.Store.Has(e.OID) {
+			w.mu.Lock()
+			w.res.Files[j.p] = store.File{Mode: j.mode, ID: e.OID}
+			w.cacheOut[j.p] = e
+			w.repoHeld = w.repoHeld || indexed
+			w.mu.Unlock()
+			return
+		}
+	}
+	if tracked && indexClean(entry, j.info, j.key, j.mode, dom.indexAt.Modified) {
 		// Tracked and unchanged: the user's repository holds the content unless git converts it.
-		w.verifier(ctx, dom.path, dom.repo).add(rel, e.OID, j)
+		w.verifier(ctx, dom.path, dom.repo).add(ctx, rel, entry.OID, j)
 		return
 	}
 	w.jobs <- j
