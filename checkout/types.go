@@ -163,12 +163,16 @@ type Registry struct {
 	closeErr     error
 	watcher      *watch.Watcher // nil where folder events are unsupported
 	watchWake    chan struct{}
+	watchMu      sync.Mutex              // held while the watched folder set changes
+	watched      map[string]bool         // watchMu: folders the watcher was given
+	folders      map[string]*reuseFolder // r.mu: folders whose creates reuse captures, by source root
 	rootsMu      sync.Mutex
 	roots        map[string]string        // rootsMu: folders a create named, by their resolved source root
 	resolving    map[string]chan struct{} // rootsMu: folders being resolved, closed when done
 	mirror       *mirror                  // git upstream content of attached checkouts
 	commits      stateCommits             // durable state commits requested outside r.mu
 	writes       stateWrites              // orders state.json writes
+	prepares     chan struct{}            // a slot per checkout being prepared on a warm capture
 }
 
 // checkoutRecord holds one freeze lock for all calls against a live folder.

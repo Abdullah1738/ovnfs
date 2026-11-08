@@ -321,6 +321,27 @@ func (b *Base) Live(p string) bool {
 	return live
 }
 
+// Affects reports whether an edit at folder path p can make the folder differ
+// from the capture: false only below a cache, local or hidden root, which the
+// capture never descended. A name the capture never saw counts, since it may
+// be source. Remote bases have no folder to edit.
+func (b *Base) Affects(p string) bool {
+	if b.remote != nil {
+		return false
+	}
+	p = cleanPath(p)
+	prefix := ""
+	for component := range strings.SplitSeq(p, "/") {
+		prefix = path.Join(prefix, component)
+		if _, ok := b.sources[prefix]; ok {
+			continue
+		}
+		_, known := b.classes[prefix]
+		return !known
+	}
+	return true
+}
+
 // derivedRoot finds the first path prefix absent from the captured tree; live
 // reports a cache or local root, which the view serves from the folder. Any
 // other absent prefix (a hidden root, or a name that appeared after the

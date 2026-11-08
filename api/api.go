@@ -94,7 +94,8 @@ type Capture struct {
 	Seconds     float64  `json:"seconds"`
 }
 
-// NewReply returns the created checkout.
+// NewReply returns the created checkout. Capture describes the capture it sits
+// on, which a create of an unchanged folder reuses from an earlier one.
 type NewReply struct {
 	Checkout Checkout `json:"checkout"`
 	Capture  *Capture `json:"capture,omitempty"` // nil when opened from a snapshot

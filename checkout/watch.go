@@ -41,51 +41,75 @@ func (r *Registry) wakeWatch() {
 }
 
 // watchFolders keeps the folder watcher on exactly the source folders of local
-// bases, off the registry lock: adding or removing a folder may wait for an
-// in-flight event batch, which itself reads the registry.
+// bases and of folders whose captures are reused (see reuseFolder), off the registry
+// lock: adding or removing a folder may wait for an in-flight event batch, which
+// itself reads the registry.
 func (r *Registry) watchFolders() {
 	defer r.workers.Done()
-	have := make(map[string]bool)
 	for {
 		select {
 		case <-r.stop:
 			return
 		case <-r.watchWake:
 		}
+		r.watchMu.Lock()
 		r.mu.RLock()
-		want := make(map[string]bool, len(r.bases))
+		want := make(map[string]bool, len(r.bases)+len(r.folders))
 		for _, b := range r.bases {
 			if m := b.view.Meta(); m.Remote == nil && m.Dir != "" {
 				want[m.Dir] = true
 			}
 		}
+		for root := range r.folders {
+			want[root] = true
+		}
 		r.mu.RUnlock()
-		for dir := range have {
+		for dir := range r.watched {
 			if !want[dir] {
 				r.watcher.Remove(dir)
-				delete(have, dir)
+				delete(r.watched, dir)
 			}
 		}
 		for dir := range want {
-			if have[dir] {
-				continue
+			if !r.watched[dir] {
+				r.addWatchLocked(dir)
 			}
-			if err := r.watcher.Add(dir); err != nil {
-				r.enqueueNotice(baseNotice{fault: "watch " + dir + ": " + err.Error()})
-				continue
-			}
-			have[dir] = true
 		}
+		r.watchMu.Unlock()
 	}
 }
 
-// folderChanged maps folder edits to the checkouts whose live paths show them
-// and invalidates those paths. A reported folder root means individual events
+// watchFolder starts watching folder dir now, rather than when the watch loop
+// next runs, and reports whether every change below it reaches folderChanged.
+// The caller holds no registry lock and has registered dir in r.folders, which
+// keeps the loop from dropping it.
+func (r *Registry) watchFolder(dir string) bool {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if !r.watched[dir] {
+		r.addWatchLocked(dir)
+	}
+	return r.watcher.Covers(dir)
+}
+
+// addWatchLocked gives the watcher dir; r.watchMu is held.
+func (r *Registry) addWatchLocked(dir string) {
+	if err := r.watcher.Add(dir); err != nil {
+		r.enqueueNotice(baseNotice{fault: "watch " + dir + ": " + err.Error()})
+		return
+	}
+	r.watched[dir] = true
+}
+
+// folderChanged records folder edits that can change a capture (see reuseFolder), and
+// maps them to the checkouts whose live paths show them and invalidates those
+// paths. A reported folder root means individual events
 // were lost, so every checkout on that folder is invalidated whole.
 func (r *Registry) folderChanged(paths []string) {
 	changed := make(map[string][]string) // checkout -> changed paths, nil for all
 	whole := make(map[string]bool)
 	r.mu.RLock()
+	r.foldersChangedLocked(paths)
 	users := make(map[*baseRecord][]string)
 	for name, h := range r.checkouts {
 		if !h.retired.Load() {

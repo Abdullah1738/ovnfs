@@ -15,7 +15,12 @@ branch name instead. Unrelated staged work stays staged. `--dry-run` previews
 this checked-out-branch update without writing.
 
 On a 49k-file repository, opening a checkout takes about a second and
-`git status` inside it under three.
+`git status` inside it under three. Later creates of the same folder reuse that
+capture while the folder has not changed in a way a checkout shows, and take a
+checkout prepared ahead of time: on a 3,000-file repository on Windows, a create
+returns in about 15 ms, and after a source edit the folder is captured again in
+about 50 ms, once for all the creates waiting on it (see
+[internals](internals.md#fast-creates)).
 
 Repeated ordinary `new` calls share a captured base when the folder's fresh
 stat-backed capture, rules and git metadata still match. Each checkout still

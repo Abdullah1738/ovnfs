@@ -93,8 +93,9 @@ func Open(c Config) (*Registry, error) {
 	if err != nil {
 		return nil, coded(err)
 	}
-	r := &Registry{config: c, store: st, checkouts: make(map[string]*checkoutRecord), snapshots: make(map[string]*snapRecord), lineage: make(map[string]*snapRecord), bases: make(map[string]*baseRecord), layers: make(map[string]*layerRecord), intents: make(map[string]diskIntent), reserved: make(map[string]bool), roots: make(map[string]string), nextSnapshot: d.NextSnapshot, proto: d.Proto, port: d.Port, rootTime: time.Now().UTC(), gcWake: make(chan struct{}, 1), noticeWake: make(chan struct{}, 1), stop: make(chan struct{})}
+	r := &Registry{config: c, store: st, checkouts: make(map[string]*checkoutRecord), snapshots: make(map[string]*snapRecord), lineage: make(map[string]*snapRecord), bases: make(map[string]*baseRecord), layers: make(map[string]*layerRecord), intents: make(map[string]diskIntent), reserved: make(map[string]bool), watched: make(map[string]bool), folders: make(map[string]*reuseFolder), roots: make(map[string]string), nextSnapshot: d.NextSnapshot, proto: d.Proto, port: d.Port, rootTime: time.Now().UTC(), gcWake: make(chan struct{}, 1), noticeWake: make(chan struct{}, 1), stop: make(chan struct{})}
 	r.commits.cond.L = &r.commits.mu
+	r.prepares = make(chan struct{}, prepareSlots)
 	r.resolving = make(map[string]chan struct{})
 	r.stateLock = stateLock
 	r.node = c.Node
@@ -225,8 +226,9 @@ func Open(c Config) (*Registry, error) {
 	// Without folder events, live paths are simply never delegated (see Tracked).
 	if r.watcher, err = watch.New(r.folderChanged); err == nil {
 		r.watchWake = make(chan struct{}, 1)
-		r.workers.Add(1)
+		r.workers.Add(2)
 		go r.watchFolders()
+		go r.coolFolders()
 		r.wakeWatch()
 	} else if !errors.Is(err, errors.ErrUnsupported) {
 		r.enqueueNotice(baseNotice{fault: "watch source folders: " + err.Error()})
@@ -373,6 +375,13 @@ func (r *Registry) Close() error {
 		close(r.stop)
 		r.workers.Wait()
 		r.mirror.close()
+		r.mu.Lock()
+		var prepared []*checkoutRecord
+		for _, f := range r.folders {
+			prepared = append(prepared, r.coolLocked(f)...)
+		}
+		r.mu.Unlock()
+		r.discardPrepared(prepared)
 		r.mu.Lock()
 		for _, h := range r.checkouts {
 			h.freeze.Lock()
@@ -629,8 +638,10 @@ func (r *Registry) collectGarbage() {
 				delete(r.layers, id)
 			}
 		}
-		// Capture reuse acquires a reference under this lock, so a base selected
-		// for removal cannot be reacquired by a concurrent folder create.
+		// A zero-reference base cannot be reacquired: snapshot creates already retain
+		// it, a folder's warm capture is retained by the folder, and capture reuse
+		// acquires a reference under this lock, so a base selected for removal
+		// cannot be reacquired by a concurrent folder create.
 		for id, b := range r.bases {
 			if b.refs == 0 && !r.baseReservedLocked(id) {
 				deadBases[id] = b

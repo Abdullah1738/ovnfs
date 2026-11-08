@@ -135,6 +135,9 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	if err != nil {
 		return api.NewReply{}, failure("invalid", "%v", err)
 	}
+	if revision == nil && len(takes) == 0 && r.watcher != nil {
+		return r.newOnFolder(ctx, root, m, args.Name)
+	}
 	reply, _, err := r.capture(ctx, root, m, args.Name, revision, takes)
 	return reply, err
 }

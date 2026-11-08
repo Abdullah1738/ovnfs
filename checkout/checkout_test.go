@@ -453,7 +453,8 @@ func (f *fixture) gitdir(name string) string {
 	return f.reg.gitdirPath(name)
 }
 
-// checkoutDirs lists the checkout directories below state/kind ("uppers" or "git").
+// checkoutDirs lists the checkout directories below state/kind ("uppers" or "git"),
+// leaving out those of checkouts prepared for later creates (see reuseFolder).
 func checkoutDirs(t *testing.T, state, kind string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(state, kind))
@@ -462,7 +463,9 @@ func checkoutDirs(t *testing.T, state, kind string) []string {
 	}
 	var dirs []string
 	for _, e := range entries {
-		dirs = append(dirs, e.Name())
+		if !strings.HasPrefix(e.Name(), preparedPrefix) {
+			dirs = append(dirs, e.Name())
+		}
 	}
 	return dirs
 }
