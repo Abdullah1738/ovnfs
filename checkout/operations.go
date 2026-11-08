@@ -1238,19 +1238,19 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 	return s, nil
 }
 
-// Rm retires handles while frozen and deletes writable state; snapshots stay until
-// dropped. The removal is published before the checkout's files go, outside the
+// Rm retires handles while frozen and deletes writable state and unused snapshots.
+// The removal is published before the checkout's files go, outside the
 // registry lock and with a state write shared with concurrent operations; a crash
 // in between leaves files no checkout names, which reopening removes. The name
 // stays reserved until they are gone.
 func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
-	_, err := r.remove(ctx, args.Checkout, time.Time{})
+	_, err := r.remove(ctx, args.Checkout, time.Time{}, args.StickySnapshots)
 	return err
 }
 
 // remove is Rm, except that with picked set it keeps a checkout whose Touched is
 // no longer picked, one changed since prune picked it, and reports false.
-func (r *Registry) remove(ctx context.Context, name string, picked time.Time) (bool, error) {
+func (r *Registry) remove(ctx context.Context, name string, picked time.Time, stickySnapshots bool) (bool, error) {
 	if err := checkContext(ctx); err != nil {
 		return false, err
 	}
@@ -1295,6 +1295,8 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time) (b
 		r.mu.Lock()
 		r.intents[name] = diskIntent{Op: "removing", Checkout: name, Dir: h.meta.Dir, Layer: h.meta.Base}
 		r.mu.Unlock()
+	} else if !stickySnapshots {
+		err = r.dropCheckoutSnapshots(name)
 	}
 	removeErr := errors.Join(os.RemoveAll(r.gitdirPath(h.meta.dir())), os.RemoveAll(h.upper))
 	r.mu.Lock()
@@ -1312,17 +1314,61 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time) (b
 	return true, nil
 }
 
+// dropCheckoutSnapshots keeps snapshots still in another checkout or snapshot's ancestry.
+func (r *Registry) dropCheckoutSnapshots(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	used := make(map[string]bool)
+	visit := func(id string) {
+		for id != "" && !used[id] {
+			used[id] = true
+			s := r.lineage[id]
+			if s == nil {
+				break
+			}
+			id = s.stackParent
+		}
+	}
+	for _, h := range r.checkouts {
+		visit(checkoutSnapshot(h.meta))
+	}
+	for id, s := range r.snapshots {
+		if s.meta.Checkout != name {
+			visit(id)
+		}
+	}
+
+	var ids []string
+	for id, s := range r.snapshots {
+		if s.meta.Checkout == name && !used[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return snapshotLess(ids[i], ids[j]) })
+	for _, id := range ids {
+		if err := r.dropLocked(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Drop releases a snapshot and its retained stack.
 func (r *Registry) Drop(ctx context.Context, args api.DropArgs) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	id := args.Snapshot
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return failure("io", "registry is closed")
 	}
+	return r.dropLocked(args.Snapshot)
+}
+
+// dropLocked drops one snapshot while the registry lock is held.
+func (r *Registry) dropLocked(id string) error {
 	s := r.snapshots[id]
 	if s == nil {
 		return failure("not_found", "no snapshot %s", id)

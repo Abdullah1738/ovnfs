@@ -25,18 +25,19 @@ cd "$(ovnfs new --name fix-auth)"   # stdout is only the path; the summary goes 
 ovnfs diff fix-auth -p              # source changes since the checkout opened
 ovnfs apply fix-auth --dry-run      # preview the merge into ~/src/app
 ovnfs apply fix-auth                # merge the changes into ~/src/app as uncommitted edits
-ovnfs rm fix-auth                   # remove the checkout; its snapshots stay
+ovnfs rm fix-auth                   # remove the checkout and unused snapshots
 ```
 
 - Names: lowercase `[a-z0-9][a-z0-9._-]*`, up to 64 characters. Without
   `--name`, the checkout is named after the folder (`app`, then `app-2`, ...).
-- `ovnfs ls` lists checkouts with when each last changed (TOUCHED: a write
-  through its folder or to its git state); `ovnfs ls .` only those of the
-  current folder (a folder needs `.`, `..` or a slash); `ovnfs ls NAME` lists
-  one checkout's snapshots.
+- `ovnfs ls` lists checkouts and snapshots of removed checkouts (TOUCHED is
+  the last write through a checkout or to its git state); `ovnfs ls .` lists
+  only checkouts of the current folder (a folder needs `.`, `..` or a slash);
+  `ovnfs ls NAME` lists one checkout's snapshots.
 - `ovnfs prune [DIR] [--idle 7d] [--no-diff] [--dry-run]` removes the
   checkouts matching every criterion given; `ovnfs ls` takes the same flags
-  to preview.
+  to preview. `rm` and `prune` remove unused snapshots; add
+  `--sticky-snapshots` to keep them.
 - Any verb starts the daemon if it isn't running. `ovnfs status` and
   `ovnfs stop` manage it, and `ovnfs restart` replaces it with one from the
   current binary without unmounting (NFS, SMB), so shells inside checkouts
@@ -75,8 +76,8 @@ command fails or is interrupted.
 
 ## Bringing work back
 
-- `ovnfs apply NAME` snapshots the checkout, then three-way merges each changed
-  source path into the folder against the checkout's base. Commits are
+- `ovnfs apply NAME` temporarily snapshots the checkout, then three-way merges
+  each changed source path into the folder against the checkout's base. Commits are
   flattened: their changes land as uncommitted edits, and new files arrive
   untracked. Paths the user didn't touch take the checkout's version. Text
   files changed on both sides are merged as `git merge-file` would.

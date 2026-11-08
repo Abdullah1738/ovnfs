@@ -12,9 +12,10 @@ var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob"
 
 // Features names optional request fields this daemon honors, so clients can rely on
 // them without a new protocol generation: "new.base" (NewArgs.Base),
-// "diff.binary" (DiffArgs.Binary), "ls.select" (LsArgs.Select) and
+// "diff.binary" (DiffArgs.Binary), "ls.select" (LsArgs.Select),
+// "rm.sticky_snapshots" and "prune.sticky_snapshots", and
 // "stop.keep_mount" (StopArgs.KeepMount).
-var Features = []string{"new.base", "diff.binary", "ls.select", "stop.keep_mount"}
+var Features = []string{"new.base", "diff.binary", "ls.select", "rm.sticky_snapshots", "prune.sticky_snapshots", "stop.keep_mount"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
@@ -200,7 +201,6 @@ type Conflict struct {
 
 // ApplyReply reports what apply wrote (or would write, for a dry run).
 type ApplyReply struct {
-	Snapshot  Snapshot   `json:"snapshot"` // the snapshot that was applied
 	Source    string     `json:"source"`
 	Applied   []Change   `json:"applied"`
 	Merged    []string   `json:"merged"`    // paths changed on both sides and merged cleanly
@@ -209,17 +209,18 @@ type ApplyReply struct {
 	Commit    string     `json:"commit,omitempty"`
 }
 
-// RmArgs removes a checkout; its snapshots stay until dropped.
+// RmArgs removes a checkout and its unused snapshots unless StickySnapshots is set.
 type RmArgs struct {
-	Checkout string `json:"checkout"`
+	Checkout        string `json:"checkout"`
+	StickySnapshots bool   `json:"sticky_snapshots,omitempty"`
 }
 
-// PruneArgs removes the checkouts Select picks; their snapshots stay until
-// dropped. It needs a criterion: the zero Select is refused, not taken as all.
-// A checkout touched after it was picked stays.
+// PruneArgs removes the checkouts Select picks and their unused snapshots unless
+// StickySnapshots is set. It needs a criterion; a checkout touched after selection stays.
 type PruneArgs struct {
 	Select
-	DryRun bool `json:"dry_run,omitempty"`
+	DryRun          bool `json:"dry_run,omitempty"`
+	StickySnapshots bool `json:"sticky_snapshots,omitempty"`
 }
 
 // PruneReply lists the checkouts prune removed (or would remove, for a dry run).
@@ -278,8 +279,11 @@ type PullArgs struct {
 	DryRun   bool   `json:"dry_run,omitempty"`
 }
 
-// PullReply reports changes merged into the local checkout and its conflicts.
-type PullReply = ApplyReply
+// PullReply reports the remote snapshot and its changes merged into the local checkout.
+type PullReply struct {
+	ApplyReply
+	Snapshot Snapshot `json:"snapshot"`
+}
 
 // PushArgs has the machines checkouts are attached to fetch every blob they
 // still read from this one over the link, so their checkouts keep working once

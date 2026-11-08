@@ -504,16 +504,17 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.App
 	if err != nil {
 		return api.ApplyReply{}, err
 	}
-	if args.DryRun {
-		// A dry run writes nothing: release the snapshot it read the checkout from,
-		// or it would hold the checkout's layers on disk after rm. Waiting for its
-		// tree comes after, so a canceled or failed wait releases it too.
-		id := snap.Snapshot.ID
-		defer func() {
+	// Dry runs release even on failure; normal applies retain the snapshot on
+	// failure or conflict, but release it after a successful merge.
+	id := snap.Snapshot.ID
+	defer func() {
+		if args.DryRun || err == nil && len(reply.Conflicts) == 0 {
 			if dropErr := r.Drop(context.WithoutCancel(ctx), api.DropArgs{Snapshot: id}); dropErr != nil && err == nil {
 				reply, err = api.ApplyReply{}, dropErr
 			}
-		}()
+		}
+	}()
+	if args.DryRun {
 		r.mu.RLock()
 		s := r.snapshots[id]
 		r.mu.RUnlock()
@@ -523,8 +524,6 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.App
 		if snap, err = r.waitHashed(ctx, s); err != nil {
 			return api.ApplyReply{}, err
 		}
-	} else {
-		reply.Snapshot = snap.Snapshot
 	}
 	st := h.base.view.Store()
 	from, err := st.Flatten(h.base.view.Meta().Tree)

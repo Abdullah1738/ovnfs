@@ -6,8 +6,32 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/stencil-hq/ovnfs/api"
 )
+
+func TestPrintCheckoutsOrphanSnapshots(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		r := api.LsReply{Snapshots: []api.Snapshot{
+			{ID: "orphan-id", Checkout: "removed", Label: "saved"},
+		}}
+		if live {
+			r.Checkouts = []api.Checkout{{Name: "active"}}
+			r.Snapshots = append(r.Snapshots, api.Snapshot{ID: "live-id", Checkout: "active"})
+		}
+		var out strings.Builder
+		printCheckouts(&out, r)
+		got := out.String()
+		if !strings.Contains(got, "orphan-id\tremoved\tsaved") || !strings.Contains(got, "ORPHAN SNAPSHOT") {
+			t.Fatalf("orphan missing from %q", got)
+		}
+		if strings.Contains(got, "live-id") || live && strings.Count(got, "active") != 1 {
+			t.Fatalf("live checkout duplicated in %q", got)
+		}
+	}
+}
 
 // TestParseInterspersed checks that flags are found anywhere among positionals and "--" ends flag parsing.
 func TestParseInterspersed(t *testing.T) {

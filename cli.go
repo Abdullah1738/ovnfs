@@ -53,8 +53,8 @@ func commands() []command {
 		{"grep", "PATTERN [DIR|CHECKOUT] [--glob GLOB] [-F] [-i] [-C N] [--max-count N]", "search contents in the daemon, bypassing the checkout mount", true, runGrep},
 		{"glob", "PATTERN [DIR|CHECKOUT] [--type file|dir|symlink] [--limit N] [--mtime]", "list matching paths in the daemon, bypassing the checkout mount", true, runGlob},
 		{"apply", "CHECKOUT [--dry-run] [--branch B]", "merge a checkout's source changes back into its folder", true, runApply},
-		{"rm", "CHECKOUT", "remove a checkout; its snapshots stay", true, runRm},
-		{"prune", "[DIR] [--idle DUR] [--no-diff] [--dry-run]", "remove the checkouts matching all given: of DIR, untouched for DUR, without changes; snapshots stay", true, runPrune},
+		{"rm", "CHECKOUT [--sticky-snapshots]", "remove a checkout and its unused snapshots; --sticky-snapshots retains them", true, runRm},
+		{"prune", "[DIR] [--idle DUR] [--no-diff] [--dry-run] [--sticky-snapshots]", "remove matching checkouts and unused snapshots; --sticky-snapshots retains them", true, runPrune},
 		{"drop", "SNAP", "release a snapshot", true, runDrop},
 		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", true, runExplain},
 		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", true, runPlan},
@@ -210,17 +210,7 @@ func runLs(c *cli, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer tw.Flush()
 	if name == "" {
-		if len(r.Checkouts) == 0 {
-			return nil
-		}
-		snaps := make(map[string]int)
-		for _, s := range r.Snapshots {
-			snaps[s.Checkout]++
-		}
-		fmt.Fprintln(tw, "CHECKOUT\tSOURCE\tSNAPS\tCHANGED\tTOUCHED\tPATH")
-		for _, h := range r.Checkouts {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", h.Name, h.Source, snaps[h.Name], yesNo(h.Dirty), stamp(h.Touched), h.Path)
-		}
+		printCheckouts(tw, r)
 		return nil
 	}
 	header := false
@@ -245,6 +235,40 @@ func runLs(c *cli, args []string) error {
 		return fmt.Errorf("ls: no checkout %s", name)
 	}
 	return nil
+}
+
+// printCheckouts lists live checkouts and retained snapshots without a live owner.
+func printCheckouts(w io.Writer, r api.LsReply) {
+	snaps := make(map[string]int)
+	live := make(map[string]bool)
+	for _, s := range r.Snapshots {
+		snaps[s.Checkout]++
+	}
+	if len(r.Checkouts) > 0 {
+		fmt.Fprintln(w, "CHECKOUT\tSOURCE\tSNAPS\tCHANGED\tTOUCHED\tPATH")
+		for _, h := range r.Checkouts {
+			live[h.Name] = true
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", h.Name, h.Source, snaps[h.Name], yesNo(h.Dirty), stamp(h.Touched), h.Path)
+		}
+	}
+	header := false
+	for _, s := range r.Snapshots {
+		if live[s.Checkout] {
+			continue
+		}
+		if !header {
+			if len(r.Checkouts) > 0 {
+				fmt.Fprintln(w)
+			}
+			fmt.Fprintln(w, "ORPHAN SNAPSHOT\tCHECKOUT\tLABEL\tCREATED\tTREE")
+			header = true
+		}
+		tree := "hashing…"
+		if s.Tree != "" {
+			tree = abbrev(s.Tree, 12)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Checkout, s.Label, stamp(s.Created), tree)
+	}
 }
 
 // selectFlags registers the flags ls and prune pick checkouts by (see api.Select).
@@ -282,6 +306,7 @@ func runPrune(c *cli, args []string) error {
 	fs := c.flags("prune")
 	var a api.PruneArgs
 	selectFlags(fs, &a.Select)
+	fs.BoolVar(&a.StickySnapshots, "sticky-snapshots", false, "retain snapshots of removed checkouts")
 	fs.BoolVar(&a.DryRun, "dry-run", false, "print what would be removed; remove nothing")
 	pos, err := c.parse(fs, args, 0, 1)
 	if err != nil {
@@ -307,8 +332,10 @@ func runPrune(c *cli, args []string) error {
 		fmt.Fprintln(os.Stderr, "no checkout matches")
 	case a.DryRun:
 		fmt.Fprintf(os.Stderr, "would remove %s\n", n)
+	case a.StickySnapshots:
+		fmt.Fprintf(os.Stderr, "removed %s; snapshots retained\n", n)
 	default:
-		fmt.Fprintf(os.Stderr, "removed %s; snapshots stay until dropped\n", n)
+		fmt.Fprintf(os.Stderr, "removed %s and their snapshots\n", n)
 	}
 	return nil
 }
@@ -491,7 +518,7 @@ func runPull(c *cli, args []string) error {
 	if a.From != "" {
 		again += " --from " + a.From
 	}
-	return printMerge(c, r, a.DryRun, again)
+	return printMerge(c, r.ApplyReply, a.DryRun, again)
 }
 
 // printMerge prints apply and pull outcomes and fails when conflicts remain,
@@ -545,11 +572,15 @@ func printMerge(c *cli, r api.ApplyReply, dryRun bool, again string) error {
 
 // runRm removes a checkout.
 func runRm(c *cli, args []string) error {
-	pos, err := c.parse(c.flags("rm"), args, 1, 1)
+	fs := c.flags("rm")
+	var a api.RmArgs
+	fs.BoolVar(&a.StickySnapshots, "sticky-snapshots", false, "retain snapshots of the removed checkout")
+	pos, err := c.parse(fs, args, 1, 1)
 	if err != nil {
 		return err
 	}
-	_, err = call[json.RawMessage](c, "rm", api.RmArgs{Checkout: pos[0]})
+	a.Checkout = pos[0]
+	_, err = call[json.RawMessage](c, "rm", a)
 	return err
 }
 

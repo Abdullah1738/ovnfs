@@ -55,7 +55,7 @@ git status                     # same status as ~/src/app; nothing is written th
 # ...let the agent work...
 ovnfs diff app -p              # what changed
 ovnfs apply app                # merge it back into ~/src/app
-cd ~/src/app && ovnfs rm app   # remove the checkout; its snapshots stay
+cd ~/src/app && ovnfs rm app   # remove the checkout and its unused snapshots
 ```
 
 More, from `~/src/app`:

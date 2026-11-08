@@ -48,6 +48,9 @@ func TestApplyConcurrentKeepsEveryEdit(t *testing.T) {
 			t.Errorf("apply c%d = %+v, %v", i, replies[i], errs[i])
 		}
 	}
+	if n := len(f.ls().Snapshots); n != 0 {
+		t.Errorf("snapshots after concurrent applies = %d, want 0", n)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "shared.txt"))
 	if err != nil {
 		t.Fatal(err)
@@ -76,9 +79,6 @@ func TestApplyDryRunKeepsNoSnapshot(t *testing.T) {
 	if n := len(f.ls().Snapshots); n != 0 {
 		t.Errorf("snapshots after a dry run = %d, want 0", n)
 	}
-	if dry.Snapshot.ID != "" {
-		t.Errorf("dry run reported snapshot %q, want none", dry.Snapshot.ID)
-	}
 	if len(dry.Applied) != 1 || dry.Applied[0].Path != "a.txt" {
 		t.Errorf("dry run applied = %+v, want a.txt", dry.Applied)
 	}
@@ -87,11 +87,105 @@ func TestApplyDryRunKeepsNoSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if len(real.Applied) != 1 || real.Applied[0].Path != "a.txt" || real.Snapshot.ID == "" {
-		t.Errorf("apply = %+v, want a.txt from a kept snapshot", real)
+	if len(real.Applied) != 1 || real.Applied[0].Path != "a.txt" {
+		t.Errorf("apply = %+v, want a.txt", real)
 	}
-	if n := len(f.ls().Snapshots); n != 1 {
-		t.Errorf("snapshots after apply = %d, want 1", n)
+	if n := len(f.ls().Snapshots); n != 0 {
+		t.Errorf("snapshots after apply = %d, want 0", n)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(data) != "edit" {
+		t.Errorf("source after apply = %q, %v; want edit", data, err)
+	}
+}
+
+// TestApplyPreservesOtherSnapshots verifies the transient snapshot is the only
+// one released, and previously created snapshots remain usable.
+func TestApplyPreservesOtherSnapshots(t *testing.T) {
+	isolateGit(t)
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"a.txt": "base"})
+	f.newCheckout(dir, "c")
+	f.put("c", "a.txt", "first")
+	ctx := context.Background()
+	snap, err := f.reg.Snap(ctx, api.SnapArgs{Checkout: "c", Wait: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.put("c", "a.txt", "second")
+	if _, err := f.reg.Apply(ctx, api.ApplyArgs{Checkout: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshots := f.ls().Snapshots
+	if len(snapshots) != 1 || snapshots[0].ID != snap.Snapshot.ID {
+		t.Fatalf("snapshots after apply = %+v, want only %s", snapshots, snap.Snapshot.ID)
+	}
+	if _, err := f.reg.New(ctx, api.NewArgs{Name: "view", Snapshot: snap.Snapshot.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.read("view", "a.txt"); got != "first" {
+		t.Errorf("snapshot content = %q, want first", got)
+	}
+	if got := f.read("c", "a.txt"); got != "second" {
+		t.Errorf("checkout content = %q, want second", got)
+	}
+}
+
+// TestApplyConflictKeepsSnapshot checks that an unresolved apply retains its
+// snapshot even though conflicts are reported in the reply rather than an error.
+func TestApplyConflictKeepsSnapshot(t *testing.T) {
+	isolateGit(t)
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"a.txt": "base\x00"})
+	f.newCheckout(dir, "c")
+	f.put("c", "a.txt", "checkout\x00")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("source\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := f.reg.Apply(context.Background(), api.ApplyArgs{Checkout: "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reply.Conflicts) != 1 || reply.Conflicts[0].Path != "a.txt" {
+		t.Fatalf("apply conflicts = %+v, want a.txt", reply.Conflicts)
+	}
+	snapshots := f.ls().Snapshots
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots after conflicted apply = %+v, want one", snapshots)
+	}
+	if _, err := f.reg.New(context.Background(), api.NewArgs{Name: "view", Snapshot: snapshots[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.read("view", "a.txt"); got != "checkout\x00" {
+		t.Errorf("snapshot content = %q, want checkout", got)
+	}
+}
+
+// TestApplyFailureKeepsSnapshot checks that a failure after hashing preserves
+// the apply snapshot for inspection.
+func TestApplyFailureKeepsSnapshot(t *testing.T) {
+	isolateGit(t)
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"a.txt": "base"})
+	f.newCheckout(dir, "c")
+	f.put("c", "a.txt", "edit")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.reg.Apply(context.Background(), api.ApplyArgs{Checkout: "c"}); err == nil {
+		t.Fatal("apply with invalid source succeeded")
+	}
+	snapshots := f.ls().Snapshots
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots after failed apply = %+v, want one", snapshots)
+	}
+	if _, err := f.reg.New(context.Background(), api.NewArgs{Name: "view", Snapshot: snapshots[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.read("view", "a.txt"); got != "edit" {
+		t.Errorf("snapshot content = %q, want edit", got)
 	}
 }
 

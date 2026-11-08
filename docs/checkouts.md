@@ -111,9 +111,10 @@ snapshots a checkout and opens a second one on that snapshot; parent and child
 diverge. `new --from SNAP` opens a checkout on any snapshot, and
 `new --base CAPTURE` on a live checkout's base (`ls --json` shows it) as it was
 captured, with the git state that checkout started from, however the folder and
-the checkout have changed since. `rm` removes a checkout and keeps its
-snapshots; `drop` releases one. Nothing replaces the content of a live folder:
-rollback means a new checkout from a snapshot.
+the checkout have changed since. `rm` removes a checkout and its snapshots
+unless another checkout or snapshot uses them. `rm --sticky-snapshots` keeps
+them; `drop` releases one explicitly. Nothing replaces the content of a live
+folder: rollback means a new checkout from a snapshot.
 
 `new` (and `run`) on a checkout's own folder forks that checkout: capturing it
 would make the daemon serve the new checkout by reading through its own mount,
@@ -135,8 +136,10 @@ names a checkout, whose snapshots `ls NAME` lists.
 matching all the criteria given: of DIR, untouched for DUR (`90m`, `12h`, `7d`,
 `2w`), without source changes since its base (an empty `diff`). Without a
 criterion it refuses, `--dry-run` lists what it would remove, and a checkout
-touched after it was picked stays. Their snapshots stay until dropped. `ls`
-takes the same flags to preview a prune in full. `--no-diff` alone also picks
+touched after it was picked stays. It removes unused snapshots of those
+checkouts; `--sticky-snapshots` keeps them. Plain `ls` also shows snapshots of
+removed checkouts. `ls` takes the same selection flags to preview a prune in
+full. `--no-diff` alone also picks
 checkouts just opened, before their first write; add `--idle` to spare them.
 
 ## Search: `grep` and `glob`
@@ -209,8 +212,10 @@ also with `--cached`. Like git, it shows each side as git would store it: under
 `core.autocrlf` or `text`/`eol` attributes, CRLF text becomes LF, and a change of
 line endings only is no change. A changed path git would store through a filter
 driver, `ident` or a `working-tree-encoding` is refused (code `unsupported`).
-`apply CHECKOUT` snapshots the checkout and merges each changed
-source path into the folder against the base: a path the user left alone takes
+`apply CHECKOUT` snapshots the checkout temporarily and merges each changed
+source path into the folder against the base; it releases the snapshot after a
+successful, conflict-free apply and retains it on errors or conflicts. A path
+the user left alone takes
 the checkout's version, and a text file changed on both sides is merged the
 way `git merge-file` merges it.
 
