@@ -23,14 +23,19 @@ func TestReuseKeyFollowsWalkedMetadata(t *testing.T) {
 	if key == "" || capture(t, dir, st, "").ReuseKey() != key {
 		t.Fatalf("unchanged folder keys %q differently", key)
 	}
-	if err := os.Chmod(filepath.Join(dir, "sub", "a.txt"), 0o600); err != nil {
+	// Read-only modes, the only permission Windows retains; restored so cleanup can remove them.
+	t.Cleanup(func() {
+		os.Chmod(filepath.Join(dir, "sub"), 0o755)
+		os.Chmod(filepath.Join(dir, "sub", "a.txt"), 0o644)
+	})
+	if err := os.Chmod(filepath.Join(dir, "sub", "a.txt"), 0o444); err != nil {
 		t.Fatal(err)
 	}
 	chmodded := capture(t, dir, st, "").ReuseKey()
 	if chmodded == key || chmodded == "" {
 		t.Fatalf("file mode change kept key %q", chmodded)
 	}
-	if err := os.Chmod(filepath.Join(dir, "sub"), 0o700); err != nil {
+	if err := os.Chmod(filepath.Join(dir, "sub"), 0o555); err != nil {
 		t.Fatal(err)
 	}
 	if got := capture(t, dir, st, "").ReuseKey(); got == "" || got == chmodded {
