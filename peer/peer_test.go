@@ -440,7 +440,8 @@ func pushWants(blobs *memBlobs, ids ...store.OID) []Want {
 }
 
 // TestPushFetchesInBatches: a push fetches everything listed and reports it,
-// but asks the source for the next batch only once the previous one landed.
+// totals first, but asks the source for the next batch only once the previous
+// one landed.
 func TestPushFetchesInBatches(t *testing.T) {
 	blobs := newBlobs()
 	var ids []store.OID
@@ -454,9 +455,10 @@ func TestPushFetchesInBatches(t *testing.T) {
 	defer release()
 	pushed := make(chan error, 1)
 	var got Pushed
+	var reports []Pushed // appended on the link's reader, read once Push returned
 	go func() {
 		var err error
-		got, err = l.remote.Push(context.Background())
+		got, err = l.remote.Push(context.Background(), func(p Pushed) { reports = append(reports, p) })
 		pushed <- err
 	}()
 	// The source opens both blobs of the first batch, the first of them held.
@@ -473,9 +475,17 @@ func TestPushFetchesInBatches(t *testing.T) {
 	if err := wait(t, pushed, "push"); err != nil {
 		t.Fatal(err)
 	}
-	want := Pushed{Blobs: int64(len(ids)), Bytes: 3*(3<<20) + int64(len("small"))}
-	if got != want {
+	blobCount, size := int64(len(ids)), 3*(3<<20)+int64(len("small"))
+	if want := (Pushed{Blobs: blobCount, Bytes: size, TotalBlobs: blobCount, TotalBytes: size}); got != want {
 		t.Fatalf("pushed %+v, want %+v", got, want)
+	}
+	if len(reports) == 0 || reports[0] != (Pushed{TotalBlobs: blobCount, TotalBytes: size}) {
+		t.Fatalf("first report %+v, want the totals before anything landed", reports)
+	}
+	for i := 1; i < len(reports); i++ {
+		if reports[i].Blobs < reports[i-1].Blobs || reports[i].Bytes < reports[i-1].Bytes {
+			t.Fatalf("progress went backwards: %+v", reports)
+		}
 	}
 	for _, id := range ids {
 		checkBlob(t, l.st, id, blobs.data[id])
@@ -495,7 +505,7 @@ func TestPushCancelStopsLaterBatches(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	pushed := make(chan error, 1)
 	go func() {
-		_, err := l.remote.Push(ctx)
+		_, err := l.remote.Push(ctx, nil)
 		pushed <- err
 	}()
 	wait(t, blobs.open, "first batch")
@@ -527,13 +537,13 @@ func TestPushCancelStopsLaterBatches(t *testing.T) {
 // cannot produce fails the push by name, and the link outlives both.
 func TestPushFailures(t *testing.T) {
 	blobs := newBlobs()
-	if _, err := pipeLink(t, blobs).remote.Push(context.Background()); err == nil || !strings.Contains(err.Error(), "does not take pushes") {
+	if _, err := pipeLink(t, blobs).remote.Push(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "does not take pushes") {
 		t.Fatalf("push without a handler = %v", err)
 	}
 	gone := blobs.add([]byte("gone"))
 	blobs.fail[gone] = "object vanished"
 	l := startPush(t, blobs, func() []Want { return pushWants(blobs, gone) })
-	if _, err := l.remote.Push(context.Background()); err == nil || !strings.Contains(err.Error(), "object vanished") || !strings.Contains(err.Error(), "f0") {
+	if _, err := l.remote.Push(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "object vanished") || !strings.Contains(err.Error(), "f0") {
 		t.Fatalf("push of an unavailable blob = %v", err)
 	}
 	ok := blobs.add([]byte("still served"))

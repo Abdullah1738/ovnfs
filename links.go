@@ -34,7 +34,8 @@ const linkSocket = "link.sock"
 // until stopped), and inbound sessions other machines opened to attach checkouts here.
 type links struct {
 	reg      *checkout.Registry
-	mesh     *meshd // set once the mesh is open
+	emit     func(checkout.Event) // admin events, such as push progress; nil drops them
+	mesh     *meshd               // set once the mesh is open
 	ctx      context.Context
 	cancel   context.CancelFunc
 	mu       sync.Mutex
@@ -43,10 +44,11 @@ type links struct {
 	wg       sync.WaitGroup
 }
 
-// newLinks prepares an idle link manager; the registry is set once it is open.
-func newLinks() *links {
+// newLinks prepares an idle link manager publishing events to emit (nil drops
+// them); the registry is set once it is open.
+func newLinks(emit func(checkout.Event)) *links {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &links{ctx: ctx, cancel: cancel, sessions: map[string]*peer.Session{}, out: map[string]*outLink{}}
+	return &links{emit: emit, ctx: ctx, cancel: cancel, sessions: map[string]*peer.Session{}, out: map[string]*outLink{}}
 }
 
 // fetch serves checkout.Config.Fetch: it asks the session connected for key.
@@ -240,7 +242,8 @@ func (l *links) pull(ctx context.Context, args api.PullArgs) (api.PullReply, err
 
 // push has the machines of the matching attachments fetch everything they
 // still read through their links, all at once; one attachment failing does
-// not stop the others, and the reply says how each went.
+// not stop the others, and the reply says how each went. Progress goes out as
+// "pushing" events carrying an api.Pushed.
 func (l *links) push(ctx context.Context, args api.PushArgs) (api.PushReply, error) {
 	found := l.attached(args.Checkout, args.To)
 	if len(found) == 0 {
@@ -255,8 +258,13 @@ func (l *links) push(ctx context.Context, args api.PushArgs) (api.PushReply, err
 	}
 	reply := api.PushReply{Pushed: make([]api.Pushed, len(found))}
 	var wg sync.WaitGroup
+	progress := func(p api.Pushed) {
+		if l.emit != nil {
+			l.emit(checkout.Event{Name: "pushing", Payload: p})
+		}
+	}
 	for i, o := range found {
-		wg.Go(func() { reply.Pushed[i] = o.push(ctx) })
+		wg.Go(func() { reply.Pushed[i] = o.push(ctx, progress) })
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
@@ -374,20 +382,31 @@ func (o *outLink) remote() *peer.Remote {
 	return o.active
 }
 
-// push has the machine fetch everything it still reads through this link.
-func (o *outLink) push(ctx context.Context) api.Pushed {
+// push has the machine fetch everything it still reads through this link,
+// passing on its progress; a failed push reports how far it got.
+func (o *outLink) push(ctx context.Context, progress func(api.Pushed)) api.Pushed {
 	r := api.Pushed{Checkout: o.checkout, To: o.to}
 	p := o.remote()
 	if p == nil {
 		r.Error = "not connected; the link is reconnecting"
 		return r
 	}
-	pushed, err := p.Push(ctx)
-	if err != nil {
-		r.Error = err.Error()
+	var mu sync.Mutex // progress may still run after a canceled Push returns
+	set := func(at peer.Pushed) api.Pushed {
+		mu.Lock()
+		defer mu.Unlock()
+		r.Blobs, r.Bytes, r.TotalBlobs, r.TotalBytes = at.Blobs, at.Bytes, at.TotalBlobs, at.TotalBytes
 		return r
 	}
-	r.Blobs, r.Bytes = pushed.Blobs, pushed.Bytes
+	pushed, err := p.Push(ctx, func(at peer.Pushed) { progress(set(at)) })
+	if err == nil {
+		set(pushed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if err != nil {
+		r.Error = err.Error()
+	}
 	return r
 }
 

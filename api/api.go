@@ -290,17 +290,22 @@ type PushArgs struct {
 }
 
 // PushReply reports each matching attachment's push, sorted by checkout and host.
+// While it runs, subscribers receive its progress as "pushing" events, each one
+// attachment's Pushed without Error.
 type PushReply struct {
 	Pushed []Pushed `json:"pushed"`
 }
 
-// Pushed is one attachment's push: what its machine lacked and fetched, or why it failed.
+// Pushed is how far one attachment's push got: the distinct blobs its machine
+// fetched and their offered sizes, out of those it lacked when the push started.
 type Pushed struct {
-	Checkout string `json:"checkout"`
-	To       string `json:"to"`
-	Blobs    int64  `json:"blobs"`           // distinct blobs fetched
-	Bytes    int64  `json:"bytes"`           // their sizes as offered
-	Error    string `json:"error,omitempty"` // set when the push failed; blobs fetched before stay
+	Checkout   string `json:"checkout"`
+	To         string `json:"to"`
+	Blobs      int64  `json:"blobs"`
+	Bytes      int64  `json:"bytes"`
+	TotalBlobs int64  `json:"total_blobs"`
+	TotalBytes int64  `json:"total_bytes"`
+	Error      string `json:"error,omitempty"` // set when the push failed; blobs fetched before stay
 }
 
 // Mesh is this machine's mesh: the machines that reach each other by node key,

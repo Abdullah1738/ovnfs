@@ -184,7 +184,7 @@ func serve(args []string) error {
 	var smbServer *smb.Server
 	var checkoutShares *shares
 	userHome, _ := os.UserHomeDir()
-	lk := newLinks()
+	lk := newLinks(hub.emit)
 	md, err := openMesh(*state, lk)
 	if err != nil {
 		return fmt.Errorf("mesh: %w", err)

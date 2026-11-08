@@ -500,40 +500,6 @@ func runPull(c *cli, args []string) error {
 	return printMerge(c, r, a.DryRun, again)
 }
 
-// runPush has the machines checkouts are attached to fetch all the content
-// they still read from this one, and fails when any attachment could not.
-func runPush(c *cli, args []string) error {
-	fs := c.flags("push")
-	var a api.PushArgs
-	fs.StringVar(&a.To, "to", "", "only the attachments to this host, as passed to attach")
-	pos, err := c.parse(fs, args, 0, 1)
-	if err != nil {
-		return err
-	}
-	if len(pos) == 1 {
-		a.Checkout = pos[0]
-	}
-	r, err := call[api.PushReply](c, "push", a)
-	if err != nil {
-		return err
-	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	failed := 0
-	for _, p := range r.Pushed {
-		if p.Error != "" {
-			failed++
-			fmt.Fprintf(os.Stderr, "push %s to %s: %s\n", p.Checkout, p.To, p.Error)
-		} else if !c.json {
-			fmt.Fprintf(tw, "%s\t→ %s\t%s\t%s\n", p.Checkout, p.To, plural(int(p.Blobs), "blob", "blobs"), humanBytes(p.Bytes))
-		}
-	}
-	tw.Flush()
-	if failed > 0 {
-		return exitCode(1)
-	}
-	return nil
-}
-
 // printMerge prints apply and pull outcomes and fails when conflicts remain,
 // asking the user to resolve conflict markers and then run again.
 func printMerge(c *cli, r api.ApplyReply, dryRun bool, again string) error {

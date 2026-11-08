@@ -28,7 +28,7 @@ func TestPullSelectsAttachment(t *testing.T) {
 		{name: "ssh destination", args: api.PullArgs{Checkout: "app", From: "me@host"}, attachments: []string{"app@me@host", "app@other"}, code: "unavailable", message: "app@me@host is not connected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			l := newLinks()
+			l := newLinks(nil)
 			defer l.cancel()
 			for _, key := range tc.attachments {
 				name, host, _ := strings.Cut(key, "@")
@@ -50,7 +50,7 @@ func TestPullSelectsAttachment(t *testing.T) {
 // match, in checkout and host order, and reports one that cannot push without
 // failing the others.
 func TestPushReportsEachAttachment(t *testing.T) {
-	l := newLinks()
+	l := newLinks(nil)
 	defer l.cancel()
 	for _, key := range []string{"web@b", "app@me@b", "app@a"} {
 		name, host, _ := strings.Cut(key, "@")

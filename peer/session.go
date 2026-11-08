@@ -198,6 +198,12 @@ func (s *Session) Refuse(err error) error {
 // Fetch makes every wanted blob present in st. Ids already in st are skipped, ids already in flight (from any caller) are waited for, not requested twice. Fails when the link ends, ctx is done, or the source cannot produce a blob (the source's error message is kept). A blob whose bytes do not hash to its id is an error, never stored.
 // A Fetch abandoned by ctx leaves its blobs in flight; they still land in st.
 func (s *Session) Fetch(ctx context.Context, wants []Want) error {
+	return s.fetch(ctx, wants, nil)
+}
+
+// fetch is Fetch calling landed, unless nil, once for each want as its blob is
+// present: first those already stored, then the rest in want order.
+func (s *Session) fetch(ctx context.Context, wants []Want, landed func(Want)) error {
 	for _, w := range wants {
 		if !w.ID.Valid() {
 			return fmt.Errorf("fetch %s: malformed id %q", w.Path, w.ID)
@@ -208,8 +214,11 @@ func (s *Session) Fetch(ctx context.Context, wants []Want) error {
 	}
 	missing := make([]Want, 0, len(wants))
 	for _, w := range wants {
-		if !s.st.Has(w.ID) {
+		switch {
+		case !s.st.Has(w.ID):
 			missing = append(missing, w)
+		case landed != nil:
+			landed(w)
 		}
 	}
 	if len(missing) == 0 {
@@ -254,6 +263,9 @@ func (s *Session) Fetch(ctx context.Context, wants []Want) error {
 		case <-c.done:
 			if c.err != nil {
 				return fmt.Errorf("fetch %s (%s): %w", missing[i].Path, missing[i].ID, c.err)
+			}
+			if landed != nil {
+				landed(missing[i])
 			}
 		case <-ctx.Done():
 			return fmt.Errorf("fetch %s (%s): %w", missing[i].Path, missing[i].ID, ctx.Err())
@@ -544,9 +556,11 @@ func (s *Session) startPull(tag uint32, from store.OID) {
 
 // Push batch limits: a push fetches at most this much at a time, so a read on
 // this machine waits behind one batch at the source, not the whole push.
+// Progress goes to the source at most every pushReport.
 const (
 	pushBatchBlobs = 1024
 	pushBatchBytes = 8 << 20
+	pushReport     = 250 * time.Millisecond
 )
 
 // startPush fetches, in the background, every blob the push handler lists and
@@ -572,7 +586,7 @@ func (s *Session) startPush(tag uint32) error {
 	s.mu.Unlock()
 	go func() {
 		defer cancel()
-		pushed, err := s.push(ctx, fn())
+		pushed, err := s.push(ctx, fn(), func(p Pushed) { answer(framePushing, appendPushed(nil, p)) })
 		s.mu.Lock()
 		delete(s.pushes, tag)
 		s.mu.Unlock()
@@ -581,7 +595,7 @@ func (s *Session) startPush(tag uint32) error {
 		case err != nil:
 			answer(framePushErr, clip(err.Error()))
 		default:
-			answer(framePushed, binary.BigEndian.AppendUint64(nil, uint64(pushed.Blobs)), binary.BigEndian.AppendUint64(nil, uint64(pushed.Bytes)))
+			answer(framePushed, appendPushed(nil, pushed))
 		}
 	}()
 	return nil
@@ -589,22 +603,36 @@ func (s *Session) startPush(tag uint32) error {
 
 // push fetches wants in batches of at most pushBatchBlobs blobs and
 // pushBatchBytes bytes (a larger blob alone), stopping at the first failure.
-func (s *Session) push(ctx context.Context, wants []Want) (Pushed, error) {
-	var done Pushed
+// It reports the totals before fetching, then progress at most every
+// pushReport as blobs land.
+func (s *Session) push(ctx context.Context, wants []Want, report func(Pushed)) (Pushed, error) {
+	var p Pushed
+	for _, w := range wants {
+		p.TotalBlobs++
+		p.TotalBytes += w.Size
+	}
+	report(p)
+	last := time.Now()
+	landed := func(w Want) {
+		p.Blobs++
+		p.Bytes += w.Size
+		if time.Since(last) >= pushReport {
+			report(p)
+			last = time.Now()
+		}
+	}
 	for len(wants) > 0 {
 		n, size := 1, wants[0].Size
 		for n < len(wants) && n < pushBatchBlobs && size+wants[n].Size <= pushBatchBytes {
 			size += wants[n].Size
 			n++
 		}
-		if err := s.Fetch(ctx, wants[:n]); err != nil {
-			return done, err
+		if err := s.fetch(ctx, wants[:n], landed); err != nil {
+			return p, err
 		}
-		done.Blobs += int64(n)
-		done.Bytes += size
 		wants = wants[n:]
 	}
-	return done, nil
+	return p, nil
 }
 
 // sendPull queues one bounded response frame and waits for the writer to drain

@@ -27,9 +27,10 @@
 //
 // Source-initiated pushes use 'U' (tag): the remote then fetches, with ordinary
 // requests in batches, every blob its checkouts attached from the source still
-// lack, and answers 'V' (tag, blob count u64, byte count u64) or 'G' (tag and an
-// error message). 'K' cancels a push as it does a pull; pull and push tags share
-// one sequence.
+// lack. It reports 'Y' progress (tag, then blobs, bytes, total blobs and total
+// bytes as u64) once before fetching and then at most every 250 ms, and ends
+// with 'V' (the same fields, final) or 'G' (tag and an error message). 'K'
+// cancels a push as it does a pull; pull and push tags share one sequence.
 //
 // Tags are chosen by the remote, one per requested blob. The source streams up
 // to four blobs at once, interleaving their chunks; a blob is complete once
@@ -58,6 +59,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"time"
 
 	"github.com/stencil-hq/ovnfs/api"
@@ -105,11 +107,35 @@ type Pulled struct {
 	Data     map[store.OID][]byte  `json:"data"`
 }
 
-// Pushed is what a push moved: the blobs the remote lacked when it started and
-// their offered sizes.
+// Pushed is how far a push got: the blobs fetched so far and their offered
+// sizes, out of those the remote lacked when it started.
 type Pushed struct {
-	Blobs int64
-	Bytes int64
+	Blobs, Bytes           int64
+	TotalBlobs, TotalBytes int64
+}
+
+// appendPushed encodes p as the four u64 of a progress or completion frame.
+func appendPushed(b []byte, p Pushed) []byte {
+	for _, n := range []int64{p.Blobs, p.Bytes, p.TotalBlobs, p.TotalBytes} {
+		b = binary.BigEndian.AppendUint64(b, uint64(n))
+	}
+	return b
+}
+
+// decodePushed reads the four u64 of a progress or completion frame.
+func decodePushed(body []byte) (Pushed, error) {
+	if len(body) != 32 {
+		return Pushed{}, errors.New("protocol error: invalid push progress")
+	}
+	var n [4]int64
+	for i := range n {
+		v := binary.BigEndian.Uint64(body[8*i:])
+		if v > math.MaxInt64 {
+			return Pushed{}, errors.New("protocol error: push progress out of range")
+		}
+		n[i] = int64(v)
+	}
+	return Pushed{Blobs: n[0], Bytes: n[1], TotalBlobs: n[2], TotalBytes: n[3]}, nil
 }
 
 // Accepted is the remote side's answer to an offer.
@@ -137,7 +163,8 @@ const (
 	frameChunk   byte = 'L' // tag and blob chunk
 	framePulled  byte = 'E' // tag, completes pull
 	framePullErr byte = 'F' // tag and error message
-	framePushed  byte = 'V' // tag, blob count, byte count; completes push
+	framePushing byte = 'Y' // tag and push progress
+	framePushed  byte = 'V' // tag and final push progress; completes push
 	framePushErr byte = 'G' // tag and error message
 	frameSearch  byte = 'S' // tag, query and wanted blobs
 	frameAbort   byte = 'C' // search tag

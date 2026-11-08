@@ -119,9 +119,13 @@ source folder, whichever lane holds it, including symlinks and files only the
 local checkout had; files its [git mirror](#committed-content-from-the-git-upstream)
 holds, cache roots, and local or hidden paths stay out. The remote fetches with
 ordinary verified requests, in batches of at most 8 MiB or 1024 blobs, so its
-reads keep being answered during a long push. Each attachment reports the blobs
-and bytes it fetched; one that is disconnected or fails is reported without
-stopping the others, and push then exits 1. Blobs fetched before a failure or
+reads keep being answered during a long push. On a terminal, push draws one
+progress line on stderr summing its attachments; `subscribe` streams the same
+reports as `pushing` events (`checkout`, `to`, `blobs`, `bytes`, `total_blobs`,
+`total_bytes`), the totals first and then at most four a second per
+attachment. Each attachment reports the blobs and bytes it fetched; one that
+is disconnected or fails is reported, with how far it got, without stopping the
+others, and push then exits 1. Blobs fetched before a failure or
 an interrupt stay, so pushing again resumes. Push changes nothing the remote's
 checkouts show; edits made here after the attach still need another `attach`.
 

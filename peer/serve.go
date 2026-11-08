@@ -167,7 +167,7 @@ func (sv *server) read(fr *frameReader) error {
 				return fmt.Errorf("protocol error: %w", err)
 			}
 			sv.queue.push(reqs)
-		case frameMeta, frameMetaEnd, frameBlob, frameChunk, framePulled, framePullErr, framePushed, framePushErr:
+		case frameMeta, frameMetaEnd, frameBlob, frameChunk, framePulled, framePullErr, framePushing, framePushed, framePushErr:
 			if err := sv.remote.receive(typ, p); err != nil {
 				return err
 			}
@@ -282,10 +282,11 @@ type Remote struct {
 
 // pending is one pull or push awaiting the remote's answer, touched under Remote.mu.
 type pending struct {
-	done   chan struct{}
-	err    error
-	push   bool   // answered by framePushed or framePushErr; else a pull
-	pushed Pushed // a push's answer
+	done     chan struct{}
+	err      error
+	push     bool         // answered by framePushing, framePushed or framePushErr; else a pull
+	progress func(Pushed) // a push's progress callback, if any
+	pushed   Pushed       // a push's final answer
 	// A pull's answer, assembled as its frames arrive.
 	result Pulled
 	meta   []byte
@@ -302,7 +303,7 @@ func (p *Remote) Pull(ctx context.Context, from store.OID) (Pulled, error) {
 	if !ok {
 		return Pulled{}, fmt.Errorf("pull: malformed base tree id %q", from)
 	}
-	c, err := p.ask(ctx, framePull, raw[:])
+	c, err := p.ask(ctx, framePull, raw[:], nil)
 	if err != nil {
 		return Pulled{}, err
 	}
@@ -311,10 +312,12 @@ func (p *Remote) Pull(ctx context.Context, from store.OID) (Pulled, error) {
 
 // Push has the remote fetch, over this link, every blob its checkouts attached
 // from this machine still lack (see Session.SetPushHandler), so they stay
-// readable once the link is gone. Cancellation stops the remote fetching more;
-// blobs already requested still land there.
-func (p *Remote) Push(ctx context.Context) (Pushed, error) {
-	c, err := p.ask(ctx, framePush, nil)
+// readable once the link is gone. progress, unless nil, receives the remote's
+// reports in order on the link's reader, so it must not block; it may still
+// run briefly after a canceled Push returned. Cancellation stops the remote
+// fetching more; blobs already requested still land there.
+func (p *Remote) Push(ctx context.Context, progress func(Pushed)) (Pushed, error) {
+	c, err := p.ask(ctx, framePush, nil, progress)
 	if err != nil {
 		return Pushed{}, err
 	}
@@ -323,8 +326,8 @@ func (p *Remote) Push(ctx context.Context) (Pushed, error) {
 
 // ask sends a pull or push request of typ under a fresh tag, followed by body,
 // and waits for the remote's answer, the end of the link or ctx; a request
-// abandoned by ctx is canceled on the remote too.
-func (p *Remote) ask(ctx context.Context, typ byte, body []byte) (*pending, error) {
+// abandoned by ctx is canceled on the remote too. progress is a push's.
+func (p *Remote) ask(ctx context.Context, typ byte, body []byte, progress func(Pushed)) (*pending, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -336,7 +339,7 @@ func (p *Remote) ask(ctx context.Context, typ byte, body []byte) (*pending, erro
 	}
 	tag := p.next
 	p.next++
-	c := &pending{done: make(chan struct{}), push: typ == framePush}
+	c := &pending{done: make(chan struct{}), push: typ == framePush, progress: progress}
 	p.pending[tag] = c
 	p.mu.Unlock()
 	defer func() {
@@ -407,13 +410,31 @@ func (p *Remote) receive(typ byte, body []byte) error {
 	}
 	tag := binary.BigEndian.Uint32(body)
 	body = body[4:]
+	isPush := typ == framePushing || typ == framePushed || typ == framePushErr
+	if typ == framePushing {
+		// Reported outside p.mu, so the callback may call into this Remote.
+		pushed, err := decodePushed(body)
+		if err != nil {
+			return err
+		}
+		p.mu.Lock()
+		c := p.pending[tag]
+		p.mu.Unlock()
+		if c != nil && !c.push {
+			return fmt.Errorf("protocol error: frame %q answers request %d of another kind", typ, tag)
+		}
+		if c != nil && c.progress != nil {
+			c.progress(pushed)
+		}
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c := p.pending[tag]
 	if c == nil {
 		return nil
 	}
-	if c.push != (typ == framePushed || typ == framePushErr) {
+	if c.push != isPush {
 		return fmt.Errorf("protocol error: frame %q answers request %d of another kind", typ, tag)
 	}
 	finish := func(err error) {
@@ -425,14 +446,11 @@ func (p *Remote) receive(typ byte, body []byte) error {
 	case framePushErr:
 		finish(fmt.Errorf("remote push: %s", body))
 	case framePushed:
-		if len(body) != 16 {
-			return errors.New("protocol error: invalid push answer")
+		pushed, err := decodePushed(body)
+		if err != nil {
+			return err
 		}
-		blobs, bytes := binary.BigEndian.Uint64(body), binary.BigEndian.Uint64(body[8:])
-		if blobs > math.MaxInt64 || bytes > math.MaxInt64 {
-			return errors.New("protocol error: push answer out of range")
-		}
-		c.pushed = Pushed{Blobs: int64(blobs), Bytes: int64(bytes)}
+		c.pushed = pushed
 		finish(nil)
 	case framePullErr:
 		finish(fmt.Errorf("remote snapshot: %s", body))
