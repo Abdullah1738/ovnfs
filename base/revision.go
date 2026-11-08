@@ -18,8 +18,8 @@ import (
 // decide what survives a revision checkout.
 type revisionView struct {
 	source.Dir
-	files map[string]store.File
-	cat   *git.CatFile
+	files   map[string]store.File
+	objects *git.Objects
 }
 
 func (v revisionView) ReadFile(p string) ([]byte, error) {
@@ -27,7 +27,7 @@ func (v revisionView) ReadFile(p string) ([]byte, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	return v.cat.Blob(string(f.ID))
+	return v.objects.Blob(string(f.ID))
 }
 
 // reviseCapture substitutes tree metadata, not a materialized checkout. The
@@ -43,11 +43,11 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 		return err
 	}
 	repo := domains.Repo("")
-	cat, err := repo.CatFile()
+	objects, err := repo.Objects()
 	if err != nil {
 		return err
 	}
-	defer cat.Close()
+	defer objects.Close()
 	files, info := treeFiles(revision.Entries, *res)
 	tracked := map[string]bool{}
 	for file := range files {
@@ -55,7 +55,7 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 			tracked[p] = true
 		}
 	}
-	view := revisionView{Dir: source.Dir(res.Root), files: files, cat: cat}
+	view := revisionView{Dir: source.Dir(res.Root), files: files, objects: objects}
 	roots := map[string]rules.Class{}
 	// Ignored roots remain live and copy-on-write, just as in an ordinary
 	// checkout. Nonignored local/cache roots can contain ignored descendants;

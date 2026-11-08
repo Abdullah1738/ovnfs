@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 
 	"github.com/stencil-hq/ovnfs/git"
 	"github.com/stencil-hq/ovnfs/store"
@@ -52,180 +51,123 @@ func isAttrValue(v string) bool {
 	return v != git.AttrUnspecified && v != git.AttrSet && v != git.AttrUnset
 }
 
-// candidate is a stat-clean tracked file waiting for proof that its index blob is its content.
-type candidate struct {
-	oid string
-	j   hashJob
-}
-
 // verifier proves, for one repository, which stat-clean tracked files' index blob
-// ids equal their work-tree bytes, asking git while the walk continues; every
-// other candidate is hashed.
+// ids equal their work-tree bytes; every other candidate is hashed. Walk goroutine only.
 type verifier struct {
-	w       *walker
-	ctx     context.Context
-	repo    *git.Repo
-	path    string        // the repository's root-relative work tree
-	started bool          // git was asked to start; walk goroutine only
-	ready   chan struct{} // closed once conv and attrs are set
-	conv    git.Conversion
-	attrs   *git.Stream[candidate, []string] // nil when git could not be asked
-	sizes   *git.Stream[candidate, int64]    // started by the attrs reader on the first end-of-line candidate
-	noSizes bool                             // the sizes stream could not start; attrs reader only
-	warn    sync.Once
-	mu      sync.Mutex // guards taken, apart from the walker's lock the walk needs
-	taken   []candidate
+	w         *walker
+	repo      *git.Repo
+	path      string // the repository's root-relative work tree
+	started   bool   // conv and attrs were read
+	conv      git.Conversion
+	attrs     *git.Attributes // nil when the repository's conversion rules could not be read
+	objects   *git.Objects    // opened with the first end-of-line candidate
+	noObjects bool            // the object reader could not be opened
+	warned    bool
 }
 
-// verifier returns the verifier of the repository whose work tree is root-relative
-// path. Its git processes start in the background so the walk need not wait: at
-// once for a capture without a stat cache, where most tracked files become
-// candidates, else with its first candidate, so a capture the stat cache serves
-// whole starts none.
-func (w *walker) verifier(ctx context.Context, path string, repo *git.Repo) *verifier {
+// verifier returns the verifier of the repository whose work tree is root-relative path.
+func (w *walker) verifier(path string, repo *git.Repo) *verifier {
 	if v := w.verifiers[path]; v != nil {
 		return v
 	}
-	v := &verifier{w: w, repo: repo, path: path, ready: make(chan struct{})}
+	v := &verifier{w: w, repo: repo, path: path}
 	w.verifiers[path] = v
-	if w.cold {
-		v.start(ctx)
-	}
 	return v
 }
 
-// start asks git for the repository's conversion settings and opens the
-// attribute stream; walk goroutine only.
-func (v *verifier) start(ctx context.Context) {
-	if v.started {
-		return
-	}
-	v.started, v.ctx = true, ctx
-	go func() {
-		defer close(v.ready)
+// add takes the index blob oid as the content of the file at repository-relative
+// path rel when git stores that file unconverted, else queues it for hashing.
+func (v *verifier) add(ctx context.Context, rel, oid string, j hashJob) {
+	if !v.started {
+		v.started = true
 		conv, err := v.repo.Conversion(ctx)
 		if err == nil {
 			v.conv = conv
-			v.attrs, err = git.CheckAttr(ctx, v.repo, convertAttrs, v.classified)
+			v.attrs, err = v.repo.Attributes(convertAttrs)
 		}
 		if err != nil {
 			v.attrs = nil
-			v.warnOnce(err)
+			v.warn(err)
 		}
-	}()
-}
-
-// add queues one candidate by its repository-relative path; walk goroutine only.
-func (v *verifier) add(ctx context.Context, rel, oid string, j hashJob) {
-	v.start(ctx)
-	<-v.ready
+	}
 	if v.attrs == nil {
 		v.w.jobs <- j
 		return
 	}
-	v.attrs.Add(rel, candidate{oid: oid, j: j})
-}
-
-// classified acts on a candidate's attributes.
-func (v *verifier) classified(c candidate, values []string, err error) {
+	values, err := v.attrs.Check(rel)
 	if err != nil {
-		v.fallback(c, err)
+		v.warn(err)
+		v.w.jobs <- j
 		return
 	}
 	switch classify(values, v.conv) {
 	case convertNone:
-		v.take(c)
+		v.take(oid, j)
 	case convertEOL:
-		v.sized(c)
+		v.sized(oid, j)
 	default:
-		v.w.jobs <- c.j
+		v.w.jobs <- j
 	}
 }
 
-// sized asks for an end-of-line candidate's blob size.
-func (v *verifier) sized(c candidate) {
-	if v.sizes == nil && !v.noSizes {
+// sized takes an end-of-line candidate whose index blob has the file's size.
+func (v *verifier) sized(oid string, j hashJob) {
+	if v.objects == nil && !v.noObjects {
 		var err error
-		if v.sizes, err = git.ObjectSizes(v.ctx, v.repo, v.compared); err != nil {
-			v.noSizes = true
-			v.warnOnce(err)
+		if v.objects, err = v.repo.Objects(); err != nil {
+			v.noObjects = true
+			v.warn(err)
 		}
 	}
-	if v.sizes == nil {
-		v.w.jobs <- c.j
+	if v.objects == nil {
+		v.w.jobs <- j
 		return
 	}
-	v.sizes.Add(c.oid, c)
-}
-
-// compared takes the index blob when its size equals the file's.
-func (v *verifier) compared(c candidate, size int64, err error) {
+	size, err := v.objects.Size(oid)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		// A blob missing locally (a partial clone) is not fetched just to compare sizes.
-		v.w.jobs <- c.j
+		v.w.jobs <- j
 	case err != nil:
-		v.fallback(c, err)
-	case size == c.j.info.Size():
-		v.take(c)
+		v.warn(err)
+		v.w.jobs <- j
+	case size == j.info.Size():
+		v.take(oid, j)
 	default:
-		v.w.jobs <- c.j
+		v.w.jobs <- j
 	}
 }
 
-// take keeps the index blob id as the candidate's content, recorded once git has answered all.
-func (v *verifier) take(c candidate) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.taken = append(v.taken, c)
+// take records the index blob as the file's content: a work-tree content id the
+// stat cache keeps, whatever attributes say later, while git keeps the blob.
+func (v *verifier) take(oid string, j hashJob) {
+	id := store.OID(oid)
+	v.w.mu.Lock()
+	defer v.w.mu.Unlock()
+	v.w.res.Files[j.p] = store.File{Mode: j.mode, ID: id}
+	v.w.cacheOut[j.p] = newStatEntry(j.info, j.key, j.mode, id)
+	v.w.repoHeld = true
 }
 
-// fallback hashes a candidate git could not judge, unless the capture was cancelled.
-func (v *verifier) fallback(c candidate, err error) {
-	if v.ctx.Err() != nil {
+// warn reports the first failure to check this repository's content conversion.
+func (v *verifier) warn(err error) {
+	if v.warned {
 		return
 	}
-	v.warnOnce(err)
-	v.w.jobs <- c.j
+	v.warned = true
+	where := v.path
+	if where == "" {
+		where = "."
+	}
+	v.w.warn(fmt.Sprintf("%s: cannot check git content conversion, tracked files hashed: %v", where, err))
 }
 
-// warnOnce reports the first failure to ask git about this repository's content.
-func (v *verifier) warnOnce(err error) {
-	v.warn.Do(func() {
-		where := v.path
-		if where == "" {
-			where = "."
-		}
-		v.w.warn(fmt.Sprintf("%s: cannot check git content conversion, tracked files hashed: %v", where, err))
-	})
-}
-
-// finishVerifiers waits until every candidate is taken or queued for hashing.
-func (w *walker) finishVerifiers() {
+// closeVerifiers releases the verifiers' object readers once the walk is done.
+func (w *walker) closeVerifiers() {
 	for _, v := range w.verifiers {
-		if !v.started {
-			continue
+		if v.objects != nil {
+			v.objects.Close()
+			v.objects = nil
 		}
-		if <-v.ready; v.attrs != nil {
-			v.attrs.Close()
-		}
-	}
-	for _, v := range w.verifiers {
-		if v.sizes != nil {
-			v.sizes.Close()
-		}
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, v := range w.verifiers {
-		for _, c := range v.taken {
-			// The index blob is the file's bytes: a work-tree content id the stat
-			// cache keeps, whatever attributes say later, while git keeps the blob.
-			id := store.OID(c.oid)
-			w.res.Files[c.j.p] = store.File{Mode: c.j.mode, ID: id}
-			w.cacheOut[c.j.p] = newStatEntry(c.j.info, c.j.key, c.j.mode, id)
-			w.repoHeld = true
-		}
-		v.taken = nil
 	}
 }

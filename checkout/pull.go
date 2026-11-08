@@ -204,7 +204,7 @@ func (r *Registry) mergePull(ctx context.Context, h *checkoutRecord, args api.Pu
 					return api.PullReply{}, placed, coded(fmt.Errorf("%s: %w", c.Path, err))
 				}
 			}
-			data, o, reason = mergeText(ctx, s.labels, current, baseData, data, why)
+			data, o, reason = mergeText(s.labels, current, baseData, data, why)
 		}
 		if !args.DryRun && (o == applied || o == merged || o == marked) {
 			placed = append(placed, c.Path)

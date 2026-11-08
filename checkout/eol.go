@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
-	"fmt"
 	"strconv"
 
 	"github.com/stencil-hq/ovnfs/base"
@@ -120,11 +119,11 @@ type eolConverter struct {
 	actions map[string]eolAction
 	index   map[string]string // the captured index's blob ids, read on first need
 	indexAt string            // the captured index file
-	cat     *git.CatFile
+	objects *git.Objects
 	crlf    map[string]bool // index paths whose blob is text holding CRLF
 }
 
-// newEOLConverter asks git how it stores each of paths in view's root
+// newEOLConverter decides how git stores each of paths in view's root
 // repository. A path git would pass through a filter, ident or encoding, or one in
 // another repository, is refused as unsupported: only git can store it.
 func newEOLConverter(ctx context.Context, view *base.Base, paths []string) (*eolConverter, error) {
@@ -147,39 +146,28 @@ func newEOLConverter(ctx context.Context, view *base.Base, paths []string) (*eol
 			c.indexAt = rr.Index
 		}
 	}
-	var refused string
-	attrs, err := git.CheckAttr(ctx, repo, []string{"text", "eol", "crlf", "filter", "ident", "working-tree-encoding"}, func(p string, values []string, err error) {
-		if err != nil {
-			return
-		}
-		action, ok := cleanAction(values, conv)
-		if !ok && refused == "" {
-			refused = p
-		}
-		c.actions[p] = action
-	})
+	attrs, err := repo.Attributes([]string{"text", "eol", "crlf", "filter", "ident", "working-tree-encoding"})
 	if err != nil {
 		return nil, err
 	}
 	for _, p := range paths {
-		attrs.Add(p, p)
-	}
-	if err := attrs.Close(); err != nil {
-		return nil, err
-	}
-	if refused != "" {
-		return nil, failure("unsupported", "git stores %s through a filter, ident or encoding", refused)
-	}
-	if len(c.actions) != len(paths) {
-		return nil, fmt.Errorf("git check-attr answered %d of %d paths", len(c.actions), len(paths))
+		values, err := attrs.Check(p)
+		if err != nil {
+			return nil, err
+		}
+		action, ok := cleanAction(values, conv)
+		if !ok {
+			return nil, failure("unsupported", "git stores %s through a filter, ident or encoding", p)
+		}
+		c.actions[p] = action
 	}
 	return c, nil
 }
 
-// Close stops the object reader, if one was started.
+// Close releases the object reader, if one was opened.
 func (c *eolConverter) Close() {
-	if c != nil && c.cat != nil {
-		c.cat.Close()
+	if c != nil && c.objects != nil {
+		c.objects.Close()
 	}
 }
 
@@ -220,7 +208,7 @@ func (c *eolConverter) blob(p string, f store.File, data []byte) (store.File, []
 // CRLF, in which case git stores the file unconverted (has_crlf_in_index).
 func (c *eolConverter) indexHasCRLF(p string) (bool, error) {
 	if c.index == nil {
-		index, err := git.ReadIndex(c.indexAt)
+		index, err := c.repo.ReadIndex(c.indexAt)
 		if err != nil {
 			return false, err
 		}
@@ -237,14 +225,14 @@ func (c *eolConverter) indexHasCRLF(p string) (bool, error) {
 	if crlf, ok := c.crlf[p]; ok {
 		return crlf, nil
 	}
-	if c.cat == nil {
-		cat, err := c.repo.CatFile()
+	if c.objects == nil {
+		objects, err := c.repo.Objects()
 		if err != nil {
 			return false, err
 		}
-		c.cat = cat
+		c.objects = objects
 	}
-	data, err := c.cat.Blob(oid)
+	data, err := c.objects.Blob(oid)
 	if err != nil {
 		return false, err
 	}

@@ -21,11 +21,7 @@ func TestIndexTreeUsesStageZeroObjectsAndCapturedIndex(t *testing.T) {
 	testGit(t, r.Top, "update-index", "--skip-worktree", "tracked")
 	oid := testGit(t, r.Top, "rev-parse", ":tracked")
 	testGit(t, r.Top, "update-index", "--add", "--cacheinfo", "100755,"+oid+",statless")
-	cmd := r.command(ctx, "update-index", "--index-info")
-	cmd.Stdin = strings.NewReader("100644 " + oid + " 1\tconflicted\n100644 " + oid + " 2\tconflicted\n100644 " + oid + " 3\tconflicted\n")
-	if out, err := run(cmd); err != nil {
-		t.Fatalf("unmerged index: %s, %v", out, err)
-	}
+	testGitInput(t, r.Top, "100644 "+oid+" 1\tconflicted\n100644 "+oid+" 2\tconflicted\n100644 "+oid+" 3\tconflicted\n", "update-index", "--index-info")
 	index := filepath.Join(t.TempDir(), "captured-index")
 	if err := clone.File(r.IndexPath(), index); err != nil {
 		t.Fatal(err)

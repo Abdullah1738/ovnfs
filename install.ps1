@@ -106,6 +106,3 @@ if (($UserPath -split ";") -notcontains $InstallDir) {
 if ($Upgrade) {
     Write-Host "A running ovnfs daemon keeps the old version until 'ovnfs restart'"
 }
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "ovnfs runs git, which is not on your PATH" -ForegroundColor Yellow
-}

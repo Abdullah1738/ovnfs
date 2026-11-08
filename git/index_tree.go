@@ -1,75 +1,62 @@
 package git
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"strconv"
-	"strings"
+	"os"
+
+	"github.com/stencil-hq/ovnfs/git/internal/index"
+	"github.com/stencil-hq/ovnfs/git/internal/object"
+	"github.com/stencil-hq/ovnfs/git/internal/repo"
 )
 
-// IndexTree reads stage-zero entries and blob sizes from a captured index without reading blob content.
-func (r *Repo) IndexTree(ctx context.Context, index string) ([]TreeEntry, error) {
-	cmd := r.command(ctx, "ls-files", "--stage", "-z")
-	cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+index)
-	out, err := run(cmd)
+// IndexTree reads the stage-zero entries of index file name, sparse directories
+// expanded as `git ls-files --stage` lists them, with blob sizes from the object
+// database and without reading blob content. A missing index is empty; a blob
+// missing from the database is an error.
+func (r *Repo) IndexTree(ctx context.Context, name string) ([]TreeEntry, error) {
+	objects, err := r.repo.OpenObjects()
 	if err != nil {
 		return nil, err
 	}
+	defer objects.Close()
+	idx, err := index.Read(name, r.repo.Format, index.ReadOptions{ExpandSparse: treeReader(objects)})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
 	var entries []TreeEntry
-	var objects strings.Builder
-	for raw := range bytes.SplitSeq(out, []byte{0}) {
-		if len(raw) == 0 {
+	for _, e := range idx.Entries {
+		if e.Stage != 0 {
 			continue
 		}
-		header, name, ok := strings.Cut(string(raw), "\t")
-		fields := strings.Fields(header)
-		if !ok || len(fields) != 3 {
-			return nil, fmt.Errorf("invalid ls-files record %q", raw)
-		}
-		if fields[2] != "0" {
-			continue
-		}
-		mode, err := strconv.ParseUint(fields[0], 8, 32)
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		entry := TreeEntry{Mode: uint32(mode), OID: fields[1], Path: name, Type: "blob"}
-		if mode == 0o160000 {
-			entry.Type = "commit"
-		} else {
-			objects.WriteString(entry.OID)
-			objects.WriteByte('\n')
+		entry := TreeEntry{Mode: uint32(e.Mode), Type: e.Mode.Kind().String(), OID: e.ID.String(), Path: e.Path}
+		if e.Mode != object.ModeGitlink {
+			if _, entry.Size, err = objects.Header(e.ID); err != nil {
+				return nil, fmt.Errorf("index object %s: %w", e.ID, err)
+			}
 		}
 		entries = append(entries, entry)
 	}
-	if objects.Len() == 0 {
-		return entries, nil
-	}
-	cmd = r.command(ctx, "cat-file", "--batch-check=%(objectname) %(objectsize)")
-	cmd.Stdin = strings.NewReader(objects.String())
-	out, err = run(cmd)
-	if err != nil {
-		return nil, err
-	}
-	lines := bytes.Split(bytes.TrimSuffix(out, []byte{'\n'}), []byte{'\n'})
-	n := 0
-	for i := range entries {
-		if entries[i].Type == "commit" {
-			continue
-		}
-		if n >= len(lines) {
-			return nil, fmt.Errorf("missing index object size for %s", entries[i].OID)
-		}
-		fields := strings.Fields(string(lines[n]))
-		n++
-		if len(fields) != 2 || fields[0] != entries[i].OID {
-			return nil, fmt.Errorf("invalid index object size %q", lines[n-1])
-		}
-		entries[i].Size, err = strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("index object %s: %w", entries[i].OID, err)
-		}
-	}
 	return entries, nil
+}
+
+// treeReader reads tree objects from objects for the index engine.
+func treeReader(objects *repo.Objects) index.TreeReader {
+	return func(id object.ID) ([]object.TreeEntry, error) {
+		kind, data, err := objects.Read(id)
+		if err != nil {
+			return nil, err
+		}
+		if kind != object.Tree {
+			return nil, fmt.Errorf("object %s is a %s, not a tree", id, kind)
+		}
+		return object.ParseTree(id.Format(), data)
+	}
 }

@@ -112,7 +112,7 @@ func (d *Domains) add(r Repo, repo *git.Repo) error {
 	if name == "" {
 		name = repo.IndexPath()
 	}
-	index, err := git.ReadIndex(name)
+	index, err := repo.ReadIndex(name)
 	if err != nil {
 		return err
 	}

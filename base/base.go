@@ -99,8 +99,8 @@ type Base struct {
 	sources   map[string]entry
 	children  map[string][]string
 	classes   map[string]rules.Class
-	catMu     sync.Mutex
-	cats      map[string]*git.CatFile
+	objectsMu sync.Mutex
+	objects   map[string]*git.Objects // object readers by work tree top
 	proofs    dirProofs
 	mu        sync.Mutex
 	closeOnce sync.Once
@@ -217,7 +217,7 @@ func load(c Config, m Meta, res *source.Result) (*Base, error) {
 		}
 		res.Domains = domains
 	}
-	b := &Base{config: c, meta: m, capture: res, domains: domains, sources: map[string]entry{"": {mode: os.ModeDir | 0o755}}, children: make(map[string][]string), classes: res.Roots, cats: make(map[string]*git.CatFile)}
+	b := &Base{config: c, meta: m, capture: res, domains: domains, sources: map[string]entry{"": {mode: os.ModeDir | 0o755}}, children: make(map[string][]string), classes: res.Roots, objects: make(map[string]*git.Objects)}
 	if b.classes == nil {
 		b.classes = map[string]rules.Class{}
 	}
@@ -301,22 +301,22 @@ func (b *Base) Blob(p string, id store.OID) ([]byte, error) {
 	} else {
 		return nil, fmt.Errorf("content of %s (%s) is no longer available", p, id)
 	}
-	b.catMu.Lock()
-	defer b.catMu.Unlock()
-	cat := b.cats[top]
-	if cat == nil {
+	b.objectsMu.Lock()
+	defer b.objectsMu.Unlock()
+	objects := b.objects[top]
+	if objects == nil {
 		var err error
 		if repo == nil || repo.Top != top {
 			if repo, err = git.Open(top); err != nil {
 				return nil, err
 			}
 		}
-		if cat, err = repo.CatFile(); err != nil {
+		if objects, err = repo.Objects(); err != nil {
 			return nil, err
 		}
-		b.cats[top] = cat
+		b.objects[top] = objects
 	}
-	return cat.Blob(string(id))
+	return objects.Blob(string(id))
 }
 
 // Bottom exposes the immutable base through the overlay read-only interface.
@@ -331,11 +331,11 @@ func (b *Base) Bottom() overlay.Bottom {
 func (b *Base) Close() error {
 	b.closeOnce.Do(func() {
 		var errs []error
-		b.catMu.Lock()
-		for _, cat := range b.cats {
-			errs = append(errs, cat.Close())
+		b.objectsMu.Lock()
+		for _, objects := range b.objects {
+			errs = append(errs, objects.Close())
 		}
-		b.catMu.Unlock()
+		b.objectsMu.Unlock()
 		b.closeErr = errors.Join(errs...)
 	})
 	return b.closeErr

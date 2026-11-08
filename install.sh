@@ -145,9 +145,6 @@ esac
 if [ -n "$UPGRADE" ]; then
     echo "A running ovnfs daemon keeps the old version until 'ovnfs restart'"
 fi
-if ! command -v git >/dev/null 2>&1; then
-    echo "ovnfs runs git, which is not on your PATH"
-fi
 if [ "$PLATFORM" = "linux" ] && ! command -v fusermount3 >/dev/null 2>&1; then
     echo "ovnfs mounts with FUSE on Linux and needs fusermount3 (the fuse3 package)"
 fi

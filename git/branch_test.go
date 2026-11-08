@@ -44,49 +44,55 @@ func indexBytes(t *testing.T, r *Repo) []byte {
 }
 
 func TestFetchCheckedOutBranch(t *testing.T) {
-	r := testRepo(t)
-	for _, path := range []string{"a.go", "b.go", "c.go"} {
-		testWrite(t, filepath.Join(r.Top, path), "base\n")
-	}
-	testGit(t, r.Top, "add", "--all")
-	testGit(t, r.Top, "commit", "-qm", "files")
-	gitdir, work := branchCheckout(t, r)
-	testWrite(t, filepath.Join(work, "a.go"), "dirty a\n")
-	testGit(t, work, "add", "a.go")
-	testGit(t, work, "commit", "-qm", "agent a")
-	want := testGit(t, work, "rev-parse", "HEAD")
-	for _, path := range []string{"a.go", "b.go", "c.go"} {
-		testWrite(t, filepath.Join(r.Top, path), "dirty "+strings.TrimSuffix(path, ".go")+"\n")
-	}
-	testGit(t, r.Top, "add", "c.go")
-	old := testGit(t, r.Top, "rev-parse", "HEAD")
-	before := indexBytes(t, r)
-	commit, changes, err := r.FetchBranch(context.Background(), gitdir, "main", true)
-	if err != nil || commit != want || len(changes) != 1 || changes[0] != (BranchChange{Path: "a.go", Status: "M"}) {
-		t.Fatalf("dry run = %s %+v %v", commit, changes, err)
-	}
-	if !bytes.Equal(before, indexBytes(t, r)) || testGit(t, r.Top, "rev-parse", "HEAD") != old {
-		t.Fatal("dry run changed index or ref")
-	}
-	if _, err := os.Stat(filepath.Join(r.CommonDir, "objects", want[:2], want[2:])); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("dry run fetched commit: %v", err)
-	}
-	commit, changes, err = r.FetchBranch(context.Background(), gitdir, "main", false)
-	if err != nil || commit != want || len(changes) != 1 {
-		t.Fatalf("apply = %s %+v %v", commit, changes, err)
-	}
-	if got := testGit(t, r.Top, "status", "--porcelain"); got != "M b.go\nM  c.go" {
-		t.Fatalf("status = %q", got)
-	}
-	if got := testGit(t, r.Top, "rev-parse", "HEAD"); got != want {
-		t.Fatalf("HEAD = %s, want %s", got, want)
-	}
-	for _, path := range []string{"a.go", "b.go", "c.go"} {
-		data, err := os.ReadFile(filepath.Join(r.Top, path))
-		if err != nil || string(data) != "dirty "+strings.TrimSuffix(path, ".go")+"\n" {
-			t.Fatalf("working tree %s = %q, %v", path, data, err)
+	eachFetch(t, func(t *testing.T, fetch func(func())) {
+		r := testRepo(t)
+		for _, path := range []string{"a.go", "b.go", "c.go"} {
+			testWrite(t, filepath.Join(r.Top, path), "base\n")
 		}
-	}
+		testGit(t, r.Top, "add", "--all")
+		testGit(t, r.Top, "commit", "-qm", "files")
+		gitdir, work := branchCheckout(t, r)
+		testWrite(t, filepath.Join(work, "a.go"), "dirty a\n")
+		testGit(t, work, "add", "a.go")
+		testGit(t, work, "commit", "-qm", "agent a")
+		want := testGit(t, work, "rev-parse", "HEAD")
+		for _, path := range []string{"a.go", "b.go", "c.go"} {
+			testWrite(t, filepath.Join(r.Top, path), "dirty "+strings.TrimSuffix(path, ".go")+"\n")
+		}
+		testGit(t, r.Top, "add", "c.go")
+		old := testGit(t, r.Top, "rev-parse", "HEAD")
+		before := indexBytes(t, r)
+		var commit string
+		var changes []BranchChange
+		var err error
+		fetch(func() { commit, changes, err = r.FetchBranch(context.Background(), gitdir, "main", true) })
+		if err != nil || commit != want || len(changes) != 1 || changes[0] != (BranchChange{Path: "a.go", Status: "M"}) {
+			t.Fatalf("dry run = %s %+v %v", commit, changes, err)
+		}
+		if !bytes.Equal(before, indexBytes(t, r)) || testGit(t, r.Top, "rev-parse", "HEAD") != old {
+			t.Fatal("dry run changed index or ref")
+		}
+		if _, err := os.Stat(filepath.Join(r.CommonDir, "objects", want[:2], want[2:])); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("dry run fetched commit: %v", err)
+		}
+		fetch(func() { commit, changes, err = r.FetchBranch(context.Background(), gitdir, "main", false) })
+		if err != nil || commit != want || len(changes) != 1 {
+			t.Fatalf("apply = %s %+v %v", commit, changes, err)
+		}
+		if got := testGit(t, r.Top, "status", "--porcelain"); got != "M b.go\nM  c.go" {
+			t.Fatalf("status = %q", got)
+		}
+		if got := testGit(t, r.Top, "rev-parse", "HEAD"); got != want {
+			t.Fatalf("HEAD = %s, want %s", got, want)
+		}
+		for _, path := range []string{"a.go", "b.go", "c.go"} {
+			data, err := os.ReadFile(filepath.Join(r.Top, path))
+			if err != nil || string(data) != "dirty "+strings.TrimSuffix(path, ".go")+"\n" {
+				t.Fatalf("working tree %s = %q, %v", path, data, err)
+			}
+		}
+		testGit(t, r.Top, "fsck", "--strict")
+	})
 }
 
 // TestFetchCheckedOutBranchKeepsRacyEdits covers a same-size edit made in the
@@ -182,21 +188,54 @@ func TestFetchCheckedOutBranchDeletionAndMode(t *testing.T) {
 }
 
 func TestFetchOtherBranchKeepsIndex(t *testing.T) {
-	r := testRepo(t)
-	gitdir, work := branchCheckout(t, r)
-	testWrite(t, filepath.Join(work, "tracked"), "agent\n")
-	testGit(t, work, "commit", "-qam", "agent")
-	old, before := testGit(t, r.Top, "rev-parse", "HEAD"), indexBytes(t, r)
-	for _, branch := range []string{"agent", "agent"} {
-		commit, changes, err := r.FetchBranch(context.Background(), gitdir, branch, false)
-		if err != nil || len(changes) != 0 || commit != testGit(t, work, "rev-parse", "HEAD") {
-			t.Fatalf("fetch = %s %+v %v", commit, changes, err)
+	eachFetch(t, func(t *testing.T, fetch func(func())) {
+		r := testRepo(t)
+		gitdir, work := branchCheckout(t, r)
+		testWrite(t, filepath.Join(work, "tracked"), "agent\n")
+		testGit(t, work, "commit", "-qam", "agent")
+		old, before := testGit(t, r.Top, "rev-parse", "HEAD"), indexBytes(t, r)
+		for _, branch := range []string{"agent", "agent"} {
+			var commit string
+			var changes []BranchChange
+			var err error
+			fetch(func() { commit, changes, err = r.FetchBranch(context.Background(), gitdir, branch, false) })
+			if err != nil || len(changes) != 0 || commit != testGit(t, work, "rev-parse", "HEAD") {
+				t.Fatalf("fetch = %s %+v %v", commit, changes, err)
+			}
 		}
-	}
-	if !bytes.Equal(before, indexBytes(t, r)) || testGit(t, r.Top, "rev-parse", "HEAD") != old {
-		t.Fatal("fetching another branch changed index or HEAD")
-	}
-	if _, _, err := r.FetchBranch(context.Background(), gitdir, "agent", true); !errors.Is(err, ErrBranchDryRun) {
-		t.Fatalf("other branch dry run = %v", err)
-	}
+		if !bytes.Equal(before, indexBytes(t, r)) || testGit(t, r.Top, "rev-parse", "HEAD") != old {
+			t.Fatal("fetching another branch changed index or HEAD")
+		}
+		testGit(t, r.Top, "fsck", "--strict")
+		var err error
+		fetch(func() { _, _, err = r.FetchBranch(context.Background(), gitdir, "agent", true) })
+		if !errors.Is(err, ErrBranchDryRun) {
+			t.Fatalf("other branch dry run = %v", err)
+		}
+	})
+}
+
+// TestFetchOtherBranchRefusals refuses, with git and in process alike, to move
+// a branch checked out in another work tree or one the checkout's HEAD does
+// not fast-forward.
+func TestFetchOtherBranchRefusals(t *testing.T) {
+	eachFetch(t, func(t *testing.T, fetch func(func())) {
+		r := testRepo(t)
+		gitdir, work := branchCheckout(t, r)
+		testWrite(t, filepath.Join(work, "tracked"), "agent\n")
+		testGit(t, work, "commit", "-qam", "agent")
+		testGit(t, r.Top, "worktree", "add", "-q", "-b", "elsewhere", filepath.Join(t.TempDir(), "wt"))
+		testGit(t, r.Top, "branch", "diverged", testGit(t, r.Top, "commit-tree", "-m", "unrelated", "HEAD^{tree}"))
+		for _, branch := range []string{"elsewhere", "diverged"} {
+			before := testGit(t, r.Top, "rev-parse", "refs/heads/"+branch)
+			var err error
+			fetch(func() { _, _, err = r.FetchBranch(context.Background(), gitdir, branch, false) })
+			if err == nil {
+				t.Errorf("fetch into %s succeeded", branch)
+			}
+			if got := testGit(t, r.Top, "rev-parse", "refs/heads/"+branch); got != before {
+				t.Errorf("%s moved to %s", branch, got)
+			}
+		}
+	})
 }

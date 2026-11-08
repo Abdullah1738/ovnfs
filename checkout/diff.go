@@ -611,7 +611,7 @@ func (r *Registry) applyOne(ctx context.Context, h *checkoutRecord, root, p stri
 	if err != nil {
 		return 0, "", err
 	}
-	result, o, reason := mergeText(ctx, s.labels, current, baseData, theirData, why)
+	result, o, reason := mergeText(s.labels, current, baseData, theirData, why)
 	if dry || (o != merged && o != marked) {
 		return o, reason, nil
 	}

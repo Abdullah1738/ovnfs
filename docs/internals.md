@@ -169,14 +169,12 @@ lock files, cannot. Creates that arrive while a capture runs share it: the
 capture is a base no checkout is on yet, and once it is the folder's capture
 every waiting create opens on it.
 
-A capture of an unchanged file reads no content and asks git nothing: the
+A capture of an unchanged file reads no content and no repository data: the
 folder's stat cache (`sources/`) holds each file's blob id, including tracked
 files a capture found to hold their index blob unconverted, whose blob the
-repository keeps while its index still names it. git's content checks
-(`check-attr`, `cat-file`) start only for a tracked file the cache does not
-know. Answers about where a repository lives, what HEAD names and what
-its configuration says are remembered with those files' states
-(`git/memo.go`). The walk classifies a directory's entries, then lists the
+repository keeps while its index still names it. Attribute and blob-size
+checks run only for a tracked file the cache does not know. The walk
+classifies a directory's entries, then lists the
 source directories among them on eight readers while it descends; directories
 it leaves alone are never listed, since listing one can update its access time,
 which the watcher reports as an edit.

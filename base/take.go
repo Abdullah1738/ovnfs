@@ -34,7 +34,7 @@ type takeView struct {
 	dirs    map[string]bool
 	store   *store.Store
 	domains *source.Domains
-	cats    map[*git.Repo]*git.CatFile
+	objects map[*git.Repo]*git.Objects
 }
 
 func (v *takeView) Lstat(p string) (os.FileInfo, error) {
@@ -68,16 +68,16 @@ func (v *takeView) ReadFile(p string) ([]byte, error) {
 	if repo == nil {
 		return nil, os.ErrNotExist
 	}
-	cat := v.cats[repo]
-	if cat == nil {
+	objects := v.objects[repo]
+	if objects == nil {
 		var err error
-		cat, err = repo.CatFile()
+		objects, err = repo.Objects()
 		if err != nil {
 			return nil, err
 		}
-		v.cats[repo] = cat
+		v.objects[repo] = objects
 	}
-	return cat.Blob(string(f.ID))
+	return objects.Blob(string(f.ID))
 }
 
 func takeCapture(ctx context.Context, c Config, set rules.Set, res *source.Result, work source.Result, takes []Take) error {
@@ -87,7 +87,7 @@ func takeCapture(ctx context.Context, c Config, set rules.Set, res *source.Resul
 	// Freeze classification and the working-tree source before any ordered substitutions.
 	files := make(map[string]store.File, len(res.Files))
 	info := make(map[string]source.Info, len(res.Info))
-	view := &takeView{Dir: source.Dir(res.Root), files: res.Files, info: res.Info, dirs: map[string]bool{}, store: c.Store, domains: res.Domains, cats: map[*git.Repo]*git.CatFile{}}
+	view := &takeView{Dir: source.Dir(res.Root), files: res.Files, info: res.Info, dirs: map[string]bool{}, store: c.Store, domains: res.Domains, objects: map[*git.Repo]*git.Objects{}}
 	for p, f := range res.Files {
 		files[p] = f
 		for dir := path.Dir(p); dir != "." && !view.dirs[dir]; dir = path.Dir(dir) {
@@ -96,8 +96,8 @@ func takeCapture(ctx context.Context, c Config, set rules.Set, res *source.Resul
 	}
 	maps.Copy(info, res.Info)
 	defer func() {
-		for _, cat := range view.cats {
-			cat.Close()
+		for _, objects := range view.objects {
+			objects.Close()
 		}
 	}()
 	rootDirs, rootParents := map[string]bool{}, map[string]bool{}

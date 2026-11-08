@@ -2,10 +2,7 @@ package checkout
 
 import (
 	"bytes"
-	"context"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 
 	"github.com/stencil-hq/ovnfs/api"
@@ -60,11 +57,11 @@ func regular(f store.File) bool { return f.Mode == store.ModeFile || f.Mode == s
 // merged, or skipped when ours already holds it; overlapping changes come back
 // marked, with the conflict markers to write. Ours still holding markers stays
 // unresolved, and content git cannot merge stays a conflict, why explaining it.
-func mergeText(ctx context.Context, labels git.Labels, ours, base, theirs []byte, why string) ([]byte, outcome, string) {
+func mergeText(labels git.Labels, ours, base, theirs []byte, why string) ([]byte, outcome, string) {
 	if hasMarkers(ours) {
 		return nil, unresolved, "conflict markers are not resolved yet"
 	}
-	data, clean, err := mergeBytes(ctx, labels, ours, base, theirs)
+	data, clean, err := git.MergeFile(ours, base, theirs, labels)
 	switch {
 	case err != nil:
 		return nil, conflict, why + " (" + err.Error() + ")"
@@ -74,21 +71,6 @@ func mergeText(ctx context.Context, labels git.Labels, ours, base, theirs []byte
 		return nil, skipped, ""
 	}
 	return data, merged, ""
-}
-
-// mergeBytes runs git merge-file on in-memory sides.
-func mergeBytes(ctx context.Context, labels git.Labels, ours, base, theirs []byte) ([]byte, bool, error) {
-	dir, err := os.MkdirTemp("", "ovnfs-merge-")
-	if err != nil {
-		return nil, false, err
-	}
-	defer os.RemoveAll(dir)
-	for name, data := range map[string][]byte{"ours": ours, "base": base, "theirs": theirs} {
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
-			return nil, false, err
-		}
-	}
-	return git.MergeFile(ctx, filepath.Join(dir, "ours"), filepath.Join(dir, "base"), filepath.Join(dir, "theirs"), labels)
 }
 
 // hasMarkers reports whether data holds an unresolved conflict: a line opening

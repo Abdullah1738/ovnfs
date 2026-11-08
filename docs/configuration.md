@@ -92,9 +92,9 @@ reopening a large folder hashes only what changed.
 Files git converts between blob and working tree are read instead, since the
 blob is not their content: filter drivers such as LFS, `ident`,
 `working-tree-encoding`, and end-of-line conversion (`text`, `eol`,
-`core.autocrlf`) unless the blob's size equals the file's. One
-`git check-attr` (and, for end-of-line candidates, one
-`git cat-file --batch-check`) per repository decides this while the walk runs.
+`core.autocrlf`) unless the blob's size equals the file's. The walk decides
+this from each repository's gitattributes and configuration, and for
+end-of-line candidates from the blob's size in the object database.
 The first capture of an LFS repository therefore stores its LFS content, and on
 Windows with Git's default `core.autocrlf=true` the first capture hashes every
 text file.

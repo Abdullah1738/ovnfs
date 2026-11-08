@@ -211,8 +211,8 @@ line endings only is no change. A changed path git would store through a filter
 driver, `ident` or a `working-tree-encoding` is refused (code `unsupported`).
 `apply CHECKOUT` snapshots the checkout and merges each changed
 source path into the folder against the base: a path the user left alone takes
-the checkout's version, and a text file changed on both sides is merged with
-`git merge-file`.
+the checkout's version, and a text file changed on both sides is merged the
+way `git merge-file` merges it.
 
 Where both sides changed the same lines, the file gets git-style conflict
 markers (`<<<<<<< folder` … `>>>>>>> checkout NAME`, in your

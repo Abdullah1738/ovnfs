@@ -27,7 +27,7 @@ type mirror struct {
 
 	mu      sync.RWMutex
 	repo    *git.Repo // nil until the first origin is wanted
-	cat     *git.CatFile
+	objects *git.Objects
 	blobs   map[store.OID]struct{} // every blob of every fetched commit
 	commits map[string]bool        // fetched, or being fetched
 }
@@ -93,7 +93,7 @@ func (m *mirror) load(o git.Origin) error {
 }
 
 // open creates the repository on first use, so a machine that never attaches
-// from a repository with an upstream never needs git.
+// from a repository with an upstream never creates one.
 func (m *mirror) open() (*git.Repo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -118,21 +118,21 @@ func (m *mirror) Has(id store.OID) bool {
 // Blob reads blob id from the repository.
 func (m *mirror) Blob(id store.OID) ([]byte, error) {
 	m.mu.Lock()
-	if m.cat == nil {
+	if m.objects == nil {
 		if m.repo == nil {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("git mirror has no repository")
 		}
-		cat, err := m.repo.CatFile()
+		objects, err := m.repo.Objects()
 		if err != nil {
 			m.mu.Unlock()
 			return nil, err
 		}
-		m.cat = cat
+		m.objects = objects
 	}
-	cat := m.cat
+	objects := m.objects
 	m.mu.Unlock()
-	return cat.Blob(string(id))
+	return objects.Blob(string(id))
 }
 
 // close stops running fetches and the object reader.
@@ -143,7 +143,7 @@ func (m *mirror) close() {
 	m.pending.Wait()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cat != nil {
-		m.cat.Close()
+	if m.objects != nil {
+		m.objects.Close()
 	}
 }

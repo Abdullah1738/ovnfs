@@ -78,7 +78,7 @@ command fails or is interrupted.
   source path into the folder against the checkout's base. Commits are
   flattened: their changes land as uncommitted edits, and new files arrive
   untracked. Paths the user didn't touch take the checkout's version. Text
-  files changed on both sides go through `git merge-file`.
+  files changed on both sides are merged as `git merge-file` would.
 - On overlapping edits, apply writes git-style conflict markers
   (`<<<<<<< folder` … `>>>>>>> checkout NAME`) and exits 1. Resolve the
   markers in the folder, then run `ovnfs apply NAME` again; it refuses the file

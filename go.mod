@@ -4,7 +4,6 @@ go 1.27.3
 
 require (
 	github.com/go-git/go-billy/v5 v5.9.2
-	github.com/go-git/go-git/v5 v5.19.3
 	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/klauspost/compress v1.20.3
 	github.com/willscott/go-nfs-client v0.0.0-20240104095149-b44639837b00
@@ -15,8 +14,9 @@ require (
 
 require (
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
-	github.com/pjbgf/sha1cd v0.7.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rasky/go-xdr v0.0.0-20170124162913-1a41d1a06c93 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )

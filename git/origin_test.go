@@ -47,43 +47,50 @@ func TestOrigin(t *testing.T) {
 // TestFetchOrigin fetches a commit that is no longer the branch tip, by id, into
 // a bare mirror, and refuses origins git could misread.
 func TestFetchOrigin(t *testing.T) {
-	ctx := context.Background()
-	r := testRepo(t)
-	first := testGit(t, r.Top, "rev-parse", "HEAD")
-	testWrite(t, filepath.Join(r.Top, "later.txt"), "later")
-	testGit(t, r.Top, "add", "later.txt")
-	testGit(t, r.Top, "commit", "-qm", "later")
+	eachFetch(t, func(t *testing.T, fetch func(func())) {
+		ctx := context.Background()
+		r := testRepo(t)
+		first := testGit(t, r.Top, "rev-parse", "HEAD")
+		testWrite(t, filepath.Join(r.Top, "later.txt"), "later")
+		testGit(t, r.Top, "add", "later.txt")
+		testGit(t, r.Top, "commit", "-qm", "later")
 
-	m, err := InitBare(filepath.Join(t.TempDir(), "mirror.git"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if have, err := m.HasOrigin(ctx, first); err != nil || have {
-		t.Fatalf("empty mirror has %s: %v %v", first, have, err)
-	}
-	if err := m.FetchOrigin(ctx, Origin{URL: r.Top, Commit: first}); err != nil {
-		t.Fatal(err)
-	}
-	if have, err := m.HasOrigin(ctx, first); err != nil || !have {
-		t.Fatalf("after fetch: %v %v", have, err)
-	}
-	entries, err := m.LsTree(ctx, first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if e.Path == "later.txt" {
-			t.Fatal("fetched a later commit's file")
+		m, err := InitBare(filepath.Join(t.TempDir(), "mirror.git"))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
+		if have, err := m.HasOrigin(ctx, first); err != nil || have {
+			t.Fatalf("empty mirror has %s: %v %v", first, have, err)
+		}
+		fetch(func() { err = m.FetchOrigin(ctx, Origin{URL: r.Top, Commit: first}) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if have, err := m.HasOrigin(ctx, first); err != nil || !have {
+			t.Fatalf("after fetch: %v %v", have, err)
+		}
+		entries, err := m.LsTree(ctx, first)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.Path == "later.txt" {
+				t.Fatal("fetched a later commit's file")
+			}
+		}
+		if testGit(t, m.GitDir, "rev-parse", "--is-shallow-repository") != "true" {
+			t.Fatal("the mirror is not shallow")
+		}
 
-	for _, bad := range []Origin{
-		{URL: "--upload-pack=touch /tmp/x", Commit: first},
-		{URL: r.Top, Commit: "HEAD"},
-		{URL: r.Top, Commit: first[:12]},
-	} {
-		if err := m.FetchOrigin(ctx, bad); err == nil {
-			t.Errorf("fetched %+v", bad)
+		for _, bad := range []Origin{
+			{URL: "--upload-pack=touch /tmp/x", Commit: first},
+			{URL: r.Top, Commit: "HEAD"},
+			{URL: r.Top, Commit: first[:12]},
+		} {
+			fetch(func() { err = m.FetchOrigin(ctx, bad) })
+			if err == nil {
+				t.Errorf("fetched %+v", bad)
+			}
 		}
-	}
+	})
 }

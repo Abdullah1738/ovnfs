@@ -3,7 +3,6 @@ package git
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"os"
@@ -77,16 +76,25 @@ func expandIgnoreClasses(component string) string {
 	return out.String()
 }
 
-// newIgnoreRule parses scope and negation before compiling each wildcard component.
+// newIgnoreRule parses a .gitignore line's negation and trailing spaces before
+// compiling its pattern.
 func newIgnoreRule(line string, domain []string) ignoreRule {
-	rule := ignoreRule{domain: append([]string(nil), domain...)}
-	if strings.HasPrefix(line, "!") {
-		rule.include = true
+	include := strings.HasPrefix(line, "!")
+	if include {
 		line = line[1:]
 	}
 	if !strings.HasSuffix(line, "\\ ") {
 		line = strings.TrimRight(line, " ")
 	}
+	rule := newPatternRule(line, domain)
+	rule.include = include
+	return rule
+}
+
+// newPatternRule compiles a wildcard pattern with gitignore's scope rules
+// (anchoring, trailing-slash directories, **), which gitattributes shares.
+func newPatternRule(line string, domain []string) ignoreRule {
+	rule := ignoreRule{domain: append([]string(nil), domain...)}
 	rule.dirOnly = strings.HasSuffix(line, "/")
 	line = strings.TrimSuffix(line, "/")
 	rule.basename = !strings.Contains(line, "/")
@@ -231,13 +239,14 @@ func NewIgnore(r *Repo) (*Ignore, error) {
 	if r == nil {
 		return i, nil
 	}
-	ctx := context.Background()
-	caseSetting, err := r.configValue(ctx, "--bool", "--get", "core.ignorecase")
+	cfg, err := r.repo.Config()
 	if err != nil {
 		return nil, err
 	}
-	i.fold = caseSetting == "true"
-	global, err := r.configValue(ctx, "--path", "--get", "core.excludesFile")
+	if i.fold, _, err = cfg.Bool("core.ignorecase"); err != nil {
+		return nil, err
+	}
+	global, _, err := cfg.Path("core.excludesFile")
 	if err != nil {
 		return nil, err
 	}

@@ -14,13 +14,37 @@ import (
 // testGit runs the real CLI so expectations do not duplicate the implementation.
 func testGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	return testGitInput(t, dir, "", args...)
+}
+
+// testGitInput runs the real CLI with stdin as its input.
+func testGitInput(t *testing.T, dir, stdin string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// eachFetch runs test once with git on PATH, so fetches run it, and once with
+// fetches in process: test wraps every call that may fetch in fetch, which
+// hides git from it in the second run.
+func eachFetch(t *testing.T, test func(t *testing.T, fetch func(func()))) {
+	t.Run("git", func(t *testing.T) { test(t, func(fn func()) { fn() }) })
+	t.Run("in-process", func(t *testing.T) { test(t, withoutGit) })
+}
+
+// withoutGit runs fn where no git executable can be found; git started by the
+// test itself before and after fn is unaffected.
+func withoutGit(fn func()) {
+	path := os.Getenv("PATH")
+	os.Setenv("PATH", "")
+	defer os.Setenv("PATH", path)
+	fn()
 }
 
 // testRepo creates a repository independent of the developer's configuration.
@@ -201,29 +225,32 @@ func TestUpstream(t *testing.T) {
 	}
 }
 
-// TestMergeFile distinguishes clean merges from conflicts, labels conflict markers,
-// and writes no input.
+// TestMergeFile distinguishes clean merges from conflicts, labels conflict
+// markers, follows the user's merge.conflictStyle and refuses binary content.
 func TestMergeFile(t *testing.T) {
 	testRepo(t)
-	dir := t.TempDir()
-	base, ours, theirs := filepath.Join(dir, "base"), filepath.Join(dir, "ours"), filepath.Join(dir, "theirs")
-	testWrite(t, base, "a\nb\nc\n")
-	testWrite(t, ours, "A\nb\nc\n")
-	testWrite(t, theirs, "a\nb\nC\n")
+	base, ours := []byte("a\nb\nc\n"), []byte("A\nb\nc\n")
 	labels := Labels{Ours: "folder", Base: "base", Theirs: "checkout work"}
-	merged, clean, err := MergeFile(context.Background(), ours, base, theirs, labels)
+	merged, clean, err := MergeFile(ours, base, []byte("a\nb\nC\n"), labels)
 	if err != nil || !clean || string(merged) != "A\nb\nC\n" {
 		t.Fatalf("clean merge = %q %v %v", merged, clean, err)
 	}
-	testWrite(t, theirs, "X\nb\nc\n")
-	merged, clean, err = MergeFile(context.Background(), ours, base, theirs, labels)
+	theirs := []byte("X\nb\nc\n")
+	merged, clean, err = MergeFile(ours, base, theirs, labels)
 	if err != nil || clean {
 		t.Fatalf("conflict reported clean: %v", err)
 	}
 	if want := "<<<<<<< folder\nA\n=======\nX\n>>>>>>> checkout work\nb\nc\n"; string(merged) != want {
 		t.Fatalf("conflict = %q, want %q", merged, want)
 	}
-	if data, _ := os.ReadFile(ours); string(data) != "A\nb\nc\n" {
-		t.Fatalf("merge-file wrote ours: %q", data)
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	testWrite(t, global, "[merge]\n\tconflictStyle = diff3\n")
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	merged, _, err = MergeFile(ours, base, theirs, labels)
+	if want := "<<<<<<< folder\nA\n||||||| base\na\n=======\nX\n>>>>>>> checkout work\nb\nc\n"; err != nil || string(merged) != want {
+		t.Fatalf("diff3 conflict = %q, %v; want %q", merged, err, want)
+	}
+	if _, _, err := MergeFile([]byte("a\x00"), base, theirs, labels); err == nil {
+		t.Fatal("binary content merged")
 	}
 }

@@ -1,121 +1,101 @@
 // Package git reads facts from git repositories found under a source folder.
 //
 // Git is never required: a folder without a repository is captured the same
-// way. Where a repository exists, it contributes facts (which paths are
-// tracked or ignored, which commit is pushed), an object database to read
-// unchanged tracked content from, and a private git directory that makes
-// `git` work inside a checkout without writing to the user's repository.
+// way, and repositories are read and written in process, without a git
+// installation. Only fetches run the git binary, when it is installed, falling
+// back to package fetch without it. Where a repository exists, it contributes
+// facts (which paths are tracked or ignored, which commit is pushed), an object
+// database to read unchanged tracked content from, and a private git directory
+// that makes `git` work inside a checkout without writing to the user's
+// repository.
+//
+// The engines under git/internal implement git's formats and protocols from
+// git's documentation: object (objects and packs), config, refs, index, merge
+// (three-way file merge), repo (discovery), rev (revision syntax and history)
+// and fetch (transports).
 package git
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
-	gitindex "github.com/go-git/go-git/v5/plumbing/format/index"
+	"github.com/stencil-hq/ovnfs/git/internal/config"
+	"github.com/stencil-hq/ovnfs/git/internal/index"
+	"github.com/stencil-hq/ovnfs/git/internal/merge"
+	"github.com/stencil-hq/ovnfs/git/internal/object"
+	"github.com/stencil-hq/ovnfs/git/internal/repo"
+	"github.com/stencil-hq/ovnfs/git/internal/rev"
 )
 
-// ErrNotRepo reports a directory outside a git work tree, or a machine without git.
+// ErrNotRepo reports a directory outside a git work tree.
 var ErrNotRepo = errors.New("not a git work tree")
 
 // Repo identifies a work tree and its shared object database.
 type Repo struct {
 	Top, CommonDir, GitDir string
+	repo                   *repo.Repository
 }
 
-// command builds an isolated git command that never inherits another index, work tree or hooks.
-func (r *Repo) command(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", r.Top, "-c", "core.hooksPath=/dev/null"}, args...)...)
-	for _, value := range os.Environ() {
-		key, _, _ := strings.Cut(value, "=")
-		switch key {
-		case "LC_ALL", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_DIR", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES":
-			continue
-		}
-		cmd.Env = append(cmd.Env, value)
-	}
-	cmd.Env = append(cmd.Env, "LC_ALL=C")
-	return cmd
+// newRepo wraps a repository found or created by package repo.
+func newRepo(h *repo.Repository) *Repo {
+	return &Repo{Top: h.Top, CommonDir: h.CommonDir, GitDir: h.GitDir, repo: h}
 }
 
-// run returns stdout or git's stderr, preserving the original process error.
-func run(cmd *exec.Cmd) ([]byte, error) {
-	var diagnostic bytes.Buffer
-	cmd.Stderr = &diagnostic
-	out, err := cmd.Output()
-	if err != nil {
-		msg := strings.TrimSpace(diagnostic.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		args := cmd.Args[1:]
-		for len(args) >= 2 && (args[0] == "-C" || args[0] == "-c") {
-			args = args[2:]
-		}
-		return nil, fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), msg, err)
-	}
-	return out, nil
-}
-
-// text runs a git command and trims its textual result.
-func (r *Repo) text(ctx context.Context, args ...string) (string, error) {
-	out, err := run(r.command(ctx, args...))
-	return strings.TrimSpace(string(out)), err
-}
-
-// optional runs a query whose exit status 1 means "no value" rather than failure.
-func (r *Repo) optional(ctx context.Context, args ...string) (string, error) {
-	value, err := r.text(ctx, args...)
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 {
-		return "", nil
-	}
-	return value, err
-}
-
-// Open resolves the work tree containing dir, its common directory and its own git
-// directory, remembering the answer while the .git entries it rests on are unchanged.
+// Open resolves the work tree containing dir, its common directory and its own
+// git directory, as `git rev-parse --show-toplevel --git-common-dir --git-dir`
+// reports them (physical paths). Any directory git would not treat as inside a
+// work tree, including an unsafe or unsupported repository, is ErrNotRepo.
 func Open(dir string) (*Repo, error) {
-	absolute, err := filepath.Abs(dir)
+	h, err := repo.Discover(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrNotRepo, err)
 	}
-	r := &Repo{Top: absolute}
-	var found *Repo
-	out, err := recalled("open\x00"+absolute, func() (string, error) {
-		out, err := r.text(context.Background(), "rev-parse", "--path-format=absolute", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir", "--git-dir")
-		if err != nil {
-			return "", ErrNotRepo
-		}
-		found, err = parseOpen(out)
-		return out, err
-	}, func() ([]string, bool) { return openDeps(absolute, found), true })
-	if err != nil {
-		return nil, err
-	}
-	return parseOpen(out)
-}
-
-// parseOpen reads Open's rev-parse answer.
-func parseOpen(out string) (*Repo, error) {
-	lines := strings.Split(out, "\n")
-	if len(lines) != 4 || lines[0] != "true" {
-		return nil, ErrNotRepo
-	}
-	return &Repo{Top: filepath.Clean(lines[1]), CommonDir: filepath.Clean(lines[2]), GitDir: filepath.Clean(lines[3])}, nil
+	return newRepo(h), nil
 }
 
 // IsRoot reports whether dir holds a .git entry, the cheap check made before Open while walking.
 func IsRoot(dir string) bool {
 	_, err := os.Lstat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// session runs fn with r's revision source ready, its objects open until fn returns.
+func (r *Repo) session(fn func(s *rev.Source) error) error {
+	return r.sessionObjects(func(s *rev.Source, _ *repo.Objects) error { return fn(s) })
+}
+
+// sessionObjects is session for operations that also walk trees.
+func (r *Repo) sessionObjects(fn func(s *rev.Source, objects *repo.Objects) error) error {
+	objects, err := r.repo.OpenObjects()
+	if err != nil {
+		return err
+	}
+	defer objects.Close()
+	s, err := r.repo.RevSource(objects)
+	if err != nil {
+		return err
+	}
+	return fn(&s, objects)
+}
+
+// resolveCommit resolves spec to a commit as `git rev-parse --verify --quiet
+// <spec>^{commit}` does: "" when spec names no commit.
+func resolveCommit(s *rev.Source, spec string) (string, error) {
+	id, err := rev.Resolve(s, spec+"^{commit}", rev.Options{})
+	for _, quiet := range []error{rev.ErrUnknown, rev.ErrAmbiguous, rev.ErrPeel, rev.ErrNoUpstream, rev.ErrNotBranch} {
+		if errors.Is(err, quiet) {
+			return "", nil
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
 }
 
 // IndexEntry is one tracked path with the stat data git cached for it.
@@ -137,41 +117,42 @@ type Index struct {
 // IndexPath is the work tree's live index file.
 func (r *Repo) IndexPath() string { return filepath.Join(r.GitDir, "index") }
 
-// ReadIndex decodes an index file without running git. A missing index is empty.
-func ReadIndex(name string) (Index, error) {
-	file, err := os.Open(name)
+// ReadIndex decodes index file name, written for r, keeping the stage-zero
+// entries that are checked out (not skip-worktree or intent-to-add). A missing
+// index is empty.
+func (r *Repo) ReadIndex(name string) (Index, error) {
+	idx, err := index.Read(name, r.repo.Format, index.ReadOptions{})
 	if errors.Is(err, os.ErrNotExist) {
 		return Index{}, nil
 	}
 	if err != nil {
-		return Index{}, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return Index{}, err
-	}
-	var decoded gitindex.Index
-	if err := gitindex.NewDecoder(file).Decode(&decoded); err != nil {
 		return Index{}, fmt.Errorf("read %s: %w", name, err)
 	}
-	out := Index{Entries: make([]IndexEntry, 0, len(decoded.Entries)), Modified: info.ModTime()}
-	for _, e := range decoded.Entries {
-		// A merged entry has stage 0 on disk; go-git's Merged constant is 1 (AncestorMode).
+	out := Index{Entries: make([]IndexEntry, 0, len(idx.Entries)), Modified: idx.ModTime}
+	for _, e := range idx.Entries {
 		if e.Stage != 0 || e.SkipWorktree || e.IntentToAdd {
 			continue
 		}
-		out.Entries = append(out.Entries, IndexEntry{Path: e.Name, OID: e.Hash.String(), Mode: uint32(e.Mode), Size: e.Size, Mtime: e.ModifiedAt, Ctime: e.CreatedAt, Inode: e.Inode})
+		out.Entries = append(out.Entries, IndexEntry{
+			Path:  e.Path,
+			OID:   e.ID.String(),
+			Mode:  uint32(e.Mode),
+			Size:  e.Stat.Size,
+			Mtime: time.Unix(int64(e.Stat.MTime.Sec), int64(e.Stat.MTime.Nsec)),
+			Ctime: time.Unix(int64(e.Stat.CTime.Sec), int64(e.Stat.CTime.Nsec)),
+			Inode: e.Stat.Ino,
+		})
 	}
 	return out, nil
 }
 
-// Head returns the commit HEAD points at, or "" on an unborn branch, remembered while
-// HEAD and the ref it names are unchanged.
-func (r *Repo) Head(ctx context.Context) (string, error) {
-	return recalled("head\x00"+r.GitDir, func() (string, error) {
-		return r.optional(ctx, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
-	}, r.headDeps)
+// Head returns the commit HEAD points at, or "" on an unborn branch.
+func (r *Repo) Head(ctx context.Context) (head string, err error) {
+	err = r.session(func(s *rev.Source) error {
+		head, err = resolveCommit(s, "HEAD")
+		return err
+	})
+	return head, err
 }
 
 // Busy names an unfinished merge, rebase, cherry-pick or revert, whose index cannot be trusted as a base.
@@ -187,19 +168,23 @@ func (r *Repo) Busy() string {
 // Upstream picks the remote-tracking branch a launch elsewhere would fetch from, as
 // "<remote>/<branch>": the current branch's upstream, else origin's default branch.
 // Both results are "" when the repository has neither.
-func (r *Repo) Upstream(ctx context.Context) (ref, commit string, err error) {
-	for _, candidate := range []string{"@{upstream}", "origin/HEAD"} {
-		// A missing upstream is a fatal error for rev-parse, not a lookup miss.
-		name, lookupErr := r.text(ctx, "rev-parse", "--abbrev-ref", candidate)
-		if lookupErr != nil || name == "" || name == candidate {
-			continue
+func (r *Repo) Upstream(ctx context.Context) (ref, tip string, err error) {
+	err = r.session(func(s *rev.Source) error {
+		for _, candidate := range []string{"@{upstream}", "origin/HEAD"} {
+			// A missing upstream is a lookup failure, not an error to report.
+			name, lookupErr := rev.AbbrevRef(s, candidate)
+			if lookupErr != nil || name == "" || name == candidate {
+				continue
+			}
+			c, err := resolveCommit(s, name)
+			if err != nil || c != "" {
+				ref, tip = name, c
+				return err
+			}
 		}
-		commit, err = r.optional(ctx, "rev-parse", "--verify", "--quiet", name+"^{commit}")
-		if err != nil || commit != "" {
-			return name, commit, err
-		}
-	}
-	return "", "", nil
+		return nil
+	})
+	return ref, tip, err
 }
 
 // Remote returns the URL of the remote an Upstream name such as "origin/main" belongs to.
@@ -208,17 +193,38 @@ func (r *Repo) Remote(ctx context.Context, upstream string) (string, error) {
 	if name == "" {
 		name = "origin"
 	}
-	return r.configValue(ctx, "--get", "remote."+name+".url")
+	cfg, err := r.repo.Config()
+	if err != nil {
+		return "", err
+	}
+	url, _ := cfg.Get("remote." + name + ".url")
+	return url, nil
 }
 
 // Contains reports whether commit is reachable from tip.
-func (r *Repo) Contains(ctx context.Context, tip, commit string) (bool, error) {
-	_, err := r.text(ctx, "merge-base", "--is-ancestor", commit, tip)
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 {
-		return false, nil
+func (r *Repo) Contains(ctx context.Context, tip, commit string) (contained bool, err error) {
+	err = r.session(func(s *rev.Source) error {
+		a, b, err := commitIDs(s, commit, tip)
+		if err != nil {
+			return err
+		}
+		contained, err = rev.IsAncestor(s, a, b)
+		return err
+	})
+	return contained, err
+}
+
+// commitIDs resolves two commit names.
+func commitIDs(s *rev.Source, a, b string) (object.ID, object.ID, error) {
+	var ids [2]object.ID
+	for i, name := range []string{a, b} {
+		id, err := rev.Resolve(s, name+"^{commit}", rev.Options{})
+		if err != nil {
+			return object.ID{}, object.ID{}, err
+		}
+		ids[i] = id
 	}
-	return err == nil, err
+	return ids[0], ids[1], nil
 }
 
 // TreeEntry is a recursive ls-tree record; Mode uses git's octal mode encoding.
@@ -228,62 +234,65 @@ type TreeEntry struct {
 	Size            int64
 }
 
-// LsTree returns a commit's recursive tree without interpreting quoted filenames.
+// LsTree returns the recursive tree of a commit or tree, files and gitlinks only.
 func (r *Repo) LsTree(ctx context.Context, tree string) ([]TreeEntry, error) {
 	return r.lsTree(ctx, tree, false)
 }
 
-func (r *Repo) lsTree(ctx context.Context, tree string, sizes bool) ([]TreeEntry, error) {
-	args := []string{"ls-tree", "-r", "-z", "--full-tree"}
-	if sizes {
-		args = append(args, "-l")
-	}
-	out, err := run(r.command(ctx, append(args, tree)...))
-	if err != nil {
-		return nil, err
-	}
-	var entries []TreeEntry
-	for raw := range bytes.SplitSeq(out, []byte{0}) {
-		if len(raw) == 0 {
-			continue
-		}
-		header, name, ok := strings.Cut(string(raw), "\t")
-		fields := strings.Fields(header)
-		if !ok || (!sizes && len(fields) != 3) || (sizes && len(fields) != 4) {
-			return nil, fmt.Errorf("invalid ls-tree record %q", raw)
-		}
-		mode, err := strconv.ParseUint(fields[0], 8, 32)
+// lsTree is `git ls-tree -r --full-tree [-l] <tree>`; sizes adds blob sizes.
+func (r *Repo) lsTree(ctx context.Context, tree string, sizes bool) (entries []TreeEntry, err error) {
+	err = r.sessionObjects(func(s *rev.Source, objects *repo.Objects) error {
+		root, err := rev.Resolve(s, tree+"^{tree}", rev.Options{})
 		if err != nil {
-			return nil, err
+			return err
 		}
-		var size int64
-		if sizes && fields[3] != "-" {
-			size, err = strconv.ParseInt(fields[3], 10, 64)
+		for e, err := range objects.Walk(root, object.WalkOptions{}) {
 			if err != nil {
-				return nil, err
+				return err
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			entry := TreeEntry{Mode: uint32(e.Mode), Type: e.Mode.Kind().String(), OID: e.ID.String(), Path: e.Name}
+			if sizes && e.Mode != object.ModeGitlink {
+				if _, entry.Size, err = objects.Header(e.ID); err != nil {
+					return err
+				}
+			}
+			entries = append(entries, entry)
 		}
-		entries = append(entries, TreeEntry{Mode: uint32(mode), Type: fields[1], OID: fields[2], Path: name, Size: size})
-	}
-	return entries, nil
+		return nil
+	})
+	return entries, err
 }
 
 // Labels name the three sides of a merge in the conflict markers it writes.
-type Labels struct{ Ours, Base, Theirs string }
+type Labels = merge.Labels
 
-// MergeFile merges theirs into ours against base with git merge-file, writing nothing;
-// clean reports whether the result has no conflict markers, which carry labels.
-func MergeFile(ctx context.Context, ours, base, theirs string, labels Labels) (merged []byte, clean bool, err error) {
-	cmd := exec.CommandContext(ctx, "git", "merge-file", "-p", "-L", labels.Ours, "-L", labels.Base, "-L", labels.Theirs, "--", ours, base, theirs)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	merged, err = cmd.Output()
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() > 0 && exit.ExitCode() < 128 {
-		return merged, false, nil
-	}
+// MergeFile merges theirs into ours against base as `git merge-file -p` does,
+// in the conflict style of the user's merge.conflictStyle; clean reports whether
+// the result has no conflict markers, which carry labels. Content git refuses to
+// merge (binary) is an error.
+func MergeFile(ours, base, theirs []byte, labels Labels) (merged []byte, clean bool, err error) {
+	cfg, err := config.Load(config.Options{})
 	if err != nil {
-		return nil, false, fmt.Errorf("git merge-file: %s: %w", strings.TrimSpace(stderr.String()), err)
+		return nil, false, err
 	}
-	return merged, true, nil
+	opts := merge.Options{Labels: labels}
+	if style, ok := cfg.Get("merge.conflictStyle"); ok {
+		switch style {
+		case "merge":
+		case "diff3":
+			opts.Style = merge.StyleDiff3
+		case "zdiff3":
+			opts.Style = merge.StyleZDiff3
+		default:
+			return nil, false, fmt.Errorf("unknown style %q given for merge.conflictstyle", style)
+		}
+	}
+	merged, conflicts, err := merge.File(ours, base, theirs, opts)
+	if err != nil {
+		return nil, false, err
+	}
+	return merged, conflicts == 0, nil
 }

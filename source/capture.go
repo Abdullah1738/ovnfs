@@ -104,11 +104,6 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 	// Reading the stat cache's tree overlaps the start of the walk.
 	go w.loadCache(epoch)
 	defer func() { <-w.cacheReady }()
-	if o.Cache == "" {
-		w.cold = true
-	} else if _, err := os.Stat(o.Cache); err != nil {
-		w.cold = true
-	}
 	var repos []Repo
 	if repo, err := git.Open(o.Root); err == nil && repo.Top == o.Root {
 		r, err := w.copyRepo(ctx, repo, "")
@@ -116,14 +111,12 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 			return Result{}, err
 		}
 		repos = append(repos, r)
-		w.verifier(ctx, "", repo)
 		if busy := repo.Busy(); busy != "" {
 			w.warn(fmt.Sprintf("repository has an unfinished %s; its index was captured as is", busy))
 		}
 	}
 	domains, err := NewDomains(o.Root, repos)
 	if err != nil {
-		w.finishVerifiers()
 		return Result{}, err
 	}
 	w.domains = domains
@@ -141,7 +134,7 @@ func Capture(ctx context.Context, o Options) (Result, error) {
 		<-w.cacheReady
 		w.resolvePending(ctx)
 	}
-	w.finishVerifiers()
+	w.closeVerifiers()
 	w.stopPool()
 	if walkErr != nil {
 		return Result{}, walkErr
@@ -201,8 +194,7 @@ type walker struct {
 	repoHeld    bool // cacheOut names blobs the repository holds; guarded by mu
 	dropped     int
 	repos       int                  // index copies taken so far, naming their directories
-	cold        bool                 // no stat cache: git's content checks start with the walk
-	verifiers   map[string]*verifier // by repository path; created before and during the walk, read after it
+	verifiers   map[string]*verifier // by repository path, created as the walk meets their candidates
 	jobs        chan hashJob
 	workers     sync.WaitGroup
 	ahead       readAhead  // directories read ahead of the walk
@@ -390,11 +382,7 @@ func (w *walker) nested(ctx context.Context, p string) error {
 		return err
 	}
 	r.Module = w.domains.moduleOf(p, repo)
-	if err := w.domains.add(r, repo); err != nil {
-		return err
-	}
-	w.verifier(ctx, p, repo)
-	return nil
+	return w.domains.add(r, repo)
 }
 
 // root records a non-source path; its subtree is never read.
@@ -498,7 +486,7 @@ func (w *walker) resolve(ctx context.Context, j hashJob) {
 	}
 	if tracked && indexClean(entry, j.info, j.key, j.mode, dom.indexAt.Modified) {
 		// Tracked and unchanged: the user's repository holds the content unless git converts it.
-		w.verifier(ctx, dom.path, dom.repo).add(ctx, rel, entry.OID, j)
+		w.verifier(dom.path, dom.repo).add(ctx, rel, entry.OID, j)
 		return
 	}
 	w.jobs <- j

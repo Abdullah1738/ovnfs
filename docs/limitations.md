@@ -6,6 +6,16 @@
   and local paths always show the folder as it is.
 - A tracked file the user changes after open is read from the repository's
   objects; pruning those objects can make it unreadable.
+- ovnfs reads git repositories with its own implementation, not a git
+  installation. It reads the system configuration and attributes from
+  `GIT_CONFIG_SYSTEM` or `/etc/gitconfig` and `/etc/gitattributes` (none on
+  Windows), not from the prefix a particular git was installed to (such as
+  Homebrew's or Git for Windows'), and cannot expand `%(prefix)/` paths.
+  Fetches (`apply --branch`, the remote's git mirror) run `git fetch` when git
+  is on `PATH`. Without git, ovnfs fetches itself: smart HTTP(S), ssh, git://
+  and local paths only (no dumb HTTP or remote helpers), ignoring
+  `http.sslCert`, `http.sslKey` and `http.cookieFile`, and finding credential
+  helpers named in configuration on `PATH` or in `GIT_EXEC_PATH`.
 - Remote checkouts have no git directory and cannot be attached onward. Bring
   their edits back with `pull` on the source machine, then `apply` the local
   checkout to its folder. `fstat` on a lazily fetched open file reports the

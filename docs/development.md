@@ -6,7 +6,11 @@ go test ./...
 ```
 
 `go test ./...` runs the package and in-process protocol checks; on Windows
-with WinFsp installed it also mounts real WinFsp drives.
+with WinFsp installed it also mounts real WinFsp drives. The git engines under
+`git/internal` are checked against the `git` binary when one is installed
+(fixtures and expected output come from it); those tests skip without it.
+They are written from git's documentation and observed behaviour, never from
+git's or another implementation's source.
 
 ## CI and releases
 
