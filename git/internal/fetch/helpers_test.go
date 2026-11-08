@@ -174,7 +174,7 @@ func (g *gitTest) options(url string, gitDir string, db *object.DB, wants ...obj
 		Allowed:   []string{"https", "http", "ssh", "git", "file"},
 		Env:       g.lookup,
 		Target:    db,
-		PackDir:   filepath.Join(gitDir, "objects", "pack"),
+		GitDir:    gitDir,
 		OpenLocal: g.openLocal,
 	}
 }

@@ -25,8 +25,9 @@ URL (without credentials) and a commit there: HEAD when the upstream contains
 it, else HEAD's merge base with the upstream. The remote fetches that commit,
 without history, into `mirror.git` in its state directory, in the background
 and with this machine's git credentials (credential helpers, askpass programs,
-`http.extraHeader`, ssh keys), through `git fetch` when git is installed and
-ovnfs's own fetch otherwise. It never prompts, ssh runs in batch mode unless
+`http.extraHeader`, client certificates, cookies, ssh keys), through `git
+fetch` when git is installed and ovnfs's own fetch otherwise. It never prompts,
+ssh runs in batch mode unless
 `GIT_SSH_COMMAND` or `GIT_SSH` says otherwise, and only https, http, ssh, git
 and local transports are used. Until the commit arrives,
 reads go over the link as above. After that, every file whose content the

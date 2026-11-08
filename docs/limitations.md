@@ -12,10 +12,10 @@
   Windows), not from the prefix a particular git was installed to (such as
   Homebrew's or Git for Windows'), and cannot expand `%(prefix)/` paths.
   Fetches (`apply --branch`, the remote's git mirror) run `git fetch` when git
-  is on `PATH`. Without git, ovnfs fetches itself: smart HTTP(S), ssh, git://
-  and local paths only (no dumb HTTP or remote helpers), ignoring
-  `http.sslCert`, `http.sslKey` and `http.cookieFile`, and finding credential
-  helpers named in configuration on `PATH` or in `GIT_EXEC_PATH`.
+  is on `PATH`. Without git, ovnfs fetches itself over the same transports,
+  finding credential helpers named in configuration on `PATH` or in
+  `GIT_EXEC_PATH`, and reading client certificates (`http.sslCert`) only as
+  PEM or DER files.
 - Remote checkouts have no git directory and cannot be attached onward. Bring
   their edits back with `pull` on the source machine, then `apply` the local
   checkout to its folder. `fstat` on a lazily fetched open file reports the

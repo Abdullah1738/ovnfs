@@ -93,6 +93,34 @@ func readLoose(path string) (Kind, []byte, error) {
 	return kind, data, nil
 }
 
+// DecodeLoose decodes a zlib-compressed loose object read from r, such as one
+// a dumb HTTP server sends. An object whose header declares more than maxSize
+// bytes (when maxSize > 0) is refused before its content is read; content
+// shorter or longer than the header declares is an error.
+func DecodeLoose(r io.Reader, maxSize int64) (Kind, []byte, error) {
+	z, err := openZlib(r)
+	if err != nil {
+		return 0, nil, fmt.Errorf("loose object: zlib: %w", err)
+	}
+	defer closeZlib(z)
+	br := bufio.NewReaderSize(z, 64)
+	kind, size, err := looseHeader(br)
+	if err != nil {
+		return 0, nil, fmt.Errorf("loose object: %w", err)
+	}
+	if maxSize > 0 && size > maxSize {
+		return 0, nil, fmt.Errorf("loose object: %s of %d bytes is over the %d-byte object size limit", kind, size, maxSize)
+	}
+	data, err := readSized(br, size)
+	if err != nil {
+		return 0, nil, fmt.Errorf("loose object: content shorter than header size %d: %w", size, err)
+	}
+	if err := expectEnd(br); err != nil {
+		return 0, nil, fmt.Errorf("loose object: %w", err)
+	}
+	return kind, data, nil
+}
+
 // WriteLoose stores an object as a zlib-compressed loose object in the
 // database's own objects directory and returns its name. An object already
 // present anywhere in the database is not rewritten, only freshened (its file

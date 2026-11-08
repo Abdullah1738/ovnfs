@@ -1,7 +1,9 @@
 // Package fetch transfers objects into a repository from another one: a
-// local object database copied in-process, or a remote upload-pack service
-// spoken to over smart HTTP(S), ssh, git:// or a local path, using protocol
-// v2 with fallback to v0. It also maintains the shallow file.
+// local object database copied in-process, a remote upload-pack service
+// spoken to over smart HTTP(S), ssh, git://, a local path or a remote
+// helper's connection, using protocol v2 with fallback to v0, a dumb HTTP
+// server's files, or a remote helper's own fetch. It also maintains the
+// shallow file.
 //
 // It is written from git's documentation (gitprotocol-*, gitcredentials,
 // git-config, urls) and the observed behaviour of the git binary, which it
@@ -14,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/stencil-hq/ovnfs/git/internal/config"
 	"github.com/stencil-hq/ovnfs/git/internal/object"
@@ -34,9 +37,11 @@ type Options struct {
 	// Haves are the target's ref tips: commits whose history it has, which
 	// the server need not send.
 	Haves []object.ID
-	// Allowed lists the transports that may be used ("https", "http",
-	// "ssh", "git", "file"). Any other, including remote helpers such as
-	// ext:: and fd::, is refused before anything connects.
+	// Allowed lists the transports that may be used, by the names of
+	// git's protocol.<name>.allow: "https", "http" (smart or dumb), "ssh",
+	// "git", "file", or a remote helper's ("ext" for ext::..., "foo" for
+	// foo::... and foo://...). Any other is refused before anything
+	// connects.
 	Allowed []string
 	// Config supplies url.*, http.*, credential.*, core.sshCommand,
 	// core.askPass and ssh.variant; nil is an empty configuration.
@@ -45,9 +50,11 @@ type Options struct {
 	// proxies, ...); nil uses the process environment. Child processes get
 	// the variables this package consults from it.
 	Env func(string) (string, bool)
-	// Target receives the objects; PackDir is its objects/pack directory.
-	Target  *object.DB
-	PackDir string
+	// Target receives the objects; GitDir is the repository it belongs to
+	// (Target is GitDir/objects), where packs are written and in which
+	// remote helpers run.
+	Target *object.DB
+	GitDir string
 	// MaxObjectSize, when > 0, refuses any object larger than this many
 	// bytes (declared in a received pack, copied by the local transport, or
 	// read by the connectivity check), bounding the memory a hostile source
@@ -102,23 +109,10 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 		thin:    true,
 	}}
 	var res Result
-	switch ep.transport {
-	case "file":
-		res, err = f.local(ctx, ep.path)
-	case "ssh":
-		var pc *processConn
-		if pc, err = dialSSH(ctx, opts.Config, env, ep); err == nil {
-			res, err = f.stateful(pc)
-		}
-	case "git":
-		var tc *tcpConn
-		if tc, err = dialGit(ctx, ep); err == nil {
-			res, err = f.stateful(tc)
-		}
-	case "http", "https":
-		res, err = f.http(ctx, ep)
-	default:
-		err = fmt.Errorf("fetch: unsupported transport %q", ep.transport)
+	if ep.helper {
+		res, err = f.helper(ctx, ep)
+	} else {
+		res, err = f.native(ctx, ep)
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -138,6 +132,29 @@ func Fetch(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, err
 	}
 	return res, nil
+}
+
+// native fetches over a transport of this package's own.
+func (f *fetcher) native(ctx context.Context, ep *endpoint) (res Result, err error) {
+	switch ep.transport {
+	case "file":
+		res, err = f.local(ctx, ep.path)
+	case "ssh":
+		var pc *processConn
+		if pc, err = dialSSH(ctx, f.opts.Config, f.env, ep); err == nil {
+			res, err = f.stateful(pc)
+		}
+	case "git":
+		var tc *tcpConn
+		if tc, err = dialGit(ctx, ep); err == nil {
+			res, err = f.stateful(tc)
+		}
+	case "http", "https":
+		res, err = f.http(ctx, ep)
+	default:
+		err = fmt.Errorf("fetch: unsupported transport %q", ep.transport)
+	}
+	return res, err
 }
 
 // insteadOfRules collects every url.<base>.insteadOf.
@@ -165,11 +182,13 @@ type fetcher struct {
 	advShallow []object.ID
 }
 
+func (f *fetcher) packDir() string { return filepath.Join(f.opts.GitDir, "objects", "pack") }
+
 // receive indexes a pack into the target, completing a thin pack from the
 // target's objects.
 func (f *fetcher) receive(pack *string) receiveFunc {
 	return func(r io.Reader) error {
-		name, _, err := object.IndexPack(r, f.opts.PackDir, f.req.format, object.IndexPackOptions{
+		name, _, err := object.IndexPack(r, f.packDir(), f.req.format, object.IndexPackOptions{
 			DB:            f.opts.Target,
 			FixThin:       true,
 			MaxObjectSize: f.opts.MaxObjectSize,
@@ -242,12 +261,13 @@ func (f *fetcher) local(ctx context.Context, path string) (Result, error) {
 		Depth:         f.opts.Depth,
 		SourceShallow: srcShallow,
 		TargetShallow: f.opts.Shallow,
-		PackDir:       f.opts.PackDir,
+		PackDir:       f.packDir(),
 		MaxObjectSize: f.opts.MaxObjectSize,
 	})
 }
 
-// streamConn is a bidirectional connection to upload-pack (ssh, git://).
+// streamConn is a bidirectional connection to upload-pack (ssh, git://, a
+// remote helper's).
 type streamConn interface {
 	io.Reader
 	io.Writer
@@ -265,37 +285,25 @@ func (f *fetcher) stateful(conn streamConn) (Result, error) {
 
 func (f *fetcher) converse(conn streamConn) (Result, error) {
 	p := newPktReader(conn)
-	adv, err := readAdvertisement(p)
+	adv, err := f.advertisement(p)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := f.req.check(adv); err != nil {
-		return Result{}, err
-	}
-	var pack string
-	var su shallowUpdate
 	if adv.v2 {
-		req, err := f.req.encodeV2(adv)
-		if err != nil {
-			return Result{}, err
+		res, err := f.fetchV2(adv, conn, p)
+		if err == nil {
+			// An empty request (flush) ends the v2 session.
+			conn.Write([]byte("0000"))
 		}
-		// The request is written whole before reading: upload-pack reads
-		// all of a v2 request before answering.
-		if _, err := conn.Write(req); err != nil {
-			return Result{}, fmt.Errorf("fetch: sending request: %w", err)
-		}
-		if su, err = readV2Response(p, f.req.format, f.req.shallowLimit(), f.receive(&pack)); err != nil {
-			return Result{}, err
-		}
-		// An empty request (flush) ends the v2 session.
-		conn.Write([]byte("0000"))
-		return f.result(su, pack)
+		return res, err
 	}
 	f.advShallow = adv.shallow
 	body, mode, err := f.req.encodeV0(adv)
 	if err != nil {
 		return Result{}, err
 	}
+	var pack string
+	var su shallowUpdate
 	// A v0 server answers the shallow part before reading the haves, so
 	// write concurrently with reading to never block on a full pipe.
 	werr := make(chan error, 1)
@@ -313,24 +321,72 @@ func (f *fetcher) converse(conn streamConn) (Result, error) {
 	return f.result(su, pack)
 }
 
+// stateless runs a fetch over a remote helper's stateless-connect stream:
+// protocol v2 only, the capability advertisement then one request and its
+// response, with nothing kept between them.
+func (f *fetcher) stateless(conn streamConn) (Result, error) {
+	res, err := func() (Result, error) {
+		p := newPktReader(conn)
+		adv, err := f.advertisement(p)
+		if err != nil {
+			return Result{}, err
+		}
+		if !adv.v2 {
+			return Result{}, fmt.Errorf("%w: protocol v0 advertisement on a stateless-connect stream", errProtocol)
+		}
+		return f.fetchV2(adv, conn, p)
+	}()
+	return res, conn.finish(err)
+}
+
+// advertisement reads the server's advertisement and refuses a server that
+// cannot serve the request.
+func (f *fetcher) advertisement(p *pktReader) (*advertisement, error) {
+	adv, err := readAdvertisement(p)
+	if err != nil {
+		return nil, err
+	}
+	return adv, f.req.check(adv)
+}
+
+// fetchV2 writes a protocol v2 fetch request to w and stores the pack of
+// the response read from p.
+func (f *fetcher) fetchV2(adv *advertisement, w io.Writer, p *pktReader) (Result, error) {
+	req, err := f.req.encodeV2(adv)
+	if err != nil {
+		return Result{}, err
+	}
+	// The request is written whole before reading: upload-pack reads all of
+	// a v2 request before answering.
+	if _, err := w.Write(req); err != nil {
+		return Result{}, fmt.Errorf("fetch: sending request: %w", err)
+	}
+	var pack string
+	su, err := readV2Response(p, f.req.format, f.req.shallowLimit(), f.receive(&pack))
+	if err != nil {
+		return Result{}, err
+	}
+	return f.result(su, pack)
+}
+
 // http runs a fetch over smart HTTP: protocol v2 when the server speaks it,
-// else v0 stateless RPC.
+// else v0 stateless RPC; or over dumb HTTP when the server is not smart.
 func (f *fetcher) http(ctx context.Context, ep *endpoint) (Result, error) {
-	s, err := newHTTPSession(f.opts.Config, f.env, ep)
+	s, err := newHTTPSession(ctx, f.opts.Config, f.env, ep)
 	if err != nil {
 		return Result{}, err
 	}
 	defer s.close()
-	p, body, err := s.discover(ctx)
+	body, p, err := s.discover(ctx)
 	if err != nil {
 		return Result{}, err
 	}
-	adv, err := readAdvertisement(p)
+	if p == nil {
+		return f.dumb(ctx, s, body)
+	}
+	adv, err := f.advertisement(p)
 	body.Close()
 	if err != nil {
-		return Result{}, err
-	}
-	if err := f.req.check(adv); err != nil {
 		return Result{}, err
 	}
 	var pack string
@@ -340,11 +396,11 @@ func (f *fetcher) http(ctx context.Context, ep *endpoint) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		p, body, err := s.post(ctx, req, true)
+		p, reply, err := s.post(ctx, req, true)
 		if err != nil {
 			return Result{}, err
 		}
-		defer body.Close()
+		defer reply.Close()
 		su, err = readV2Response(p, f.req.format, f.req.shallowLimit(), f.receive(&pack))
 		if err != nil {
 			return Result{}, err
@@ -356,11 +412,11 @@ func (f *fetcher) http(ctx context.Context, ep *endpoint) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	p, body, err = s.post(ctx, reqBody, false)
+	p, reply, err := s.post(ctx, reqBody, false)
 	if err != nil {
 		return Result{}, err
 	}
-	defer body.Close()
+	defer reply.Close()
 	if su, err = readV0Response(p, f.req.format, f.req.depth > 0, f.req.shallowLimit(), mode, f.receive(&pack)); err != nil {
 		return Result{}, err
 	}

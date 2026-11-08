@@ -2,7 +2,6 @@ package fetch
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -121,17 +120,19 @@ func TestRedirectFromHTTPSToHTTPRefused(t *testing.T) {
 	}
 }
 
-func TestHelperSyntaxNeverAllowed(t *testing.T) {
+// "<transport>::<address>" always runs git-remote-<transport>, as with git,
+// even when the transport is a native one.
+func TestHelperSyntaxNeverNative(t *testing.T) {
 	s := newServer(t)
 	_, gitDir, db := s.g.target()
-	for _, raw := range []string{"https::x", "http::x", "file::x", "ssh::x", "git::x", "https::https://example.com/r"} {
+	for _, raw := range []string{"file::" + s.dir, "ssh::x", "git::x"} {
 		opts := s.g.options(raw, gitDir, db, s.ids[0])
 		opts.OpenLocal = func(string) (*object.DB, []object.ID, error) {
 			t.Fatalf("%s: opened a local repository", raw)
 			return nil, nil, nil
 		}
-		if _, err := Fetch(context.Background(), opts); !errors.Is(err, errNotAllowed) {
-			t.Errorf("%s: %v, want a refusal", raw, err)
+		if _, err := Fetch(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "git-remote-") {
+			t.Errorf("%s: %v, want a missing remote helper", raw, err)
 		}
 	}
 }

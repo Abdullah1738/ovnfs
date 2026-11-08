@@ -33,7 +33,8 @@ const (
 	redirectNever
 )
 
-// httpSession is one smart HTTP conversation with an upload-pack service.
+// httpSession is one HTTP conversation with a repository: smart (with its
+// upload-pack service) or dumb (plain file requests).
 type httpSession struct {
 	env       environ
 	cfg       *config.Config
@@ -43,6 +44,10 @@ type httpSession struct {
 	headers   []string // http.extraHeader values, "Name: value"
 	redirects redirectPolicy
 	transport *http.Transport
+	// jar holds cookies when http.cookieFile is set; close writes them to
+	// cookieFile when http.saveCookies asks for it.
+	jar        *cookieJar
+	cookieFile string
 
 	// cred is sent as Basic authentication, but only to credOrigin
 	// ("scheme://host:port"): the origin that asked for it with a 401, or
@@ -66,8 +71,9 @@ func origin(u *url.URL) string {
 	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
 }
 
-// newHTTPSession reads the http.* settings that apply to ep's URL.
-func newHTTPSession(cfg *config.Config, env environ, ep *endpoint) (*httpSession, error) {
+// newHTTPSession reads the http.* settings that apply to ep's URL, loading
+// the client certificate (asking for its passphrase) and cookies they name.
+func newHTTPSession(ctx context.Context, cfg *config.Config, env environ, ep *endpoint) (*httpSession, error) {
 	u := *ep.url
 	s := &httpSession{env: env, cfg: cfg, userAgent: agent}
 	if u.User != nil {
@@ -140,13 +146,9 @@ func newHTTPSession(cfg *config.Config, env environ, ep *endpoint) (*httpSession
 		verify = false
 	}
 	tlsConf.InsecureSkipVerify = !verify
-	caFile := env.get("GIT_SSL_CAINFO")
-	if caFile == "" {
-		if e, ok, err := get("sslcainfo"); err != nil {
-			return nil, err
-		} else if ok {
-			caFile = expandHome(e.Value, env)
-		}
+	caFile, err := pathSetting(get, env, "sslcainfo", "GIT_SSL_CAINFO")
+	if err != nil {
+		return nil, err
 	}
 	if caFile != "" {
 		pem, err := os.ReadFile(caFile)
@@ -158,6 +160,21 @@ func newHTTPSession(cfg *config.Config, env environ, ep *endpoint) (*httpSession
 			return nil, fmt.Errorf("fetch: http.sslCAInfo: no certificates in %s", caFile)
 		}
 		tlsConf.RootCAs = pool
+	}
+	cc, err := readClientCert(get, env)
+	if err != nil {
+		return nil, err
+	}
+	if cc.certFile != "" {
+		cert, err := cc.load(ctx, cfg, env)
+		if err != nil {
+			return nil, err
+		}
+		// Sent whatever issuers the server names, as curl does.
+		tlsConf.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &cert, nil }
+	}
+	if err := s.readCookies(get, env); err != nil {
+		return nil, err
 	}
 
 	proxy, err := s.proxy(get)
@@ -172,6 +189,56 @@ func newHTTPSession(cfg *config.Config, env environ, ep *endpoint) (*httpSession
 		MaxIdleConnsPerHost: 2,
 	}
 	return s, nil
+}
+
+// setting returns an http.* setting overridden by environment variable
+// envName, "" when neither is set.
+func setting(get func(string) (config.Entry, bool, error), env environ, name, envName string) (string, error) {
+	if v := env.get(envName); v != "" {
+		return v, nil
+	}
+	e, _, err := get(name)
+	return e.Value, err
+}
+
+// pathSetting is setting for a pathname: the configured value has a leading
+// "~/" expanded, the variable is taken as is.
+func pathSetting(get func(string) (config.Entry, bool, error), env environ, name, envName string) (string, error) {
+	if v := env.get(envName); v != "" {
+		return v, nil
+	}
+	e, _, err := get(name)
+	return expandHome(e.Value, env), err
+}
+
+// readCookies sets up the cookie jar of http.cookieFile: an empty value
+// keeps the cookies servers set for the session only, a path also loads
+// that file, and http.saveCookies writes them back to it when done.
+func (s *httpSession) readCookies(get func(string) (config.Entry, bool, error), env environ) error {
+	e, ok, err := get("cookiefile")
+	if err != nil || !ok {
+		return err
+	}
+	s.jar = &cookieJar{}
+	file := expandHome(e.Value, env)
+	if file == "" {
+		return nil
+	}
+	if err := s.jar.load(file); err != nil {
+		return err
+	}
+	if e, ok, err := get("savecookies"); err != nil {
+		return err
+	} else if ok {
+		save, err := e.Bool()
+		if err != nil {
+			return err
+		}
+		if save {
+			s.cookieFile = file
+		}
+	}
+	return nil
 }
 
 // expandHome expands a leading "~/" the way git expands pathname values.
@@ -258,7 +325,7 @@ func noProxy(env environ, host string) bool {
 // Redirects from https to http are refused, and a redirect leaving the
 // credential's origin drops the Authorization header.
 func (s *httpSession) client(follow bool) *http.Client {
-	return &http.Client{Transport: s.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	c := &http.Client{Transport: s.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if !follow {
 			return http.ErrUseLastResponse
 		}
@@ -273,9 +340,20 @@ func (s *httpSession) client(follow bool) *http.Client {
 		}
 		return nil
 	}}
+	if s.jar != nil {
+		c.Jar = s.jar
+	}
+	return c
 }
 
-func (s *httpSession) close() { s.transport.CloseIdleConnections() }
+// close ends the session, writing its cookies back for http.saveCookies.
+// Failing to write them does not fail the fetch, as with git.
+func (s *httpSession) close() {
+	s.transport.CloseIdleConnections()
+	if s.cookieFile != "" {
+		s.jar.save(s.cookieFile)
+	}
+}
 
 // do sends a request built by newReq, answering a 401 with credentials from
 // the helpers (or askpass) once. The credential is for the origin that sent
@@ -385,9 +463,11 @@ func (s *httpSession) redactedBase() string {
 }
 
 // discover performs the smart info/refs request asking for protocol v2 and
-// returns a reader positioned at the advertisement. Redirects of this first
-// request move the base URL for the rest of the conversation.
-func (s *httpSession) discover(ctx context.Context) (*pktReader, io.Closer, error) {
+// returns a reader positioned at the advertisement. A server answering
+// without the smart content type is dumb: p is then nil and body is its
+// info/refs file. Redirects of this first request move the base URL for the
+// rest of the conversation.
+func (s *httpSession) discover(ctx context.Context) (body io.ReadCloser, p *pktReader, err error) {
 	rebase := func(u *url.URL) error { return s.rebaseTo(u, infoRefsSuffix) }
 	resp, err := s.do(ctx, s.redirects != redirectNever, func() (*http.Request, error) {
 		target := s.base.JoinPath("info", "refs")
@@ -410,12 +490,10 @@ func (s *httpSession) discover(ctx context.Context) (*pktReader, io.Closer, erro
 		resp.Body.Close()
 		return nil, nil, err
 	}
-	ct := resp.Header.Get("Content-Type")
-	if mediaType(ct) != advertisementType {
-		resp.Body.Close()
-		return nil, nil, fmt.Errorf("fetch: %s is not a smart HTTP server (content type %q); the dumb HTTP protocol is not supported", s.redactedBase(), ct)
+	if mediaType(resp.Header.Get("Content-Type")) != advertisementType {
+		return resp.Body, nil, nil
 	}
-	p := newPktReader(resp.Body)
+	p = newPktReader(resp.Body)
 	kind, data, err := p.readPacket()
 	if err != nil {
 		resp.Body.Close()
@@ -434,7 +512,27 @@ func (s *httpSession) discover(ctx context.Context) (*pktReader, io.Closer, erro
 	} else {
 		p.unreadPacket(kind, data)
 	}
-	return p, resp.Body, nil
+	return resp.Body, p, nil
+}
+
+// get requests u for the dumb protocol, following redirects only when
+// http.followRedirects is true. found is false when the server has no such
+// file (404 or 410).
+func (s *httpSession) get(ctx context.Context, u *url.URL) (body io.ReadCloser, found bool, err error) {
+	resp, err := s.do(ctx, s.redirects == redirectAlways, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	}, func(*url.URL) error { return nil }) // the base stays where discovery left it
+	if err != nil {
+		return nil, false, err
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		resp.Body.Close()
+		return nil, false, nil
+	}
+	if err := checkStatus(resp, redactURL(u.String())); err != nil {
+		return nil, false, err
+	}
+	return resp.Body, true, nil
 }
 
 // post sends one stateless request to the upload-pack service and returns

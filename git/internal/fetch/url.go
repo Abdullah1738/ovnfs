@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -12,15 +13,19 @@ import (
 // the transport for its scheme needs it.
 type endpoint struct {
 	// transport is the protocol name protocol.allow speaks of: "ssh", "git",
-	// "http", "https" or "file".
+	// "http", "https", "file", or a remote helper's name.
 	transport string
+	// helper marks a URL git hands to git-remote-<transport>: remote is the
+	// URL it is given as the remote, path the address.
+	helper bool
+	remote string
 	// user is the ssh login ("user" or "user:password", passed to ssh as is).
 	user string
 	// host is the server name without brackets; for git:// hostParam is the
 	// "host=" extra parameter, which keeps brackets and the port.
 	host, port, hostParam string
 	// path is the repository path: for ssh and git what the server is asked
-	// for, for file a local filesystem path.
+	// for, for file a local filesystem path, for a remote helper its address.
 	path string
 	// url is the parsed URL for http and https.
 	url *url.URL
@@ -85,25 +90,26 @@ func parseEndpoint(raw string, allowed []string) (*endpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, s := range []string{ep.user, ep.host, ep.port, ep.hostParam, ep.path} {
+	for _, s := range []string{ep.user, ep.host, ep.port, ep.hostParam, ep.path, ep.remote} {
 		if strings.ContainsRune(s, 0) {
 			return nil, fmt.Errorf("fetch: NUL byte in %q", redactURL(raw))
 		}
 	}
-	for _, a := range allowed {
-		if a == ep.transport {
-			return ep, nil
-		}
+	if slices.Contains(allowed, ep.transport) {
+		return ep, nil
+	}
+	if ep.helper {
+		return nil, fmt.Errorf("fetch: %w: remote helper '%s' (from %q)", errNotAllowed, ep.transport, redactURL(raw))
 	}
 	return nil, fmt.Errorf("fetch: %w: '%s' (from %q)", errNotAllowed, ep.transport, redactURL(raw))
 }
 
 func classify(raw string) (*endpoint, error) {
-	// "<transport>::<address>" asks for a remote helper; "ext::" and "fd::"
-	// are such helpers. None is supported, whatever its name: "https::x"
-	// would otherwise pass an allowlist naming https.
+	// "<transport>::<address>" names a remote helper (ext::, fd::), given the
+	// address. Whatever the name, it is a helper: "https::x" runs
+	// git-remote-https, as with git, never the native transport.
 	if helper, ok := schemeOf(raw, "::"); ok {
-		return nil, fmt.Errorf("fetch: %w: remote helper '%s' (from %q)", errNotAllowed, helper, redactURL(raw))
+		return &endpoint{transport: helper, helper: true, remote: raw, path: raw[len(helper)+2:]}, nil
 	}
 	if scheme, ok := schemeOf(raw, "://"); ok {
 		rest := raw[len(scheme)+3:]
@@ -117,8 +123,8 @@ func classify(raw string) (*endpoint, error) {
 		case "file":
 			return parseFileURL(rest)
 		default:
-			// Any other scheme would need git-remote-<scheme>.
-			return nil, fmt.Errorf("fetch: %w: remote helper '%s' (from %q)", errNotAllowed, scheme, redactURL(raw))
+			// Any other scheme is git-remote-<scheme>'s, given the whole URL.
+			return &endpoint{transport: scheme, helper: true, remote: raw, path: raw}, nil
 		}
 	}
 	if isLocalPath(raw) {

@@ -52,16 +52,23 @@ func Local(ctx context.Context, src, dst *object.DB, wants []object.ID, opts Loc
 	if src.Format() != dst.Format() {
 		return Result{}, fmt.Errorf("fetch: source objects are %s, target objects are %s", src.Format(), dst.Format())
 	}
+	return copyObjects(ctx, &dbSource{src: src, dst: dst, maxSize: opts.MaxObjectSize}, dst, wants, opts)
+}
+
+// copyObjects copies into dst every object reachable from wants that src
+// supplies and dst lacks, as Local describes; opts.MaxObjectSize is src's
+// to enforce.
+func copyObjects(ctx context.Context, src source, dst *object.DB, wants []object.ID, opts LocalOptions) (Result, error) {
 	// One rescan up front lets the walk's many existence checks on dst
 	// skip rescanning on every miss.
 	if err := dst.Rescan(); err != nil {
 		return Result{}, err
 	}
-	w := &localWalk{
+	w := &walk{
 		ctx:     ctx,
 		src:     src,
 		dst:     dst,
-		opts:    opts,
+		depth:   opts.Depth,
 		seen:    make(map[object.ID]struct{}),
 		srcShal: idSet(opts.SourceShallow),
 		dstShal: idSet(opts.TargetShallow),
@@ -87,16 +94,69 @@ func idSet(ids []object.ID) map[object.ID]struct{} {
 	return m
 }
 
-type localWalk struct {
+// source supplies the objects a walk copies into the target: another
+// repository's object database (dbSource), or a dumb HTTP server.
+type source interface {
+	// kind returns the type of object id.
+	kind(id object.ID) (object.Kind, error)
+	// read returns object id; held reports that the target holds it
+	// already, so the walk need not store it.
+	read(id object.ID) (kind object.Kind, data []byte, held bool, err error)
+	// complete reports whether the target holds commit or tree id with
+	// everything reachable from it, so the walk need not descend into it.
+	complete(id object.ID) bool
+}
+
+// dbSource reads objects from another repository's database; the target's
+// commits and trees are taken to be complete.
+type dbSource struct {
+	src, dst *object.DB
+	// maxSize, when > 0, refuses larger objects before they are read.
+	maxSize int64
+}
+
+func (s *dbSource) kind(id object.ID) (object.Kind, error) {
+	kind, _, err := s.src.Header(id)
+	if err != nil {
+		return 0, fmt.Errorf("fetch: reading %s from source: %w", id, err)
+	}
+	return kind, nil
+}
+
+// read reads a source object, refusing one over the size limit before
+// allocating for it.
+func (s *dbSource) read(id object.ID) (object.Kind, []byte, bool, error) {
+	if s.maxSize > 0 {
+		kind, size, err := s.src.Header(id)
+		if err != nil {
+			return 0, nil, false, fmt.Errorf("fetch: reading %s from source: %w", id, err)
+		}
+		if size > s.maxSize {
+			return 0, nil, false, fmt.Errorf("fetch: source %s %s is %d bytes, over the %d-byte object size limit", kind, id, size, s.maxSize)
+		}
+	}
+	kind, data, err := s.src.Read(id)
+	if err != nil {
+		return 0, nil, false, fmt.Errorf("fetch: reading %s from source: %w", id, err)
+	}
+	return kind, data, false, nil
+}
+
+func (s *dbSource) complete(id object.ID) bool { return s.dst.Contains(id) }
+
+// walk copies the objects reachable from some wants that the target lacks,
+// cutting history at a depth and at shallow commits.
+type walk struct {
 	ctx              context.Context
-	src, dst         *object.DB
-	opts             LocalOptions
+	src              source
+	dst              *object.DB
+	depth            int                    // 0: unlimited
 	seen             map[object.ID]struct{} // objects already visited
 	srcShal, dstShal map[object.ID]struct{}
 	out              *objectSink
 }
 
-func (w *localWalk) visit(id object.ID) bool {
+func (w *walk) visit(id object.ID) bool {
 	if _, ok := w.seen[id]; ok {
 		return false
 	}
@@ -104,7 +164,7 @@ func (w *localWalk) visit(id object.ID) bool {
 	return true
 }
 
-func (w *localWalk) run(wants []object.ID) (Result, error) {
+func (w *walk) run(wants []object.ID) (Result, error) {
 	var commits []object.ID
 	for _, want := range wants {
 		id, kind, err := w.peel(want)
@@ -128,14 +188,14 @@ func (w *localWalk) run(wants []object.ID) (Result, error) {
 
 // peel follows a want through annotated tags, sending each tag dst lacks,
 // and returns the object reached. Kind 0 means the chain was already walked.
-func (w *localWalk) peel(id object.ID) (object.ID, object.Kind, error) {
+func (w *walk) peel(id object.ID) (object.ID, object.Kind, error) {
 	for {
 		if err := w.ctx.Err(); err != nil {
 			return id, 0, err
 		}
-		kind, _, err := w.src.Header(id)
+		kind, err := w.src.kind(id)
 		if err != nil {
-			return id, 0, fmt.Errorf("fetch: reading %s from source: %w", id, err)
+			return id, 0, err
 		}
 		if kind != object.Tag {
 			return id, kind, nil
@@ -143,16 +203,16 @@ func (w *localWalk) peel(id object.ID) (object.ID, object.Kind, error) {
 		if !w.visit(id) {
 			return id, 0, nil
 		}
-		_, data, err := w.read(id)
+		_, data, held, err := w.src.read(id)
 		if err != nil {
 			return id, 0, err
 		}
-		if !w.dst.Contains(id) {
+		if !held && !w.dst.Contains(id) {
 			if err := w.out.add(kind, data); err != nil {
 				return id, 0, err
 			}
 		}
-		tag, err := object.ParseTag(w.src.Format(), data)
+		tag, err := object.ParseTag(w.dst.Format(), data)
 		if err != nil {
 			return id, 0, fmt.Errorf("fetch: tag %s: %w", id, err)
 		}
@@ -162,7 +222,7 @@ func (w *localWalk) peel(id object.ID) (object.ID, object.Kind, error) {
 
 // history walks commits breadth-first so each is reached at its smallest
 // depth, which decides where a depth-limited history is cut.
-func (w *localWalk) history(wants []object.ID) (Result, error) {
+func (w *walk) history(wants []object.ID) (Result, error) {
 	var res Result
 	type item struct {
 		id    object.ID
@@ -181,25 +241,27 @@ func (w *localWalk) history(wants []object.ID) (Result, error) {
 			return res, err
 		}
 		_, deepen := w.dstShal[it.id]
-		deepen = deepen && w.opts.Depth > 0 && it.depth < w.opts.Depth
-		have := w.dst.Contains(it.id)
+		deepen = deepen && w.depth > 0 && it.depth < w.depth
+		have := w.src.complete(it.id)
 		if have && !deepen {
 			continue // complete in the target
 		}
-		kind, data, err := w.read(it.id)
+		kind, data, held, err := w.src.read(it.id)
 		if err != nil {
 			return res, err
 		}
 		if kind != object.Commit {
 			return res, fmt.Errorf("fetch: %s is a %s, not a commit", it.id, kind)
 		}
-		c, err := object.ParseCommit(w.src.Format(), data)
+		c, err := object.ParseCommit(w.dst.Format(), data)
 		if err != nil {
 			return res, fmt.Errorf("fetch: commit %s: %w", it.id, err)
 		}
 		if !have {
-			if err := w.out.add(kind, data); err != nil {
-				return res, err
+			if !held {
+				if err := w.out.add(kind, data); err != nil {
+					return res, err
+				}
 			}
 			if err := w.tree(c.Tree); err != nil {
 				return res, err
@@ -211,7 +273,7 @@ func (w *localWalk) history(wants []object.ID) (Result, error) {
 			}
 			continue
 		}
-		if w.opts.Depth > 0 && it.depth >= w.opts.Depth {
+		if w.depth > 0 && it.depth >= w.depth {
 			// git lists the commits at the cut even when they are roots.
 			res.Shallow = append(res.Shallow, it.id)
 			continue
@@ -229,26 +291,28 @@ func (w *localWalk) history(wants []object.ID) (Result, error) {
 }
 
 // tree sends a tree dst lacks and, recursively, its missing entries.
-func (w *localWalk) tree(id object.ID) error {
-	if !w.visit(id) || w.dst.Contains(id) {
+func (w *walk) tree(id object.ID) error {
+	if !w.visit(id) || w.src.complete(id) {
 		return nil
 	}
 	if err := w.ctx.Err(); err != nil {
 		return err
 	}
-	kind, data, err := w.read(id)
+	kind, data, held, err := w.src.read(id)
 	if err != nil {
 		return err
 	}
 	if kind != object.Tree {
 		return fmt.Errorf("fetch: %s is a %s, not a tree", id, kind)
 	}
-	entries, err := object.ParseTree(w.src.Format(), data)
+	entries, err := object.ParseTree(w.dst.Format(), data)
 	if err != nil {
 		return fmt.Errorf("fetch: tree %s: %w", id, err)
 	}
-	if err := w.out.add(kind, data); err != nil {
-		return err
+	if !held {
+		if err := w.out.add(kind, data); err != nil {
+			return err
+		}
 	}
 	for _, e := range entries {
 		switch e.Mode.Kind() {
@@ -265,37 +329,18 @@ func (w *localWalk) tree(id object.ID) error {
 	return nil
 }
 
-func (w *localWalk) blob(id object.ID) error {
+func (w *walk) blob(id object.ID) error {
 	if !w.visit(id) || w.dst.Contains(id) {
 		return nil
 	}
 	if err := w.ctx.Err(); err != nil {
 		return err
 	}
-	kind, data, err := w.read(id)
-	if err != nil {
+	kind, data, held, err := w.src.read(id)
+	if err != nil || held {
 		return err
 	}
 	return w.out.add(kind, data)
-}
-
-// read reads a source object, refusing one over the size limit before
-// allocating for it.
-func (w *localWalk) read(id object.ID) (object.Kind, []byte, error) {
-	if w.opts.MaxObjectSize > 0 {
-		kind, size, err := w.src.Header(id)
-		if err != nil {
-			return 0, nil, fmt.Errorf("fetch: reading %s from source: %w", id, err)
-		}
-		if size > w.opts.MaxObjectSize {
-			return 0, nil, fmt.Errorf("fetch: source %s %s is %d bytes, over the %d-byte object size limit", kind, id, size, w.opts.MaxObjectSize)
-		}
-	}
-	kind, data, err := w.src.Read(id)
-	if err != nil {
-		return 0, nil, fmt.Errorf("fetch: reading %s from source: %w", id, err)
-	}
-	return kind, data, nil
 }
 
 // objectSink stores objects loose until there are unpackLimit of them, then

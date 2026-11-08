@@ -27,6 +27,33 @@ type packIndex struct {
 	packSum        []byte // the pack checksum the index was built for
 }
 
+// PackIndex is a pack index held in memory apart from any database, such as
+// the objects/pack/*.idx a dumb HTTP server publishes beside each pack: it
+// tells which objects a pack holds before the pack is downloaded.
+type PackIndex struct{ x *packIndex }
+
+// ParseIndex parses a version 1 or 2 pack index of format f. Lookups read
+// data in place, so it must stay unchanged and mapped while the index is used.
+func ParseIndex(data []byte, f Format) (*PackIndex, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("pack index: file too short")
+	}
+	x, err := parseIndex(&mappedFile{data: data, size: int64(len(data))}, f)
+	if err != nil {
+		return nil, fmt.Errorf("pack index: %w", err)
+	}
+	return &PackIndex{x}, nil
+}
+
+// Has reports whether the pack holds id.
+func (p *PackIndex) Has(id ID) bool {
+	if id.format != p.x.format {
+		return false
+	}
+	_, ok, _ := p.x.find(id) // in-memory lookups cannot fail
+	return ok
+}
+
 func openIndex(path string, f Format) (*packIndex, error) {
 	m, err := openMapped(path)
 	if err != nil {

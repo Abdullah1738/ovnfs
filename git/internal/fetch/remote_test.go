@@ -2,6 +2,8 @@ package fetch
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -142,6 +144,10 @@ type httpConfig struct {
 	forceV0 bool
 	auth    bool   // require Basic u:p
 	header  string // require this "Name: value" header
+	// cookie requires this "name=value" cookie; every response sets visit=1.
+	cookie string
+	// clientCAs serves https, requiring a client certificate they issued.
+	clientCAs *x509.CertPool
 }
 
 func (s *server) startHTTP(t *testing.T, hc httpConfig) *httpServer {
@@ -185,9 +191,23 @@ func (s *server) startHTTP(t *testing.T, hc httpConfig) *httpServer {
 				return
 			}
 		}
+		if hc.cookie != "" {
+			http.SetCookie(w, &http.Cookie{Name: "visit", Value: "1", Path: "/"})
+			name, value, _ := strings.Cut(hc.cookie, "=")
+			if c, err := r.Cookie(name); err != nil || c.Value != value {
+				http.Error(w, "missing cookie", http.StatusForbidden)
+				return
+			}
+		}
 		backend.ServeHTTP(w, r)
 	})
-	hs.Server = httptest.NewServer(mux)
+	hs.Server = httptest.NewUnstartedServer(mux)
+	if hc.clientCAs != nil {
+		hs.TLS = &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: hc.clientCAs}
+		hs.StartTLS()
+	} else {
+		hs.Start()
+	}
 	t.Cleanup(hs.Close)
 	return hs
 }

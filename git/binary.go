@@ -10,9 +10,8 @@ import (
 )
 
 // gitProgram returns the git executable on PATH, if any. Fetches prefer it to
-// package fetch: git's transports cover more (dumb HTTP, remote helpers, client
-// certificates, cookies), and a pack from an untrusted server is unpacked in
-// git's process rather than in ovnfs.
+// package fetch so that a pack from an untrusted server is unpacked in git's
+// process rather than in ovnfs.
 func gitProgram() (string, bool) {
 	program, err := exec.LookPath("git")
 	return program, err == nil

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -39,6 +40,10 @@ var lookedUpVars = []string{
 	"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
 	"GIT_ASKPASS", "SSH_ASKPASS",
 	"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+	"GIT_SSL_NO_VERIFY", "GIT_SSL_CAINFO", "GIT_SSL_CERT", "GIT_SSL_KEY",
+	"GIT_SSL_CERT_TYPE", "GIT_SSL_KEY_TYPE", "GIT_SSL_CERT_PASSWORD_PROTECTED",
+	"GIT_HTTP_USER_AGENT",
+	"http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
 }
 
 // childEnv is the process environment with lookedUpVars taken from the
@@ -84,6 +89,30 @@ func (e environ) lookPath(name string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%s: %w", name, exec.ErrNotFound)
+}
+
+// findProgram finds a helper program git would run (git-credential-<name>,
+// git-remote-<name>) in PATH, then $GIT_EXEC_PATH, then the libexec/git-core
+// directory of the git installation found on PATH.
+func (e environ) findProgram(name string) (string, error) {
+	if p, err := e.lookPath(name); err == nil {
+		return p, nil
+	}
+	if dir := e.get("GIT_EXEC_PATH"); dir != "" {
+		if p, ok := findExecutable(dir, name); ok {
+			return p, nil
+		}
+	}
+	if git, err := e.lookPath("git"); err == nil {
+		if real, err := filepath.EvalSymlinks(git); err == nil {
+			// <prefix>/bin/git → <prefix>/libexec/git-core
+			dir := filepath.Join(filepath.Dir(filepath.Dir(real)), "libexec", "git-core")
+			if p, ok := findExecutable(dir, name); ok {
+				return p, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%s not found in PATH, GIT_EXEC_PATH or git's libexec directory", name)
 }
 
 // shellCommand runs script through the shell with args available as "$@",

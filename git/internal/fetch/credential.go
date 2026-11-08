@@ -15,7 +15,9 @@ import (
 )
 
 // credential is one authentication context and what is known of its
-// credentials, in the attribute vocabulary of git-credential.
+// credentials, in the attribute vocabulary of git-credential. Protocol
+// "cert" is a client certificate's passphrase, with the certificate file as
+// path.
 type credential struct {
 	protocol, host, path string
 	username, password   string
@@ -42,8 +44,14 @@ func (c *credential) encode(protectCR bool) ([]byte, error) {
 		}
 	}
 	put("protocol", c.protocol)
+	if c.isCert() {
+		b.WriteString("host=\n") // git sends a certificate's empty host and user
+	}
 	put("host", c.host)
 	put("path", c.path)
+	if c.isCert() && c.username == "" {
+		b.WriteString("username=\n")
+	}
 	put("username", c.username)
 	put("password", c.password)
 	for _, w := range c.wwwauth {
@@ -64,6 +72,14 @@ func checkCredentialValue(what, v string, protectCR bool) error {
 	return nil
 }
 
+func (c *credential) isCert() bool { return c.protocol == "cert" }
+
+// complete reports whether c has what authentication needs: a password,
+// and a user name except for a certificate's passphrase.
+func (c *credential) complete() bool {
+	return c.password != "" && (c.username != "" || c.isCert())
+}
+
 // promptURL is how git names the context in askpass prompts.
 func (c *credential) promptURL(withUser bool) string {
 	u := c.protocol + "://"
@@ -71,6 +87,9 @@ func (c *credential) promptURL(withUser bool) string {
 		u += url.PathEscape(c.username) + "@"
 	}
 	u += c.host
+	if c.path != "" {
+		u += "/" + c.path
+	}
 	return u
 }
 
@@ -91,26 +110,15 @@ func newCredentialStore(cfg *config.Config, env environ, u *url.URL, c *credenti
 	c.protocol = u.Scheme
 	c.host = u.Host
 	matchURL := (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, User: userOnly(u)}).String()
-	s := &credentialStore{env: env, protectCR: true}
-	if cfg == nil {
-		return s, nil
-	}
-	if v, found, err := cfg.Bool("credential.protectprotocol"); err != nil {
-		return nil, err
-	} else if found {
-		s.protectCR = v
+	s, err := baseCredentialStore(cfg, env)
+	if err != nil || cfg == nil {
+		return s, err
 	}
 	entries, err := cfg.URLMatchAll("credential", "helper", matchURL)
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range entries {
-		if e.Value == "" {
-			s.helpers = nil
-			continue
-		}
-		s.helpers = append(s.helpers, e.Value)
-	}
+	s.setHelpers(entries)
 	if c.username == "" {
 		if e, ok, err := cfg.URLMatch("credential", "username", matchURL); err != nil {
 			return nil, err
@@ -132,6 +140,45 @@ func newCredentialStore(cfg *config.Config, env environ, u *url.URL, c *credenti
 	return s, nil
 }
 
+// newCertCredentialStore gathers the helpers asked for the passphrase of
+// client certificate certFile and sets c to its context. That context is no
+// URL with a host, so only credential.helper entries without one apply.
+func newCertCredentialStore(cfg *config.Config, env environ, certFile string, c *credential) (*credentialStore, error) {
+	*c = credential{protocol: "cert", path: certFile}
+	s, err := baseCredentialStore(cfg, env)
+	if err != nil || cfg == nil {
+		return s, err
+	}
+	s.setHelpers(cfg.LookupAll("credential.helper"))
+	return s, nil
+}
+
+// baseCredentialStore reads credential.protectProtocol.
+func baseCredentialStore(cfg *config.Config, env environ) (*credentialStore, error) {
+	s := &credentialStore{env: env, protectCR: true}
+	if cfg == nil {
+		return s, nil
+	}
+	if v, found, err := cfg.Bool("credential.protectprotocol"); err != nil {
+		return nil, err
+	} else if found {
+		s.protectCR = v
+	}
+	return s, nil
+}
+
+// setHelpers takes the helper list from credential.helper entries in
+// precedence order; an empty value resets the list.
+func (s *credentialStore) setHelpers(entries []config.Entry) {
+	for _, e := range entries {
+		if e.Value == "" {
+			s.helpers = nil
+			continue
+		}
+		s.helpers = append(s.helpers, e.Value)
+	}
+}
+
 func userOnly(u *url.URL) *url.Userinfo {
 	if u.User == nil {
 		return nil
@@ -141,13 +188,14 @@ func userOnly(u *url.URL) *url.Userinfo {
 
 // fill completes c's username and password: each helper in turn ("get")
 // until both are known or one says quit, then askpass for what is missing.
+// A certificate's passphrase needs no user name.
 func (s *credentialStore) fill(ctx context.Context, cfg *config.Config, c *credential) error {
 	// Refuse a poisoned context before any helper or askpass runs.
 	if _, err := c.encode(s.protectCR); err != nil {
 		return err
 	}
 	for _, h := range s.helpers {
-		if c.username != "" && c.password != "" {
+		if c.complete() {
 			break
 		}
 		out, err := s.run(ctx, h, "get", c)
@@ -170,13 +218,13 @@ func (s *credentialStore) fill(ctx context.Context, cfg *config.Config, c *crede
 			}
 		}
 		if quit {
-			if c.username == "" || c.password == "" {
+			if !c.complete() {
 				return fmt.Errorf("fetch: credential helper '%s' told us to quit", h)
 			}
 			break
 		}
 	}
-	if c.username == "" {
+	if c.username == "" && !c.isCert() {
 		u, err := s.askpass(ctx, cfg, fmt.Sprintf("Username for '%s': ", c.promptURL(false)))
 		if err != nil {
 			return fmt.Errorf("fetch: could not read Username for '%s': %w", c.promptURL(false), err)
@@ -195,7 +243,7 @@ func (s *credentialStore) fill(ctx context.Context, cfg *config.Config, c *crede
 
 // approve tells every helper to store a credential the server accepted.
 func (s *credentialStore) approve(ctx context.Context, c *credential) {
-	if c.fromURL || c.username == "" || c.password == "" {
+	if c.fromURL || !c.complete() {
 		return
 	}
 	for _, h := range s.helpers {
@@ -285,7 +333,7 @@ func (s *credentialStore) helperCommand(ctx context.Context, h, op string) (*exe
 		return s.env.shellCommand(ctx, h, op)
 	}
 	name, args, _ := strings.Cut(h, " ")
-	prog, err := s.findHelper("git-credential-" + name)
+	prog, err := s.env.findProgram("git-credential-" + name)
 	if err != nil {
 		return nil, fmt.Errorf("fetch: credential helper '%s': %w", name, err)
 	}
@@ -304,29 +352,6 @@ func isAbsHelper(h string) bool {
 	}
 	// git also takes a leading slash or drive letter as absolute on Windows.
 	return runtime.GOOS == "windows" && (strings.HasPrefix(h, "/") || strings.HasPrefix(h, `\`))
-}
-
-// findHelper looks for a helper program in PATH, then $GIT_EXEC_PATH, then
-// the libexec/git-core directory of the git installation found on PATH.
-func (s *credentialStore) findHelper(name string) (string, error) {
-	if p, err := s.env.lookPath(name); err == nil {
-		return p, nil
-	}
-	if dir := s.env.get("GIT_EXEC_PATH"); dir != "" {
-		if p, ok := findExecutable(dir, name); ok {
-			return p, nil
-		}
-	}
-	if git, err := s.env.lookPath("git"); err == nil {
-		if real, err := filepath.EvalSymlinks(git); err == nil {
-			// <prefix>/bin/git → <prefix>/libexec/git-core
-			dir := filepath.Join(filepath.Dir(filepath.Dir(real)), "libexec", "git-core")
-			if p, ok := findExecutable(dir, name); ok {
-				return p, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("%s not found in PATH, GIT_EXEC_PATH or git's libexec directory", name)
 }
 
 // shellQuote quotes s for sh the way git quotes arguments: single quotes,

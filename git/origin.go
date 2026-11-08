@@ -186,7 +186,7 @@ func (r *Repo) FetchOrigin(ctx context.Context, o Origin) error {
 		Config:        cfg,
 		Env:           originEnv,
 		Target:        db,
-		PackDir:       filepath.Join(r.CommonDir, "objects", "pack"),
+		GitDir:        r.CommonDir,
 		OpenLocal:     openLocal,
 		MaxObjectSize: originMaxObjectSize,
 	})
