@@ -118,7 +118,9 @@ rollback means a new checkout from a snapshot.
 `new` (and `run`) on a checkout's own folder forks that checkout: capturing it
 would make the daemon serve the new checkout by reading through its own mount,
 which can deadlock the mount. `new` refuses the mount itself, a folder below a
-checkout's root, and `--rev`, `--take` or `--rule` with a checkout.
+checkout's root, a folder (or repository) holding the mount, and `--rev`,
+`--take` or `--rule` with a checkout. These folders are told by file identity,
+so a symlink, another letter case or a bind mount does not get around the rule.
 
 ## Search: `grep` and `glob`
 

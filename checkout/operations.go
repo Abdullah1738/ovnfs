@@ -119,14 +119,14 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	if !filepath.IsAbs(args.Dir) {
 		return api.NewReply{}, failure("invalid", "folder path must be absolute")
 	}
-	if reply, inMount, err := r.forkMounted(ctx, args.Dir, args); inMount {
+	if reply, overlaps, err := r.newOverlappingMount(ctx, args.Dir, args); overlaps {
 		return reply, err
 	}
 	root, err := r.resolveRoot(args.Dir)
 	if err != nil {
 		return api.NewReply{}, coded(err)
 	}
-	if reply, inMount, err := r.forkMounted(ctx, root, args); inMount {
+	if reply, overlaps, err := r.newOverlappingMount(ctx, root, args); overlaps {
 		return reply, err
 	}
 	var revision *git.Revision
@@ -357,14 +357,18 @@ func (r *Registry) publishBase(ctx context.Context, name, id string, b *baseReco
 	return reply, nil
 }
 
-// forkMounted handles New on a folder inside the daemon's own mount, reporting
-// inMount false for any other folder. A checkout sourced from another checkout
+// newOverlappingMount handles New on a folder that overlaps the daemon's own
+// mount, reporting overlaps false for any other folder. A base on such a folder
 // would be served by reading through the mount from the mount's own request
 // handlers, which can deadlock the whole mount, so a checkout's root forks that
-// checkout instead; the mount root and folders below a checkout's root fail.
-func (r *Registry) forkMounted(ctx context.Context, dir string, args api.NewArgs) (reply api.NewReply, inMount bool, err error) {
-	rel, inMount := r.underMount(dir)
-	if !inMount {
+// checkout instead; the mount root, folders below a checkout's root and folders
+// holding the mount fail.
+func (r *Registry) newOverlappingMount(ctx context.Context, dir string, args api.NewArgs) (reply api.NewReply, overlaps bool, err error) {
+	rel, inMount, holds := r.mountOverlap(dir)
+	switch {
+	case holds:
+		return api.NewReply{}, true, failure("invalid", "%s holds the checkout mount %s; open a folder outside it", dir, r.config.Mount)
+	case !inMount:
 		return api.NewReply{}, false, nil
 	}
 	name, sub, _ := strings.Cut(filepath.ToSlash(rel), "/")
@@ -391,6 +395,60 @@ func (r *Registry) underMount(dir string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// mountOverlap reports how folder dir overlaps the daemon's mount: rel names
+// dir from the mount when dir is the mount or below it (inside), and holds
+// reports dir holding the mount. Spellings unlike the mount's own (letter case
+// a volume ignores, a firmlink, a bind mount) are told by file identity, which
+// asks the mount for its root: the caller holds no registry lock, since the
+// mount's server takes them.
+func (r *Registry) mountOverlap(dir string) (rel string, inside, holds bool) {
+	if rel, inside = r.underMount(dir); inside {
+		return rel, true, false
+	}
+	for _, m := range r.mounts {
+		if _, holds = below(dir, m); holds {
+			return "", false, true
+		}
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", false, false
+	}
+	info, err := os.Stat(real)
+	if err != nil {
+		return "", false, false
+	}
+	// The resolved spelling, so that every real ancestor of the mount is walked.
+	mount := r.mounts[len(r.mounts)-1]
+	if _, holds = ancestorAt(filepath.Dir(mount), info); holds {
+		return "", false, true
+	}
+	root, err := os.Stat(mount)
+	if err != nil {
+		return "", false, false
+	}
+	top, inside := ancestorAt(real, root)
+	if !inside {
+		return "", false, false
+	}
+	rel, err = filepath.Rel(top, real)
+	return rel, err == nil, false
+}
+
+// ancestorAt returns the nearest of path p and its ancestors that is the file want.
+func ancestorAt(p string, want os.FileInfo) (string, bool) {
+	for {
+		if info, err := os.Stat(p); err == nil && os.SameFile(info, want) {
+			return p, true
+		}
+		up := filepath.Dir(p)
+		if up == p {
+			return "", false
+		}
+		p = up
+	}
 }
 
 // mountPaths spells the mount as configured and with its parent's symlinks

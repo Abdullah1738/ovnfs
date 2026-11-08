@@ -410,12 +410,19 @@ func TestNewInsideMount(t *testing.T) {
 		t.Fatalf("new through a symlink = %+v, %v", linked, err)
 	}
 
+	// A repository holding the mount: new on a folder in it resolves to its root.
+	holder := filepath.Dir(f.mount)
+	write(t, filepath.Join(holder, "src", "a.txt"), "a")
+	gitRun(t, holder, "init", "-q")
+
 	for _, tt := range []struct {
 		name string
 		args api.NewArgs
 		code string
 	}{
 		{"mount root", api.NewArgs{Dir: f.mount}, "invalid"},
+		{"folder holding the mount", api.NewArgs{Dir: holder}, "invalid"},
+		{"repository holding the mount", api.NewArgs{Dir: filepath.Join(holder, "src")}, "invalid"},
 		{"below a checkout", api.NewArgs{Dir: filepath.Join(f.mount, "parent", "sub")}, "invalid"},
 		{"folder-only flags", api.NewArgs{Dir: filepath.Join(f.mount, "parent"), Rules: []string{"local sub/**"}}, "invalid"},
 		{"no such checkout", api.NewArgs{Dir: filepath.Join(f.mount, "gone")}, "not_found"},
@@ -427,6 +434,21 @@ func TestNewInsideMount(t *testing.T) {
 	}
 	if n := len(f.reg.Ls().Checkouts); n != 3 {
 		t.Fatalf("checkouts = %d, want parent, child and parent-2", n)
+	}
+
+	// A case-insensitive volume reaches the mount in another letter case, which
+	// only file identity tells from an outside folder.
+	upper := strings.ToUpper(f.mount)
+	if !exists(upper) {
+		return
+	}
+	variant, err := f.reg.New(ctx, api.NewArgs{Dir: filepath.Join(upper, "parent"), Name: "variant"})
+	if err != nil || variant.Checkout.Parent == "" || variant.Checkout.Base != parent.Base {
+		t.Fatalf("new on a checkout in another letter case = %+v, %v", variant, err)
+	}
+	_, err = f.reg.New(ctx, api.NewArgs{Dir: strings.ToUpper(holder)})
+	if coded := (*Error)(nil); !errors.As(err, &coded) || coded.Code != "invalid" {
+		t.Fatalf("folder holding the mount in another letter case: err = %v, want invalid", err)
 	}
 }
 
