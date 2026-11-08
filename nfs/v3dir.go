@@ -12,11 +12,11 @@ func (s *Server) readdir3(d *decoder, res *encoder) status { return s.list3(d, r
 func (s *Server) readdirplus3(d *decoder, res *encoder) status { return s.list3(d, res, true) }
 
 // list3 answers READDIR or, with plus, READDIRPLUS from the listing
-// snapshot the cookie verifier names (see Server.list). "." and ".." come
-// first, with cookies 1 and 2; entries[i] has cookie firstCookie+i. Entries
-// are added while the result stays within the client's byte budgets,
-// measured on the encoded reply; when not even one fits, the call fails
-// TOOSMALL.
+// snapshot the cookie verifier names (see Server.list), or from Server.relist
+// when that snapshot is gone and the directory changed. "." and ".." come
+// first, with cookies 1 and 2; entries[i] has cookie first+i. Entries are
+// added while the result stays within the client's byte budgets, measured on
+// the encoded reply; when not even one fits, the call fails TOOSMALL.
 func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 	id, ok := d.fh(maxFH3)
 	cookie := d.u64()
@@ -40,6 +40,9 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 		return stNotDir
 	}
 	l, st := s.list(id, p, cookie, verf)
+	if st == stBadCookie {
+		l, st = s.relist(id, p, cookie)
+	}
 	if st != stOK {
 		return st
 	}
@@ -76,7 +79,7 @@ func (s *Server) list3(d *decoder, res *encoder, plus bool) status {
 	for i := start; fits && i < len(l.entries); i++ {
 		info := l.entries[i]
 		child := path.Join(p, info.Name())
-		c := uint64(firstCookie + i)
+		c := l.first + uint64(i)
 		if plus {
 			// A continuation's listing may be older than the client's
 			// cached attributes, which it would replace: describe the

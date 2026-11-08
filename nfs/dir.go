@@ -13,23 +13,24 @@ import (
 const firstCookie = 3
 
 // listing is a directory's entries as one READDIR saw them, sorted by name;
-// entries[i] has cookie firstCookie+i. Continuations page through the same
+// entries[i] has cookie first+i. Continuations page through the same
 // listing, so a directory changing between pages neither skips nor repeats
 // entries.
 type listing struct {
 	dir     uint64
 	verf    uint64
+	first   uint64
 	entries []os.FileInfo
 }
 
 // after returns the index of the first entry after cookie; false for a
-// cookie this listing cannot have issued. Cookies below firstCookie start at
-// the first entry.
+// cookie this listing cannot have issued. Cookies below first start at the
+// first entry.
 func (l *listing) after(cookie uint64) (int, bool) {
-	if cookie < firstCookie {
+	if cookie < l.first {
 		return 0, true
 	}
-	i := cookie - firstCookie + 1
+	i := cookie - l.first + 1
 	if i > uint64(len(l.entries)) {
 		return 0, false
 	}
@@ -48,12 +49,10 @@ func (s *Server) list(id uint64, p string, cookie, verf uint64) (*listing, statu
 			return l, stOK
 		}
 	}
-	infos, err := s.FS.ReadDir(p)
-	if err != nil {
-		return nil, statusOf(err)
+	l, st := s.read(id, p, firstCookie)
+	if st != stOK {
+		return nil, st
 	}
-	slices.SortFunc(infos, func(a, b os.FileInfo) int { return strings.Compare(a.Name(), b.Name()) })
-	l := &listing{dir: id, verf: verifier(id, infos), entries: infos}
 	if resume && l.verf != verf {
 		return nil, stBadCookie
 	}
@@ -61,14 +60,38 @@ func (s *Server) list(id uint64, p string, cookie, verf uint64) (*listing, statu
 	return l, stOK
 }
 
-// verifier is a cookie verifier for a directory's entry names, never 0
-// (which clients send before they have one): FNV-1a of the directory's id
-// and its names, each preceded by a NUL.
-func verifier(dir uint64, infos []os.FileInfo) uint64 {
+// relist lists directory id again for a continuation after cookie whose
+// snapshot is gone and whose directory changed. Its entries are numbered
+// from cookie+1: the macOS client drops entries whose cookie is not past
+// the one it asked for, and ends the listing at BAD_COOKIE.
+func (s *Server) relist(id uint64, p string, cookie uint64) (*listing, status) {
+	l, st := s.read(id, p, cookie+1)
+	if st == stOK {
+		s.dirs.put(l)
+	}
+	return l, st
+}
+
+// read lists directory id, at path p, sorted by name and numbered from first.
+func (s *Server) read(id uint64, p string, first uint64) (*listing, status) {
+	infos, err := s.FS.ReadDir(p)
+	if err != nil {
+		return nil, statusOf(err)
+	}
+	slices.SortFunc(infos, func(a, b os.FileInfo) int { return strings.Compare(a.Name(), b.Name()) })
+	return &listing{dir: id, verf: verifier(id, first, infos), first: first, entries: infos}, stOK
+}
+
+// verifier is a cookie verifier for a directory's entry names and their
+// numbering, never 0 (which clients send before they have one): FNV-1a of
+// the directory's id, its first cookie and its names, each preceded by a NUL.
+func verifier(dir, first uint64, infos []os.FileInfo) uint64 {
 	const prime = 1099511628211
 	h := uint64(14695981039346656037)
-	for i := range 8 {
-		h = (h ^ dir>>(8*i)&0xff) * prime
+	for _, v := range []uint64{dir, first} {
+		for i := range 8 {
+			h = (h ^ v>>(8*i)&0xff) * prime
+		}
 	}
 	for _, info := range infos {
 		h *= prime // the NUL separator
