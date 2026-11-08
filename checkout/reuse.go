@@ -32,21 +32,21 @@ import (
 // A create on the warm capture takes a checkout prepared on it ahead of time (the
 // pool): upper, private git directory and overlay, below directories named by a
 // random key instead of a checkout name (checkoutMeta.Dir). Naming it writes only
-// the git directory's marker. The pool holds as many as the largest burst of
-// creates the folder has seen, at least poolMin, is refilled in the background and
-// goes with the warm capture, or moves onto the next one while the repository's
-// git state stays the same; that capture's git template is then written in the
-// background too. Prepared checkouts are in no state: the next Open removes any a
-// stop left behind.
+// the git directory's marker. The pool holds as many as the most creates of the
+// folder seen running at once, at least poolMin, as far as their git directories
+// fit poolBudget. It is refilled in the background and goes with the warm capture,
+// or moves onto the next one while the repository's git state stays the same; that
+// capture's git template is then written in the background too. Prepared
+// checkouts are in no state: the next Open removes any a stop left behind.
 
 const (
 	// warmTTL is how long an unused warm capture stays retained.
 	warmTTL = 15 * time.Minute
 	// poolMin and poolMax bound how many checkouts a folder keeps prepared.
 	poolMin, poolMax = 8, 256
-	// burstGap separates bursts of creates: a create later than this after the
-	// previous one starts a new burst.
-	burstGap = 2 * time.Second
+	// poolBudget bounds the bytes of the git directories a folder keeps prepared,
+	// each a copy of its template; a pool keeps at least one.
+	poolBudget = 256 << 20
 	// prepareSlots bounds the checkouts prepared at once.
 	prepareSlots = 8
 	// preparedPrefix starts the directory key of a prepared checkout; no checkout
@@ -66,15 +66,21 @@ type reuseFolder struct {
 	warmGitGen uint64            // gitGen then
 	warmLock   string            // hash of the manifest lock warm was classified with
 	warmUsed   time.Time         // when a create last reused or made warm
-	template   string            // warm's private git directory for new checkouts to copy; "" for none or while warm.template is pending
-	config     string            // template's config, which prepared checkouts' git directories hold
+	template   gitTemplate       // what warm's checkouts copy; dir "" for none or while warm.template is pending
 	capturing  chan struct{}     // closed when the capture in flight for this folder ends
 	pool       []*checkoutRecord // prepared on warm, unnamed and unregistered, each retaining warm
-	poolSize   int               // how many the pool should hold
+	poolSize   int               // the most creates seen running at once, at least poolMin, at most poolMax (see poolTarget)
 	filling    int               // fillPool goroutines running
 	preparing  int               // checkouts they are preparing
-	burst      int               // creates in the current burst
-	last       time.Time         // the latest create
+	running    int               // creates running now
+}
+
+// gitTemplate is the private git directory checkouts on a capture copy (see
+// Registry.writeTemplate).
+type gitTemplate struct {
+	dir    string // "" for none
+	config string // its config, which prepared checkouts' git directories hold
+	bytes  int64  // the size of its files, which each prepared checkout copies
 }
 
 // newOnFolder opens a checkout named name (or one derived from root) on a capture of
@@ -91,7 +97,15 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 		f = &reuseFolder{root: root, poolSize: poolMin}
 		r.folders[root] = f
 	}
-	f.noteCreateLocked()
+	// Creates made one after another need no more than poolMin however quickly
+	// they follow each other; a burst started together finds as many prepared.
+	f.running++
+	f.poolSize = max(f.poolSize, min(f.running, poolMax))
+	defer func() {
+		r.mu.Lock()
+		f.running--
+		r.mu.Unlock()
+	}()
 	arrived := f.gen.Load()
 	for {
 		if r.closed {
@@ -135,7 +149,7 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 		return api.NewReply{}, err
 	}
 	reusable := covered && gitdirInside(b, root)
-	var template, config string
+	var template gitTemplate
 	r.mu.Lock()
 	if reused && reusable && f.warm == b && f.warmLock == hash {
 		// The folder holds what its warm capture does after all: only the
@@ -159,9 +173,9 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 	keep := reusable && !reused && f.keepsPoolLocked(b, beganGit, hash)
 	if !keep {
 		r.mu.Unlock()
-		if template, config, err = r.baseTemplate(b, reused); err != nil {
+		if template, err = r.baseTemplate(b, reused); err != nil {
 			r.enqueueNotice(baseNotice{base: b.view.Meta().ID, fault: "reusable git directory: " + err.Error()})
-			template, config, reusable = "", "", false
+			template, reusable = gitTemplate{}, false
 		}
 		r.mu.Lock()
 	}
@@ -169,17 +183,19 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 	var reply api.NewReply
 	if reusable {
 		if keep {
-			config = f.config
+			// The same git state: the template's config and size stay; its
+			// directory follows (templateLater).
+			template = gitTemplate{config: f.template.config, bytes: f.template.bytes}
 			b.template = make(chan struct{})
 		}
-		drained = r.setWarmLocked(f, b, began, beganGit, hash, template, config)
+		drained = r.setWarmLocked(f, b, began, beganGit, hash, template)
 		if keep {
 			r.templateLater(f, b)
 		}
 		endCapture()
 		reply, err = r.openWarmLocked(f, name)
 	} else {
-		reply, err = r.openOnLocked(b, template, config, name, filepath.Base(root), nil)
+		reply, err = r.openOnLocked(b, template, name, filepath.Base(root), nil)
 	}
 	r.mu.Lock()
 	r.releaseLocked(b, nil)
@@ -266,12 +282,12 @@ func (r *Registry) captureBase(ctx context.Context, root string, m manifest.Mani
 	return b, false, captured.Stats, warnings, nil
 }
 
-// baseTemplate returns the private git directory checkouts on capture b copy, and
-// its config: written now for a new capture (gitTemplate), or the one a reused
-// capture already keeps, once any still being written is done.
-func (r *Registry) baseTemplate(b *baseRecord, reused bool) (dir, config string, err error) {
+// baseTemplate returns the private git directory checkouts on capture b copy:
+// written now for a new capture (writeTemplate), or the one a reused capture
+// already keeps, once any still being written is done.
+func (r *Registry) baseTemplate(b *baseRecord, reused bool) (gitTemplate, error) {
 	if !reused || b.view.Domains().Repo("") == nil {
-		return r.gitTemplate(b)
+		return r.writeTemplate(b)
 	}
 	r.mu.Lock()
 	written := b.template
@@ -279,23 +295,19 @@ func (r *Registry) baseTemplate(b *baseRecord, reused bool) (dir, config string,
 	if written != nil {
 		<-written
 	}
-	dir = r.templatePath(b.view.Meta().ID)
-	data, err := os.ReadFile(filepath.Join(dir, "config"))
+	t, err := readTemplate(r.templatePath(b.view.Meta().ID))
 	if errors.Is(err, fs.ErrNotExist) {
-		return r.gitTemplate(b)
+		return r.writeTemplate(b)
 	}
-	if err != nil {
-		return "", "", err
-	}
-	return dir, string(data), nil
+	return t, err
 }
 
 // keepsPoolLocked reports whether f's prepared checkouts can move onto capture
 // b, taken from git generation gitGen with the manifest lock hash: the same git
 // state and rules, a repository, and no submodules, whose git directories the
-// pool does not rebuild. Their configuration is then f.config.
+// pool does not rebuild. Their configuration is then f.template's.
 func (f *reuseFolder) keepsPoolLocked(b *baseRecord, gitGen uint64, hash string) bool {
-	return f.warm != nil && f.template != "" && f.warmGitGen == gitGen && f.warmLock == hash &&
+	return f.warm != nil && f.template.dir != "" && f.warmGitGen == gitGen && f.warmLock == hash &&
 		b.view.Domains().Repo("") != nil && len(submodules(b.view)) == 0
 }
 
@@ -309,7 +321,7 @@ func (r *Registry) templateLater(f *reuseFolder, b *baseRecord) {
 	r.workers.Add(1)
 	go func() {
 		defer r.workers.Done()
-		template, _, err := r.gitTemplate(b)
+		template, err := r.writeTemplate(b)
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		defer r.releaseLocked(b, nil)
@@ -325,16 +337,13 @@ func (r *Registry) templateLater(f *reuseFolder, b *baseRecord) {
 	}()
 }
 
-// noteCreateLocked counts a create in the folder's current burst and grows the
-// pool to the largest burst.
-func (f *reuseFolder) noteCreateLocked() {
-	now := time.Now()
-	if now.Sub(f.last) > burstGap {
-		f.burst = 0
+// poolTarget is how many checkouts f keeps prepared: poolSize, as far as their git
+// directories fit poolBudget, and at least one. r.mu is held.
+func (f *reuseFolder) poolTarget() int {
+	if f.template.bytes == 0 {
+		return f.poolSize
 	}
-	f.burst++
-	f.last = now
-	f.poolSize = max(f.poolSize, min(f.burst, poolMax))
+	return max(1, min(f.poolSize, int(poolBudget/f.template.bytes)))
 }
 
 // openWarmLocked opens checkout name (or one derived from the folder) on f's warm
@@ -342,7 +351,7 @@ func (f *reuseFolder) noteCreateLocked() {
 // before it returns.
 func (r *Registry) openWarmLocked(f *reuseFolder, name string) (api.NewReply, error) {
 	f.warmUsed = time.Now()
-	return r.openOnLocked(f.warm, f.template, f.config, name, filepath.Base(f.root), f)
+	return r.openOnLocked(f.warm, f.template, name, filepath.Base(f.root), f)
 }
 
 // pending reports whether ch, a base's template signal, is still open.
@@ -361,7 +370,7 @@ func pending(ch chan struct{}) bool {
 // newOnBase opens checkout name (or one derived from the captured folder) on
 // capture id as it was taken: no layers, and the private git directory checkouts
 // opened on it then started from. A capture of a repository that kept none (see
-// gitTemplate) is refused.
+// writeTemplate) is refused.
 func (r *Registry) newOnBase(id, name string) (api.NewReply, error) {
 	r.mu.Lock()
 	b := r.bases[id]
@@ -380,10 +389,10 @@ func (r *Registry) newOnBase(id, name string) (api.NewReply, error) {
 		r.mu.Unlock()
 		return api.NewReply{}, failure("not_found", "no capture %s", id)
 	}
-	var template, config string
+	var template gitTemplate
 	if b.view.Domains().Repo("") != nil {
-		template = r.templatePath(id)
-		data, err := os.ReadFile(filepath.Join(template, "config"))
+		template.dir = r.templatePath(id)
+		data, err := os.ReadFile(filepath.Join(template.dir, "config"))
 		if err != nil {
 			r.mu.Unlock()
 			if errors.Is(err, fs.ErrNotExist) {
@@ -391,17 +400,17 @@ func (r *Registry) newOnBase(id, name string) (api.NewReply, error) {
 			}
 			return api.NewReply{}, coded(err)
 		}
-		config = string(data)
+		template.config = string(data)
 	}
-	return r.openOnLocked(b, template, config, name, filepath.Base(b.view.Capture().Stats.Root), nil)
+	return r.openOnLocked(b, template, name, filepath.Base(b.view.Capture().Stats.Root), nil)
 }
 
 // openOnLocked opens checkout name (or one derived from fallback) on capture b,
-// whose checkouts copy the private git directory template (holding config): one
+// whose checkouts copy the private git directory template: one
 // taken from f's pool when f is set and it holds one, else one prepared now outside
 // the lock while its name is reserved and b retained. Publication shares a durable
 // state write with concurrent creates. r.mu is held and released before it returns.
-func (r *Registry) openOnLocked(b *baseRecord, template, config, name, fallback string, f *reuseFolder) (api.NewReply, error) {
+func (r *Registry) openOnLocked(b *baseRecord, template gitTemplate, name, fallback string, f *reuseFolder) (api.NewReply, error) {
 	name, err := r.pickNameLocked(name, fallback)
 	if err != nil {
 		r.mu.Unlock()
@@ -422,9 +431,9 @@ func (r *Registry) openOnLocked(b *baseRecord, template, config, name, fallback 
 	}
 	r.mu.Unlock()
 	if h != nil {
-		err = r.namePrepared(h, name, config)
+		err = r.namePrepared(h, name, template.config)
 	} else {
-		h, err = r.prepareOnWarm(b, template, name, name)
+		h, err = r.prepareOnWarm(b, template.dir, name, name)
 	}
 	r.mu.Lock()
 	if err == nil && r.closed {
@@ -512,13 +521,13 @@ func (r *Registry) abandonCheckout(name string, h *checkoutRecord, b *baseRecord
 	return err
 }
 
-// fillPoolLocked starts refilling f's pool in the background, with up to
-// prepareSlots workers, unless it is full or its git template is pending.
+// fillPoolLocked starts refilling f's pool to poolTarget in the background, with up
+// to prepareSlots workers, unless it is full or its git template is pending.
 func (r *Registry) fillPoolLocked(f *reuseFolder) {
 	if f.warm == nil || r.closed || pending(f.warm.template) {
 		return
 	}
-	for f.filling < prepareSlots && f.filling < f.poolSize-len(f.pool) {
+	for f.filling < prepareSlots && f.filling < f.poolTarget()-len(f.pool) {
 		f.filling++
 		r.workers.Add(1)
 		go r.fillPool(f)
@@ -526,14 +535,14 @@ func (r *Registry) fillPoolLocked(f *reuseFolder) {
 }
 
 // fillPool prepares checkouts on f's warm capture, one at a time, until the pool
-// with those being prepared holds poolSize or the warm capture changes; a failure
+// with those being prepared holds poolTarget or the warm capture changes; a failure
 // stops it until the next create starts it again.
 func (r *Registry) fillPool(f *reuseFolder) {
 	defer r.workers.Done()
 	for {
 		r.mu.Lock()
-		b, template := f.warm, f.template
-		if r.closed || b == nil || len(f.pool)+f.preparing >= f.poolSize || pending(b.template) {
+		b, template := f.warm, f.template.dir
+		if r.closed || b == nil || len(f.pool)+f.preparing >= f.poolTarget() || pending(b.template) {
 			f.filling--
 			r.mu.Unlock()
 			return
@@ -606,14 +615,14 @@ func (r *Registry) discardLater(pool []*checkoutRecord) {
 
 // setWarmLocked makes b, captured with the manifest lock hash from generations gen
 // and gitGen on, f's warm capture, whose checkouts copy the private git directory
-// template (holding config), releasing the capture it replaces. A capture that
+// template, releasing the capture it replaces. A capture that
 // differs from the one it replaces only in the work tree keeps that one's pool:
 // the prepared git directories still hold the repository's state, and their
 // checkouts move onto b (namePrepared points their objects at b's). It returns
 // the pool it does not keep, for discardPrepared.
-func (r *Registry) setWarmLocked(f *reuseFolder, b *baseRecord, gen, gitGen uint64, hash, template, config string) []*checkoutRecord {
+func (r *Registry) setWarmLocked(f *reuseFolder, b *baseRecord, gen, gitGen uint64, hash string, template gitTemplate) []*checkoutRecord {
 	var kept []*checkoutRecord
-	if f.warm != nil && f.warmGitGen == gitGen && f.warmLock == hash && config == f.config && len(submodules(b.view)) == 0 {
+	if f.warm != nil && f.warmGitGen == gitGen && f.warmLock == hash && template.config == f.template.config && len(submodules(b.view)) == 0 {
 		kept, f.pool = f.pool, nil
 		for _, h := range kept {
 			h.fs.Rebase(b.view.Bottom())
@@ -625,7 +634,7 @@ func (r *Registry) setWarmLocked(f *reuseFolder, b *baseRecord, gen, gitGen uint
 	drained := r.coolLocked(f)
 	r.retainLocked(b, nil)
 	f.warm, f.warmGen, f.warmGitGen, f.warmLock, f.warmUsed = b, gen, gitGen, hash, time.Now()
-	f.template, f.config, f.pool = template, config, kept
+	f.template, f.pool = template, kept
 	r.fillPoolLocked(f)
 	return drained
 }
@@ -636,32 +645,53 @@ func (r *Registry) coolLocked(f *reuseFolder) []*checkoutRecord {
 		r.releaseLocked(f.warm, nil)
 	}
 	drained := f.pool
-	f.warm, f.template, f.config, f.pool = nil, "", "", nil
+	f.warm, f.template, f.pool = nil, gitTemplate{}, nil
 	return drained
 }
 
-// gitTemplate writes the private git directory that checkouts reusing b copy, from
-// the repository's state now and b's captured index, below b's own storage, and
-// returns it with its config; "" for a capture of no repository. Copying it writes
-// no more than the directory holds, where building one walks the repository's refs.
-func (r *Registry) gitTemplate(b *baseRecord) (dir, config string, err error) {
+// writeTemplate writes the private git directory that checkouts reusing b copy, from
+// the repository's state now and b's captured index, below b's own storage; none
+// for a capture of no repository. Copying it writes no more than the directory
+// holds, where building one walks the repository's refs.
+func (r *Registry) writeTemplate(b *baseRecord) (gitTemplate, error) {
 	gs, err := gitSourceOf(b.view)
 	if err != nil || gs.repo == nil {
-		return "", "", err
+		return gitTemplate{}, err
 	}
 	id := b.view.Meta().ID
-	dir = r.templatePath(id)
+	dir := r.templatePath(id)
 	if err := os.RemoveAll(dir); err != nil {
-		return "", "", err
+		return gitTemplate{}, err
 	}
 	if err := r.makeGitdirs(dir, id, gs); err != nil {
-		return "", "", errors.Join(err, os.RemoveAll(dir))
+		return gitTemplate{}, errors.Join(err, os.RemoveAll(dir))
 	}
+	t, err := readTemplate(dir)
+	if err != nil {
+		return gitTemplate{}, errors.Join(err, os.RemoveAll(dir))
+	}
+	return t, nil
+}
+
+// readTemplate reads the git template written at dir: its config and the size of
+// its files, the shared objects aside.
+func readTemplate(dir string) (gitTemplate, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "config"))
 	if err != nil {
-		return "", "", errors.Join(err, os.RemoveAll(dir))
+		return gitTemplate{}, err
 	}
-	return dir, string(data), nil
+	t := gitTemplate{dir: dir, config: string(data)}
+	err = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		info, err := d.Info()
+		if err == nil {
+			t.bytes += info.Size()
+		}
+		return err
+	})
+	return t, err
 }
 
 // templatePath is where capture id keeps the private git directory its checkouts

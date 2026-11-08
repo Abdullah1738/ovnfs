@@ -173,10 +173,11 @@ source directories among them on eight readers while it descends; directories
 it leaves alone are never listed, since listing one can update its access time,
 which the watcher reports as an edit.
 
-Checkouts on such a capture are prepared ahead of time, as many as the largest
-burst of creates seen (at least 8, at most 256): upper, private git directory
-copied from the capture's `git-template/`, and overlay, below directories named
-`_p<id>`. A create names one, which writes only its git directory's
+Checkouts on such a capture are prepared ahead of time, as many as the most
+creates of the folder seen running at once (at least 8, at most 256), as far as
+their private git directories fit 256 MiB (at least one): upper, private git
+directory copied from the capture's `git-template/`, and overlay, below
+directories named `_p<id>`. A create names one, which writes only its git directory's
 `ovnfs.checkout` marker, and publishes it with a state write shared with
 concurrent creates. When only work-tree files changed, the prepared checkouts
 move onto the new capture, whose `git-template/` is written after the creates

@@ -31,7 +31,7 @@ type gitSource struct {
 	repo     *git.Repo     // build one from this repository's state at capture
 	index    string        // the captured index copy
 	modules  []gitModule   // and one below it for each absorbed submodule, parents first
-	template string        // or copy this one built the same way (see Registry.gitTemplate)
+	template string        // or copy this one built the same way (see Registry.writeTemplate)
 	ready    string        // or move this git directory prepared by prepareGit into place
 	rev      *git.Revision // optional initial revision, already resolved
 }

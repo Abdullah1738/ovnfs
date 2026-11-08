@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -54,7 +55,50 @@ func (f *fixture) poolFull(dir string) bool {
 	f.reg.mu.RLock()
 	defer f.reg.mu.RUnlock()
 	folder := f.reuseFolder(dir)
-	return folder != nil && len(folder.pool) >= folder.poolSize
+	return folder != nil && len(folder.pool) >= folder.poolTarget()
+}
+
+// TestSequentialCreatesKeepPoolSmall makes creates of a folder one after another,
+// each as soon as the last returns: none runs beside another, so the pool stays at
+// poolMin however many follow.
+func TestSequentialCreatesKeepPoolSmall(t *testing.T) {
+	f := newFixture(t)
+	if f.reg.watcher == nil {
+		t.Skip("no folder events on this platform")
+	}
+	dir := reuseRepo(t)
+	for i := range 2 * poolMin {
+		f.newCheckout(dir, fmt.Sprintf("c%d", i))
+	}
+	f.reg.mu.RLock()
+	size := f.reuseFolder(dir).poolSize
+	f.reg.mu.RUnlock()
+	if size != poolMin {
+		t.Fatalf("pool size %d after sequential creates, want %d", size, poolMin)
+	}
+}
+
+// TestPoolTargetFitsBudget keeps the git directories a folder holds prepared
+// within poolBudget, always keeping one, and a pool without git directories at
+// its size.
+func TestPoolTargetFitsBudget(t *testing.T) {
+	cases := []struct {
+		size  int
+		bytes int64
+		want  int
+	}{
+		{poolMax, 0, poolMax},
+		{poolMin, 4 << 20, poolMin},
+		{poolMax, 4 << 20, 64},
+		{poolMax, poolBudget, 1},
+		{poolMin, poolBudget + 1, 1},
+	}
+	for _, c := range cases {
+		f := reuseFolder{poolSize: c.size, template: gitTemplate{bytes: c.bytes}}
+		if got := f.poolTarget(); got != c.want {
+			t.Errorf("pool of %d with %d-byte templates keeps %d, want %d", c.size, c.bytes, got, c.want)
+		}
+	}
 }
 
 // TestFolderCreatesReuseUnchangedCapture opens later checkouts of an unchanged
