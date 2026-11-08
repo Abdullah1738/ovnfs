@@ -37,7 +37,9 @@ func TestApplyConcurrentKeepsEveryEdit(t *testing.T) {
 	replies := make([]api.ApplyReply, n)
 	errs := make([]error, n)
 	for i := range n {
-		wg.Go(func() { replies[i], errs[i] = f.reg.Apply(context.Background(), api.ApplyArgs{Checkout: fmt.Sprint("c", i)}) })
+		wg.Go(func() {
+			replies[i], errs[i] = f.reg.Apply(context.Background(), api.ApplyArgs{Checkout: fmt.Sprint("c", i)})
+		})
 	}
 	wg.Wait()
 
