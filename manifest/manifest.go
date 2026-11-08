@@ -45,11 +45,16 @@ type Env struct {
 	Setup []string `json:"setup,omitempty" yaml:"setup"`
 }
 
-// Daemon is where the daemon keeps its state and shows checkouts, settable
-// only in the user-wide manifest; an empty field is unset.
+// Daemon contains daemon settings settable only in the user-wide manifest;
+// an empty field is unset.
 type Daemon struct {
-	State string
-	Mount string
+	State     string
+	Mount     string
+	Proto     string
+	Memory    string
+	Fsync     string
+	BlobCache string
+	Atime     string
 }
 
 // Manifest is the resolved description of a checkout for one source root.
@@ -143,7 +148,9 @@ func UserDaemon(userHome string) (Daemon, error) {
 	if driveLetter(mount) {
 		mount += `\`
 	}
-	return Daemon{State: expand(l.daemon.State), Mount: mount}, nil
+	l.daemon.State = expand(l.daemon.State)
+	l.daemon.Mount = mount
+	return l.daemon, nil
 }
 
 // driveLetter reports a bare Windows drive such as O:, a mount meaning the
@@ -171,11 +178,16 @@ func readLayer(name, display string, user bool) (layer, bool, error) {
 
 // fileSchema is the YAML shape of a manifest file; Rules stays a node to keep its line number.
 type fileSchema struct {
-	Rules yaml.Node        `yaml:"rules"`
-	Cache map[string]Cache `yaml:"cache"`
-	Env   Env              `yaml:"env"`
-	State string           `yaml:"state"`
-	Mount string           `yaml:"mount"`
+	Rules     yaml.Node        `yaml:"rules"`
+	Cache     map[string]Cache `yaml:"cache"`
+	Env       Env              `yaml:"env"`
+	State     string           `yaml:"state"`
+	Mount     string           `yaml:"mount"`
+	Proto     string           `yaml:"proto"`
+	Memory    string           `yaml:"memory"`
+	Fsync     string           `yaml:"fsync"`
+	BlobCache string           `yaml:"blob_cache"`
+	Atime     string           `yaml:"atime"`
 }
 
 // parseLayer strictly decodes a manifest file, accepting daemon settings only
@@ -195,7 +207,7 @@ func parseLayer(data []byte, display string, user bool) (layer, error) {
 	if root.Kind != yaml.MappingNode {
 		return layer{}, fmt.Errorf("%s:%d: expected a mapping with rules, cache and env", display, root.Line)
 	}
-	if err := checkKeys(root, display, "", "rules", "cache", "env", "state", "mount"); err != nil {
+	if err := checkKeys(root, display, "", "rules", "cache", "env", "state", "mount", "proto", "memory", "fsync", "blob_cache", "atime"); err != nil {
 		return layer{}, err
 	}
 	for i := 0; i+1 < len(root.Content); i += 2 {
@@ -207,6 +219,16 @@ func parseLayer(data []byte, display string, user bool) (layer, error) {
 			}
 			if p := v.Value; v.Kind == yaml.ScalarNode && p != "" && !strings.HasPrefix(p, "~/") && !filepath.IsAbs(p) && !(k == "mount" && driveLetter(p)) {
 				return layer{}, fmt.Errorf("%s:%d: %s must be an absolute path or start with ~/", display, v.Line, k)
+			}
+		case "proto", "memory", "fsync", "blob_cache", "atime":
+			if !user {
+				return layer{}, fmt.Errorf("%s:%d: %q is read only from %s", display, root.Content[i].Line, k, userFile)
+			}
+			valid := v.Kind == yaml.ScalarNode && (v.Tag == "!!str" || v.Tag == "!!null" ||
+				((k == "memory" || k == "blob_cache") && v.Tag == "!!int") ||
+				((k == "fsync" || k == "atime") && v.Tag == "!!bool"))
+			if !valid {
+				return layer{}, fmt.Errorf("%s:%d: invalid value type for %s", display, v.Line, k)
 			}
 		case "cache":
 			if v.Kind != yaml.MappingNode {
@@ -229,7 +251,10 @@ func parseLayer(data []byte, display string, user bool) (layer, error) {
 	if err := root.Decode(&f); err != nil {
 		return layer{}, yamlError(display, err)
 	}
-	l := layer{env: f.Env, daemon: Daemon{State: f.State, Mount: f.Mount}}
+	l := layer{env: f.Env, daemon: Daemon{
+		State: f.State, Mount: f.Mount, Proto: f.Proto, Memory: f.Memory,
+		Fsync: f.Fsync, BlobCache: f.BlobCache, Atime: f.Atime,
+	}}
 	for k, c := range f.Cache {
 		key := strings.TrimPrefix(path.Clean(strings.TrimPrefix(k, "./")), "/")
 		if key == "" || key == "." {

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/admin"
 	"github.com/stencil-hq/ovnfs/api"
+	"github.com/stencil-hq/ovnfs/manifest"
 )
 
 // globalFlags are the options accepted before the verb or among its arguments.
@@ -137,17 +139,32 @@ type verbs struct {
 	Completion kongcompletion.Completion `cmd:"" group:"ovnfs itself" help:"print the shell code that enables tab completion"`
 }
 
-// runCLI parses args with kong and runs the selected verb.
-func runCLI(c *cli, args []string) error {
-	parser, err := kong.New(&verbs{},
+// newCLIParser loads serve defaults only for serve, including when both global
+// directory flags were supplied and resolveDirs did not need the user file.
+func newCLIParser(c *cli, args []string, commands *verbs) (*kong.Kong, error) {
+	var conf manifest.Daemon
+	if len(args) > 0 && args[0] == "serve" {
+		if home, err := os.UserHomeDir(); err == nil {
+			conf, err = manifest.UserDaemon(home)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return kong.New(commands,
 		kong.Name("ovnfs"),
-		serveDefaults(),
+		serveDefaults(conf),
 		kong.Description("Checkouts for agents: isolated, copy-on-write views of any folder, a git repository or not, opened without copying it."),
 		kong.Writers(stdout, stderr),
 		kong.Bind(c),
 		kong.ConfigureHelp(kong.HelpOptions{FlagsLast: true}),
 		kong.Help(colorHelp),
 	)
+}
+
+// runCLI parses args with kong and runs the selected verb.
+func runCLI(c *cli, args []string) error {
+	parser, err := newCLIParser(c, args, &verbs{})
 	if err != nil {
 		return err
 	}

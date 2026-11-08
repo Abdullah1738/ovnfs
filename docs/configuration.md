@@ -122,7 +122,8 @@ text file.
 `.o2/ovnfs.yml` at the source root (the repository's top level when the folder
 is inside one, else the folder itself) configures that folder's checkouts.
 `~/.o2/ovnfs.yml` in the daemon user's home has the same schema, applies to
-every folder and ranks below it; it alone may also set the daemon's folders.
+every folder and ranks below it; it alone may also set the daemon's folders and
+serve defaults.
 Both are optional. They are read when a checkout opens (`new`, `run`,
 `attach DIR`) and frozen into its lock, so an edit affects only checkouts
 opened afterwards; `explain` and `plan` read a folder's files as they are now
@@ -150,6 +151,11 @@ env:
 | `env.setup` | list of strings | commands that prepare that environment |
 | `state` | path | `~/.o2/ovnfs.yml` only: where the daemon keeps its state |
 | `mount` | path | `~/.o2/ovnfs.yml` only: where checkouts appear |
+| `proto` | string | user file only: default file server protocol (`nfs`, `smb`, `fuse`, or `winfsp`) |
+| `memory` | size | user file only: memory budget for written files |
+| `fsync` | boolean | user file only: spill and sync memory-backed files on fsync |
+| `blob_cache` | size | user file only: memory budget for content-addressed blobs |
+| `atime` | boolean | user file only: allow access time updates |
 
 `rules` is a block scalar (`rules: |`) with one `<class> <predicate>` per line.
 Blank lines and lines starting with `#` are skipped; `#` after whitespace
@@ -165,6 +171,23 @@ example, to keep everything on a data volume:
 state: /mnt/data/.ovnfs
 mount: /mnt/data/checkouts
 ```
+
+The same user file can set defaults for `serve` (including the background
+daemon launched by `start`):
+
+```yaml
+proto: smb
+memory: 2G
+fsync: true
+blob_cache: 512M
+atime: false
+```
+
+For each setting, the explicit `serve` flag wins over its environment variable,
+which wins over the user file, which wins over the built-in default. The
+environment variables are `OVNFS_MEMORY`, `OVNFS_FSYNC`, `OVNFS_BLOB_CACHE`
+and `OVNFS_ATIME`; `proto` has no environment variable. Serve settings take
+effect when the daemon starts; restart it after changing them.
 
 ### Cache and env
 

@@ -25,6 +25,7 @@ import (
 	"github.com/stencil-hq/ovnfs/checkout"
 	"github.com/stencil-hq/ovnfs/export"
 	ovnfuse "github.com/stencil-hq/ovnfs/fuse"
+	"github.com/stencil-hq/ovnfs/manifest"
 	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/smb"
 	"github.com/stencil-hq/ovnfs/winfsp"
@@ -88,14 +89,14 @@ func (b *byteSize) UnmarshalText(text []byte) error {
 	return b.Set(string(text))
 }
 
-// serveDefaults supplies the platform and environment defaults to kong.
-func serveDefaults() kong.Option {
+// serveDefaults supplies user, environment and platform defaults to kong.
+func serveDefaults(conf manifest.Daemon) kong.Option {
 	return kong.Vars{
-		"default_proto":      defaultProto(),
-		"memory_default":     cmp.Or(os.Getenv("OVNFS_MEMORY"), "1G"),
-		"fsync_default":      cmp.Or(os.Getenv("OVNFS_FSYNC"), "false"),
-		"blob_cache_default": cmp.Or(os.Getenv("OVNFS_BLOB_CACHE"), "512M"),
-		"atime_default":      cmp.Or(os.Getenv("OVNFS_ATIME"), "false"),
+		"default_proto":      cmp.Or(conf.Proto, defaultProto()),
+		"memory_default":     cmp.Or(os.Getenv("OVNFS_MEMORY"), conf.Memory, "1G"),
+		"fsync_default":      cmp.Or(os.Getenv("OVNFS_FSYNC"), conf.Fsync, "false"),
+		"blob_cache_default": cmp.Or(os.Getenv("OVNFS_BLOB_CACHE"), conf.BlobCache, "512M"),
+		"atime_default":      cmp.Or(os.Getenv("OVNFS_ATIME"), conf.Atime, "false"),
 	}
 }
 

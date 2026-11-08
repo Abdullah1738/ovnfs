@@ -174,9 +174,10 @@ func TestUserDaemon(t *testing.T) {
 		t.Fatalf("no file: %+v, %v", d, err)
 	}
 	mount := filepath.Join(t.TempDir(), "m")
-	writeManifest(t, home, "state: ~/s\nmount: "+mount+"\nrules: |\n  local a\n")
+	writeManifest(t, home, "state: ~/s\nmount: "+mount+"\nproto: nfs\nmemory: 0\nfsync: false\nblob_cache: 0\natime: false\nrules: |\n  local a\n")
 	d, err := UserDaemon(home)
-	if err != nil || d.State != filepath.Join(home, "s") || d.Mount != mount {
+	want := Daemon{State: filepath.Join(home, "s"), Mount: mount, Proto: "nfs", Memory: "0", Fsync: "false", BlobCache: "0", Atime: "false"}
+	if err != nil || d != want {
 		t.Fatalf("UserDaemon = %+v, %v", d, err)
 	}
 	for _, root := range []string{t.TempDir(), home} {
@@ -194,6 +195,41 @@ func TestUserDaemon(t *testing.T) {
 	d, err = UserDaemon(home)
 	if runtime.GOOS == "windows" && (err != nil || d.Mount != `O:\`) || runtime.GOOS != "windows" && err == nil {
 		t.Fatalf("drive mount = %+v, %v", d, err)
+	}
+}
+
+func TestDaemonSettingsUserOnlyAndTypes(t *testing.T) {
+	for _, key := range []string{"proto", "memory", "fsync", "blob_cache", "atime"} {
+		t.Run(key, func(t *testing.T) {
+			root := t.TempDir()
+			writeManifest(t, root, key+": value\n")
+			_, err := Load(root, "", nil)
+			want := `.o2/ovnfs.yml:1: "` + key + `" is read only from ~/.o2/ovnfs.yml`
+			if err == nil || err.Error() != want {
+				t.Fatalf("project setting: %v, want %s", err, want)
+			}
+		})
+	}
+	for _, body := range []string{
+		"proto: false\n", "memory: false\n", "blob_cache: []\n",
+		"fsync: 0\n", "atime: {}\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			home := t.TempDir()
+			writeManifest(t, home, body)
+			if _, err := UserDaemon(home); err == nil {
+				t.Fatalf("accepted invalid value: %s", body)
+			}
+			if _, err := Load(t.TempDir(), home, nil); err == nil {
+				t.Fatalf("Load accepted invalid value: %s", body)
+			}
+		})
+	}
+	home := t.TempDir()
+	writeManifest(t, home, "proto: fuse\nmemory: 1G\nfsync: true\nblob_cache: 512M\natime: true\n")
+	want := Daemon{Proto: "fuse", Memory: "1G", Fsync: "true", BlobCache: "512M", Atime: "true"}
+	if got, err := UserDaemon(home); err != nil || got != want {
+		t.Fatalf("UserDaemon = %+v, %v; want %+v", got, err, want)
 	}
 }
 
