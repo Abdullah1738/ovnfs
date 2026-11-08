@@ -135,7 +135,7 @@ func checkDiscover(t *testing.T, dir string) *Repository {
 	case strings.Contains(stderr, "gitfile"):
 		want = ErrInvalidGitfile
 	case strings.Contains(stderr, "repo version"), strings.Contains(stderr, "repository extension"),
-		strings.Contains(stderr, "invalid value for 'extensions"), strings.Contains(stderr, "requires Rust"):
+		strings.Contains(stderr, "invalid value for 'extensions"):
 		want = ErrUnsupportedFormat
 	default:
 		t.Fatalf("unclassified git result from %s: %q %q %v", dir, out, stderr, gitErr)

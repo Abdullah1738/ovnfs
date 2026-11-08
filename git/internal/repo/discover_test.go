@@ -251,7 +251,6 @@ func TestRepositoryFormat(t *testing.T) {
 		{"partialClone", "origin"}, {"worktreeConfig", "true"}, {"relativeWorktrees", "true"},
 		{"submodulePathConfig", "true"}, {"objectFormat", "sha1"}, {"objectFormat", "md5"},
 		{"objectFormat", "SHA1"}, {"refStorage", "files"}, {"refStorage", "foo"},
-		{"compatObjectFormat", "sha256"},
 	}
 	for _, version := range []string{"0", "1"} {
 		for _, e := range exts {
@@ -262,6 +261,16 @@ func TestRepositoryFormat(t *testing.T) {
 				checkDiscover(t, filepath.Join(dir, "sub"))
 			})
 		}
+		// git accepts compatObjectFormat only when built with Rust, so it is
+		// no oracle here; Discover always refuses it (see v1Extensions).
+		t.Run(version+"/compatObjectFormat=sha256", func(t *testing.T) {
+			set(t, "core.repositoryformatversion", version)
+			set(t, "extensions.compatObjectFormat", "sha256")
+			defer set(t, "--unset", "extensions.compatObjectFormat")
+			if _, err := Discover(filepath.Join(dir, "sub")); !errors.Is(err, ErrUnsupportedFormat) {
+				t.Fatalf("Discover: %v; want ErrUnsupportedFormat", err)
+			}
+		})
 	}
 	for _, version := range []string{"2", "-1", "abc"} {
 		t.Run("version="+version, func(t *testing.T) {
