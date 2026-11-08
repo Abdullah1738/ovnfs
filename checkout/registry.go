@@ -157,9 +157,9 @@ func Open(c Config) (*Registry, error) {
 			cleanup()
 			return nil, coded(stackErr)
 		}
-		upper := r.upperPath(disk.Name)
+		upper := r.upperPath(disk.dir())
 		if disk.Git {
-			if err := git.MarkCheckout(r.gitdirPath(disk.Name), disk.Name); err != nil {
+			if err := git.MarkCheckout(r.gitdirPath(disk.dir()), disk.Name); err != nil {
 				cleanup()
 				return nil, coded(err)
 			}
@@ -553,11 +553,12 @@ func randomID(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(data[:]), nil
 }
 
-// upperPath, gitdirPath and snapshotDir name a checkout's or snapshot's private storage.
-func (r *Registry) upperPath(name string) string {
-	return filepath.Join(r.config.State, "uppers", name)
+// upperPath, gitdirPath and snapshotDir name a checkout's or snapshot's private
+// storage; a checkout's is found by checkoutMeta.dir.
+func (r *Registry) upperPath(dir string) string {
+	return filepath.Join(r.config.State, "uppers", dir)
 }
-func (r *Registry) gitdirPath(name string) string { return filepath.Join(r.config.State, "git", name) }
+func (r *Registry) gitdirPath(dir string) string { return filepath.Join(r.config.State, "git", dir) }
 func (r *Registry) snapshotDir(id string) string {
 	return filepath.Join(r.config.State, "snapshots", id)
 }
@@ -863,6 +864,10 @@ func (r *Registry) emit(event Event) {
 
 // removeOrphansLocked reclaims filesystem leftovers not named by the recovered manifest.
 func (r *Registry) removeOrphansLocked() error {
+	dirs := make(map[string]bool, len(r.checkouts))
+	for _, h := range r.checkouts {
+		dirs[h.meta.dir()] = true
+	}
 	for _, kind := range []string{"bases", "layers", "snapshots", "uppers", "git"} {
 		entries, err := os.ReadDir(filepath.Join(r.config.State, kind))
 		if err != nil {
@@ -879,7 +884,7 @@ func (r *Registry) removeOrphansLocked() error {
 			case "snapshots":
 				retained = r.lineage[name] != nil
 			case "uppers", "git":
-				retained = r.checkouts[name] != nil
+				retained = dirs[name]
 			}
 			if !retained {
 				if err = os.RemoveAll(filepath.Join(r.config.State, kind, name)); err != nil {

@@ -32,7 +32,7 @@ func TestApplyCheckedOutBranch(t *testing.T) {
 	for _, path := range []string{"a.go", "b.go", "c.go"} {
 		write(t, filepath.Join(work, path), f.read("land", path))
 	}
-	gitdir := f.reg.gitdirPath("land")
+	gitdir := f.gitdir("land")
 	gitRun(t, work, "--git-dir", gitdir, "--work-tree", work, "add", "a.go")
 	gitRun(t, work, "--git-dir", gitdir, "--work-tree", work, "commit", "-qm", "land a")
 	want := gitRun(t, work, "--git-dir", gitdir, "rev-parse", "HEAD")

@@ -41,7 +41,10 @@ func (e *Error) ErrorCode() string { return e.Code }
 
 // checkoutMeta is the persisted description of a live checkout.
 type checkoutMeta struct {
-	Name    string    `json:"name"`
+	Name string `json:"name"`
+	// Dir names the checkout's directories below uppers and git when they are not
+	// named after the checkout: a checkout prepared before its name was known.
+	Dir     string    `json:"dir,omitempty"`
 	Base    string    `json:"base"`
 	Parent  *string   `json:"parent"` // snapshot the checkout was created from
 	Head    *string   `json:"head"`   // the checkout's latest snapshot
@@ -58,6 +61,14 @@ type checkoutMeta struct {
 	Copied map[string]copiedDir `json:"copied,omitempty"`
 }
 
+// dir names the checkout's directories below uppers and git.
+func (m checkoutMeta) dir() string {
+	if m.Dir != "" {
+		return m.Dir
+	}
+	return m.Name
+}
+
 // copiedDir is the metadata of a directory copied up to hold a submodule gitfile.
 type copiedDir struct {
 	Mode  os.FileMode `json:"mode"`
@@ -68,10 +79,19 @@ type copiedDir struct {
 type snapMeta struct {
 	ID       string    `json:"id"`
 	Checkout string    `json:"checkout"`
+	Dir      string    `json:"dir,omitempty"` // the checkout's checkoutMeta.Dir
 	Parent   *string   `json:"parent"`
 	Label    string    `json:"label"`
 	Created  time.Time `json:"created"`
 	Tree     *string   `json:"tree"`
+}
+
+// dir names the directories below uppers and git of the checkout snapshotted.
+func (m snapMeta) dir() string {
+	if m.Dir != "" {
+		return m.Dir
+	}
+	return m.Checkout
 }
 
 // Event is emitted only after its corresponding registry state is durable.

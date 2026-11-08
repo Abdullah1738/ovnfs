@@ -44,7 +44,7 @@ func TestTakeIndexIsBaseNotPrivateIndex(t *testing.T) {
 	for _, p := range []string{".gitignore", "tracked.txt", "added.txt"} {
 		write(t, filepath.Join(work, p), f.read("index", p))
 	}
-	status := gitRun(t, work, "--git-dir", f.reg.gitdirPath("index"), "--work-tree", work, "status", "--porcelain")
+	status := gitRun(t, work, "--git-dir", f.gitdir("index"), "--work-tree", work, "status", "--porcelain")
 	// --take changes only the work tree. The HEAD index deliberately reports
 	// the staged source content as unstaged changes in this private checkout.
 	if want := "D other.txt\n M tracked.txt\n?? added.txt"; status != want {
@@ -124,7 +124,7 @@ func TestTakeRevisionDoesNotApplyTakenContent(t *testing.T) {
 	if diff, err := f.reg.Diff(ctx, api.DiffArgs{Checkout: "selected"}); err != nil || len(diff.Changes) != 0 {
 		t.Fatalf("initial diff = %+v, %v", diff, err)
 	}
-	if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("selected"), "show", ":tracked.txt"); got != "original" {
+	if got := gitRun(t, dir, "--git-dir", f.gitdir("selected"), "show", ":tracked.txt"); got != "original" {
 		t.Fatalf("take changed copied private index: %q", got)
 	}
 	f.put("selected", "other.txt", "agent edit\n")

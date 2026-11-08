@@ -483,7 +483,7 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.App
 		if !h.meta.Git || repo == nil {
 			return api.ApplyReply{}, failure("invalid", "checkout %s has no git directory; --branch needs a repository source", h.meta.Name)
 		}
-		commit, updated, err := repo.FetchBranch(ctx, r.gitdirPath(h.meta.Name), args.Branch, args.DryRun)
+		commit, updated, err := repo.FetchBranch(ctx, r.gitdirPath(h.meta.dir()), args.Branch, args.DryRun)
 		if errors.Is(err, git.ErrBranchConflict) {
 			return api.ApplyReply{}, failure("conflict", "%s", err)
 		}

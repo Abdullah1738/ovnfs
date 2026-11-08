@@ -57,7 +57,7 @@ func TestNewRevisionDirtyFolder(t *testing.T) {
 	for _, p := range []string{".gitignore", "tracked.txt", "other.txt"} {
 		write(t, filepath.Join(work, p), f.read("revision", p))
 	}
-	if got := gitRun(t, work, "--git-dir", f.reg.gitdirPath("revision"), "--work-tree", work, "status", "--porcelain"); got != "" {
+	if got := gitRun(t, work, "--git-dir", f.gitdir("revision"), "--work-tree", work, "status", "--porcelain"); got != "" {
 		t.Fatalf("revision status = %q", got)
 	}
 	assertDiff := func(want string) {
@@ -137,7 +137,7 @@ func TestRevisionHEADAttachment(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			head, err := os.ReadFile(filepath.Join(f.reg.gitdirPath(reply.Checkout.Name), "HEAD"))
+			head, err := os.ReadFile(filepath.Join(f.gitdir(reply.Checkout.Name), "HEAD"))
 			if err != nil || strings.TrimSpace(string(head)) != tt.head {
 				t.Fatalf("HEAD = %q, %v; want %q", head, err, tt.head)
 			}
@@ -210,7 +210,7 @@ func TestCheckoutMarkersAndMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"parent", "child", "snapshot"} {
-		if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath(name), "config", "--local", "--get", "ovnfs.checkout"); got != name {
+		if got := gitRun(t, dir, "--git-dir", f.gitdir(name), "config", "--local", "--get", "ovnfs.checkout"); got != name {
 			t.Fatalf("%s marker = %q", name, got)
 		}
 	}
@@ -218,12 +218,12 @@ func TestCheckoutMarkersAndMigration(t *testing.T) {
 	if err != nil || strings.Contains(string(config), "[ovnfs]") {
 		t.Fatalf("source config changed: %s, %v", config, err)
 	}
-	gitRun(t, dir, "--git-dir", f.reg.gitdirPath("parent"), "config", "--local", "--unset", "ovnfs.checkout")
+	gitRun(t, dir, "--git-dir", f.gitdir("parent"), "config", "--local", "--unset", "ovnfs.checkout")
 	if err := f.reg.Close(); err != nil {
 		t.Fatal(err)
 	}
 	f.open()
-	if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("parent"), "config", "--local", "--get", "ovnfs.checkout"); got != "parent" {
+	if got := gitRun(t, dir, "--git-dir", f.gitdir("parent"), "config", "--local", "--get", "ovnfs.checkout"); got != "parent" {
 		t.Fatalf("reopened checkout marker = %q", got)
 	}
 }

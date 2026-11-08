@@ -150,7 +150,7 @@ func TestSubmoduleGitdirs(t *testing.T) {
 	orig := filepath.Join(app, ".git", "modules", "vendor", "sub")
 	head := gitRun(t, app, "--git-dir", orig, "rev-parse", "HEAD")
 	f.newCheckout(app, "app")
-	module := filepath.Join(f.reg.gitdirPath("app"), "modules", "vendor", "sub")
+	module := filepath.Join(f.gitdir("app"), "modules", "vendor", "sub")
 	exported := f.export("app")
 	assertSubmodule(t, exported, "vendor/sub", module)
 	if got := gitRun(t, exported, "status", "--porcelain"); got != "" {
@@ -171,7 +171,7 @@ func TestSubmoduleGitdirs(t *testing.T) {
 	if _, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: "app", Name: "child"}); err != nil {
 		t.Fatal(err)
 	}
-	child := filepath.Join(f.reg.gitdirPath("child"), "modules", "vendor", "sub")
+	child := filepath.Join(f.gitdir("child"), "modules", "vendor", "sub")
 	childExported := f.export("child")
 	assertSubmodule(t, childExported, "vendor/sub", child)
 	if got := gitRun(t, filepath.Join(childExported, "vendor", "sub"), "rev-parse", "HEAD"); got != agent {
@@ -190,8 +190,8 @@ func TestSubmoduleGitdirs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if entries, err := os.ReadDir(filepath.Join(f.state, "git")); err != nil || len(entries) != 0 {
-		t.Fatalf("git directories after rm = %v, %v", entries, err)
+	if entries := checkoutDirs(t, f.state, "git"); len(entries) != 0 {
+		t.Fatalf("git directories after rm = %v", entries)
 	}
 }
 
@@ -213,7 +213,7 @@ func TestSubmoduleMovedInFork(t *testing.T) {
 	if _, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: "app", Name: "child"}); err != nil {
 		t.Fatal(err)
 	}
-	child := filepath.Join(f.reg.gitdirPath("child"), "modules", "vendor", "sub")
+	child := filepath.Join(f.gitdir("child"), "modules", "vendor", "sub")
 	if got, want := f.read("child", "vendor/moved/.git"), "gitdir: "+child+"\n"; got != want {
 		t.Fatalf("fork's vendor/moved/.git = %q, want %q", got, want)
 	}
@@ -247,14 +247,14 @@ func reconnectAndFork(t *testing.T, f *fixture, app string) {
 		t.Fatal(err)
 	}
 	f.put("app", "vendor/sub/.git", string(gitfile))
-	module := filepath.Join(f.reg.gitdirPath("app"), "modules", "vendor", "sub")
+	module := filepath.Join(f.gitdir("app"), "modules", "vendor", "sub")
 	if gitRun(t, exported, "config", "--file", filepath.Join(module, "config"), "--get", "core.worktree") == "" {
 		t.Fatal("git recorded no work tree; the scenario needs one")
 	}
 	if _, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: "app", Name: "child"}); err != nil {
 		t.Fatal(err)
 	}
-	assertSubmodule(t, f.export("child"), "vendor/sub", filepath.Join(f.reg.gitdirPath("child"), "modules", "vendor", "sub"))
+	assertSubmodule(t, f.export("child"), "vendor/sub", filepath.Join(f.gitdir("child"), "modules", "vendor", "sub"))
 }
 
 // TestForkLeavesUnrelatedGitfiles rebinds only gitfiles into git state the fork
@@ -266,8 +266,8 @@ func TestForkLeavesUnrelatedGitfiles(t *testing.T) {
 	app := submoduleRepo(t)
 	f.newCheckout(app, "other")
 	f.newCheckout(app, "app")
-	unrelated := "gitdir: " + filepath.Join(f.reg.gitdirPath("other"), "modules", "vendor", "sub") + "\n"
-	whole := "gitdir: " + f.reg.gitdirPath("app") + "\n"
+	unrelated := "gitdir: " + filepath.Join(f.gitdir("other"), "modules", "vendor", "sub") + "\n"
+	whole := "gitdir: " + f.gitdir("app") + "\n"
 	f.put("app", "nested/.git", unrelated)
 	f.put("app", "whole/.git", whole)
 	if _, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: "app", Name: "child"}); err != nil {

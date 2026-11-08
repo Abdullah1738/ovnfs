@@ -502,7 +502,7 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 	}
 	var copied map[string]copiedDir
 	if hasGit {
-		if copied, err = r.installGitfiles(fs, name, b.view, r.lineageCheckoutsLocked(deref(parent))); err != nil {
+		if copied, err = r.installGitfiles(fs, name, name, b.view, r.lineageCheckoutsLocked(deref(parent))); err != nil {
 			return nil, err
 		}
 	}
@@ -551,18 +551,19 @@ func markGitdirs(gitdir, name string, view *base.Base) error {
 }
 
 // installGitfiles points a new checkout's submodules at their private git
-// directories below its own, as the root's .git points at that directory, and
-// returns the directories it copied up to hold the gitfiles (copiedDir). A
-// gitfile inherited from the snapshot's layers keeps its place (a moved submodule
-// stays moved, a deinitialized one stays without .git) and only changes its target
-// when that lies below the private git directory of a checkout in the snapshot's
-// lineage (owners), whose git state this checkout's was copied from: it moves to
-// the same place in this one's. An absorbed submodule of the capture that no layer
-// touched gets the gitfile it had when its checkout was opened, which was
-// infrastructure and never frozen into a layer (see upperEmpty). Writes go
-// through fsys, which copies directories up with their metadata.
-func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Base, owners map[string]bool) (map[string]copiedDir, error) {
-	gitdir := r.gitdirPath(name)
+// directories below its own (git/dir), as the root's .git points at that
+// directory, and returns the directories it copied up to hold the gitfiles
+// (copiedDir). A gitfile inherited from the snapshot's layers keeps its place (a
+// moved submodule stays moved, a deinitialized one stays without .git) and only
+// changes its target when that lies below the private git directory of a checkout
+// in the snapshot's lineage (owners, by checkoutMeta.dir), whose git state this
+// checkout's was copied from: it moves to the same place in this one's. An
+// absorbed submodule of the capture that no layer touched gets the gitfile it had
+// when its checkout was opened, which was infrastructure and never frozen into a
+// layer (see upperEmpty). Writes go through fsys, which copies directories up
+// with their metadata.
+func (r *Registry) installGitfiles(fsys *overlay.FS, name, dir string, view *base.Base, owners map[string]bool) (map[string]copiedDir, error) {
+	gitdir := r.gitdirPath(dir)
 	subs := submodules(view)
 	if len(subs) == 0 && !exists(filepath.Join(gitdir, "modules")) {
 		return nil, nil
@@ -591,7 +592,7 @@ func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Bas
 			target = filepath.Join(mount, filepath.FromSlash(path.Dir(p)), target)
 		}
 		owner, rest, ok := r.gitdirOwner(target)
-		if !ok || owner == name || !owners[owner] || rest == "" {
+		if !ok || owner == dir || !owners[owner] || rest == "" {
 			continue
 		}
 		if err := writeGitfileAt(fsys, p, filepath.Join(gitdir, rest)); err != nil {
@@ -647,24 +648,24 @@ func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Bas
 	return copied, nil
 }
 
-// lineageCheckoutsLocked names the checkouts whose snapshots make up snapshot
-// id's lineage, the snapshot's own included: a checkout from it inherits their
-// layers and a copy of their git state.
+// lineageCheckoutsLocked names, by checkoutMeta.dir, the checkouts whose snapshots
+// make up snapshot id's lineage, the snapshot's own included: a checkout from it
+// inherits their layers and a copy of their git state.
 func (r *Registry) lineageCheckoutsLocked(id string) map[string]bool {
-	names := map[string]bool{}
+	dirs := map[string]bool{}
 	for id != "" {
 		s := r.lineage[id]
 		if s == nil {
 			break
 		}
-		names[s.meta.Checkout] = true
+		dirs[s.meta.dir()] = true
 		id = s.stackParent
 	}
-	return names
+	return dirs
 }
 
-// gitdirOwner reports which checkout's private git directory holds target, and
-// target's path inside it ("" for the directory itself); ok is false for a target
+// gitdirOwner reports, by checkoutMeta.dir, which checkout's private git directory
+// holds target, and target's path inside it ("" for the directory itself); ok is false for a target
 // outside every one. Paths are compared as spelled, never resolved, so a target
 // inside the mount is not looked up through it.
 func (r *Registry) gitdirOwner(target string) (owner, rest string, ok bool) {
@@ -887,7 +888,7 @@ func (r *Registry) upperEmpty(h *checkoutRecord) (bool, error) {
 	}
 	own := ""
 	if h.meta.Git {
-		own = r.gitdirPath(h.meta.Name)
+		own = r.gitdirPath(h.meta.dir())
 	}
 	empty, _, err := infraOnly(h.fs, h.upper, "", own, h.meta.Copied)
 	return empty, err
@@ -1010,11 +1011,11 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		stack = append([]string{layerID}, stack...)
 	}
 	stackParent := deref(parent)
-	s := &snapRecord{meta: snapMeta{ID: id, Checkout: h.meta.Name, Parent: copyString(parent), Label: label, Created: time.Now().UTC()}, base: h.base, stack: stack, layer: layerID, stackParent: stackParent, git: gitTree, done: make(chan struct{})}
+	s := &snapRecord{meta: snapMeta{ID: id, Checkout: h.meta.Name, Dir: h.meta.Dir, Parent: copyString(parent), Label: label, Created: time.Now().UTC()}, base: h.base, stack: stack, layer: layerID, stackParent: stackParent, git: gitTree, done: make(chan struct{})}
 	r.snapshots[id] = s
 	r.lineage[id] = s
 	if layerID != "" {
-		r.intents[h.meta.Name] = diskIntent{Op: "freezing", Checkout: h.meta.Name, Layer: layerID, Snapshot: id}
+		r.intents[h.meta.Name] = diskIntent{Op: "freezing", Checkout: h.meta.Name, Dir: h.meta.Dir, Layer: layerID, Snapshot: id}
 		if err = r.persistIntentLocked(); err != nil {
 			delete(r.snapshots, id)
 			delete(r.lineage, id)
@@ -1088,7 +1089,7 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 			return rollback(err)
 		}
 		if h.meta.Git {
-			if err = writeGitfile(h.upper, r.gitdirPath(h.meta.Name)); err != nil {
+			if err = writeGitfile(h.upper, r.gitdirPath(h.meta.dir())); err != nil {
 				return rollback(err)
 			}
 		}

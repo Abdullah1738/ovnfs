@@ -32,7 +32,7 @@ func TestGitSnapshotsStoreGitdir(t *testing.T) {
 	f := newFixture(t)
 	dir := revisionRepo(t)
 	f.newCheckout(dir, "app")
-	gitdir := f.reg.gitdirPath("app")
+	gitdir := f.gitdir("app")
 	initial := gitRun(t, dir, "--git-dir", gitdir, "rev-parse", "HEAD")
 	first, firstTree := f.snapGit("app")
 	_, secondTree := f.snapGit("app")
@@ -55,7 +55,7 @@ func TestGitSnapshotsStoreGitdir(t *testing.T) {
 	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: first, Name: "old"}); err != nil {
 		t.Fatal(err)
 	}
-	old := f.reg.gitdirPath("old")
+	old := f.gitdir("old")
 	if got := gitRun(t, dir, "--git-dir", old, "rev-parse", "HEAD"); got != initial {
 		t.Fatalf("checkout from first snapshot at %s, want %s", got, initial)
 	}
@@ -69,7 +69,7 @@ func TestGitSnapshotsStoreGitdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := f.reg.gitdirPath("child")
+	child := f.gitdir("child")
 	if got := gitRun(t, dir, "--git-dir", child, "cat-file", "-t", "HEAD"); got != "commit" {
 		t.Fatalf("fork cannot read its commit: %q", got)
 	}
@@ -93,7 +93,7 @@ func TestGitSnapshotTreesAreGCRoots(t *testing.T) {
 	f := newFixture(t)
 	dir := revisionRepo(t)
 	f.newCheckout(dir, "app")
-	head := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("app"), "rev-parse", "HEAD")
+	head := gitRun(t, dir, "--git-dir", f.gitdir("app"), "rev-parse", "HEAD")
 	id, _ := f.snapGit("app")
 	f.reg.mu.RLock()
 	roots := f.reg.treeRootsLocked()
@@ -105,7 +105,7 @@ func TestGitSnapshotTreesAreGCRoots(t *testing.T) {
 	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: id, Name: "view"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("view"), "rev-parse", "HEAD"); got != head {
+	if got := gitRun(t, dir, "--git-dir", f.gitdir("view"), "rev-parse", "HEAD"); got != head {
 		t.Fatalf("view at %s, want %s", got, head)
 	}
 }
@@ -117,7 +117,7 @@ func TestLegacySnapshotGitCopy(t *testing.T) {
 	f := newFixture(t)
 	dir := revisionRepo(t)
 	f.newCheckout(dir, "app")
-	gitdir := f.reg.gitdirPath("app")
+	gitdir := f.gitdir("app")
 	head := gitRun(t, dir, "--git-dir", gitdir, "rev-parse", "HEAD")
 	id, _ := f.snapGit("app")
 	if err := f.reg.Close(); err != nil {
@@ -142,7 +142,7 @@ func TestLegacySnapshotGitCopy(t *testing.T) {
 	if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: id, Name: "view"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("view"), "rev-parse", "HEAD"); got != head {
+	if got := gitRun(t, dir, "--git-dir", f.gitdir("view"), "rev-parse", "HEAD"); got != head {
 		t.Fatalf("view of legacy snapshot at %s, want %s", got, head)
 	}
 	if err := f.reg.Drop(ctx, api.DropArgs{Snapshot: id}); err != nil {

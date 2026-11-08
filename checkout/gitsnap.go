@@ -206,7 +206,7 @@ func (r *Registry) saveGit(h *checkoutRecord) (store.OID, error) {
 	if !h.meta.Git {
 		return "", nil
 	}
-	tree, err := saveGitdir(r.store, r.gitdirPath(h.meta.Name), &h.git)
+	tree, err := saveGitdir(r.store, r.gitdirPath(h.meta.dir()), &h.git)
 	if err != nil && h.retired.Load() {
 		return "", failure("not_found", "no checkout %s", h.meta.Name)
 	}

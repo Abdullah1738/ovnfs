@@ -162,12 +162,12 @@ func TestBaseReuseGitPreservesIndependentState(t *testing.T) {
 		t.Fatal("unchanged root git repository did not share its base")
 	}
 	// Private refs and indexes must remain independent despite the shared base.
-	gitRun(t, dir, "--git-dir="+f.reg.gitdirPath("first"), "symbolic-ref", "HEAD", "refs/heads/private")
-	gitRun(t, dir, "--git-dir="+f.reg.gitdirPath("first"), "update-index", "--force-remove", "staged")
-	if got := gitRun(t, dir, "--git-dir="+f.reg.gitdirPath("second"), "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+	gitRun(t, dir, "--git-dir="+f.gitdir("first"), "symbolic-ref", "HEAD", "refs/heads/private")
+	gitRun(t, dir, "--git-dir="+f.gitdir("first"), "update-index", "--force-remove", "staged")
+	if got := gitRun(t, dir, "--git-dir="+f.gitdir("second"), "symbolic-ref", "HEAD"); got != "refs/heads/main" {
 		t.Fatalf("second checkout HEAD = %q", got)
 	}
-	if got := gitRun(t, dir, "--git-dir="+f.reg.gitdirPath("second"), "ls-files", "staged"); got != "staged" {
+	if got := gitRun(t, dir, "--git-dir="+f.gitdir("second"), "ls-files", "staged"); got != "staged" {
 		t.Fatalf("second checkout index lost staged: %q", got)
 	}
 	third := f.newCheckout(dir, "third")

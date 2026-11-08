@@ -76,8 +76,20 @@ func embeddable(l *overlay.Layer) bool {
 	return m != nil && len(m) <= embedLimit
 }
 
-// diskIntent makes an interrupted multi-step filesystem mutation recoverable.
-type diskIntent struct{ Op, Checkout, Layer, Snapshot string }
+// diskIntent makes an interrupted multi-step filesystem mutation recoverable. Dir
+// is the checkout's checkoutMeta.Dir.
+type diskIntent struct {
+	Op, Checkout, Layer, Snapshot string
+	Dir                           string `json:",omitempty"`
+}
+
+// dir names the directories below uppers and git of the intent's checkout.
+func (i diskIntent) dir() string {
+	if i.Dir != "" {
+		return i.Dir
+	}
+	return i.Checkout
+}
 
 // stateLocked snapshots metadata while the registry mutex is held.
 func (r *Registry) stateLocked() diskState {
@@ -220,8 +232,8 @@ func recoverIntents(state string, d *diskState) error {
 				break
 			}
 		}
-		upper := filepath.Join(state, "uppers", intent.Checkout)
-		gitdir := filepath.Join(state, "git", intent.Checkout)
+		upper := filepath.Join(state, "uppers", intent.dir())
+		gitdir := filepath.Join(state, "git", intent.dir())
 		switch intent.Op {
 		case "creating":
 			if hi >= 0 {
