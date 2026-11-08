@@ -259,6 +259,7 @@ func watchCallback(ctx C.uintptr_t, n C.size_t, paths **C.char, flags *C.uint32_
 	fs := unsafe.Slice(flags, int(n))
 	evs := make([]event, 0, n)
 	want := w.want.Load()
+	marked := false
 	for i, id := range unsafe.Slice(ids, int(n)) {
 		// Callbacks run one at a time, so a plain max suffices.
 		if uint64(id) > w.lastID.Load() {
@@ -266,12 +267,7 @@ func watchCallback(ctx C.uintptr_t, n C.size_t, paths **C.char, flags *C.uint32_
 		}
 		path, f := C.GoString(ps[i]), uint32(fs[i])
 		if f&flagDropped == 0 && below(w.marker, path) {
-			if want != nil && path == *want {
-				select {
-				case w.reached <- struct{}{}:
-				default:
-				}
-			}
+			marked = marked || want != nil && path == *want
 			continue
 		}
 		switch {
@@ -283,5 +279,13 @@ func watchCallback(ctx C.uintptr_t, n C.size_t, paths **C.char, flags *C.uint32_
 			evs = append(evs, event{filepath.Clean(path), changed})
 		}
 	}
+	// The marker counts once the events ahead of it are reported: Sync drains
+	// what was reported when it arrives.
 	w.report(evs)
+	if marked {
+		select {
+		case w.reached <- struct{}{}:
+		default:
+		}
+	}
 }
