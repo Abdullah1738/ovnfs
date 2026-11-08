@@ -479,7 +479,7 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 			return nil, err
 		}
 		if gs.repo != nil {
-			err = r.makeGitdirs(ctx, gitdir, b.view.Meta().ID, gs)
+			err = r.makeGitdirs(gitdir, b.view.Meta().ID, gs)
 		} else {
 			err = os.Rename(gs.ready, gitdir)
 		}
@@ -519,8 +519,8 @@ func writeGitfile(upper, gitdir string) error { return git.WriteGitfile(upper, g
 // makeGitdirs builds a new checkout's private git directory and, below it where git
 // looks for them, one for each absorbed submodule, all from the repositories' state
 // at capture and each borrowing its repository's objects through the base.
-func (r *Registry) makeGitdirs(ctx context.Context, gitdir, baseID string, gs gitSource) error {
-	if err := gs.repo.MakeGitdir(ctx, gitdir, r.objectsPath(baseID, ""), gs.index); err != nil {
+func (r *Registry) makeGitdirs(gitdir, baseID string, gs gitSource) error {
+	if err := gs.repo.MakeGitdir(gitdir, r.objectsPath(baseID, ""), gs.index); err != nil {
 		return err
 	}
 	for _, m := range gs.modules {
@@ -528,7 +528,7 @@ func (r *Registry) makeGitdirs(ctx context.Context, gitdir, baseID string, gs gi
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return err
 		}
-		if err := m.repo.MakeGitdir(ctx, dir, r.objectsPath(baseID, m.Module), m.Index); err != nil {
+		if err := m.repo.MakeGitdir(dir, r.objectsPath(baseID, m.Module), m.Index); err != nil {
 			return err
 		}
 	}

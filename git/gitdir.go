@@ -1,12 +1,10 @@
 package git
 
 import (
-	"context"
 	"crypto/sha1"
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -56,9 +54,26 @@ func realPath(p string) string {
 }
 
 // MakeGitdir writes a checkout's private git directory from the repository's current
-// HEAD, refs and config, the captured index, and a link to the shared objects.
-func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) error {
+// HEAD, refs and config, the captured index, and a link to the shared objects. It
+// runs no git process: the config is edited as it is copied.
+func (r *Repo) MakeGitdir(gitdir, objects, index string) error {
 	if err := os.Mkdir(gitdir, 0o755); err != nil {
+		return err
+	}
+	config, err := os.ReadFile(filepath.Join(r.CommonDir, "config"))
+	if err != nil {
+		return err
+	}
+	// The checkout is its own work tree (the directory holding the .git file), and its
+	// files keep their mtimes but not their inodes, so stat checks stay minimal.
+	edited := editConfig(string(config), "core", []configEntry{
+		{"bare", "false"},
+		{"checkStat", "minimal"},
+		{"trustctime", "false"},
+		{"untrackedCache", "false"},
+		{"fsmonitor", "false"},
+	}, "worktree")
+	if err := os.WriteFile(filepath.Join(gitdir, "config"), []byte(edited), 0o644); err != nil {
 		return err
 	}
 	copies := []struct {
@@ -66,18 +81,20 @@ func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) er
 		required bool
 	}{
 		{filepath.Join(r.GitDir, "HEAD"), "HEAD", true},
-		{filepath.Join(r.CommonDir, "config"), "config", true},
 		{filepath.Join(r.GitDir, "config.worktree"), "config.worktree", false},
 		{filepath.Join(r.CommonDir, "packed-refs"), "packed-refs", false},
 		{filepath.Join(r.CommonDir, "shallow"), "shallow", false},
 		{filepath.Join(r.CommonDir, "info", "exclude"), filepath.Join("info", "exclude"), false},
-		{filepath.Join(r.CommonDir, "refs"), "refs", true},
 	}
 	for _, c := range copies {
 		err := copyTree(c.src, filepath.Join(gitdir, c.dst))
 		if err != nil && (c.required || !errors.Is(err, os.ErrNotExist)) {
 			return err
 		}
+	}
+	// Empty directories hold no refs, and ref deletions leave many behind.
+	if err := copyFiles(filepath.Join(r.CommonDir, "refs"), filepath.Join(gitdir, "refs")); err != nil {
+		return err
 	}
 	if err := copyFile(index, filepath.Join(gitdir, "index")); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -87,19 +104,7 @@ func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) er
 			return err
 		}
 	}
-	if err := os.Symlink(objects, filepath.Join(gitdir, "objects")); err != nil {
-		return err
-	}
-	// The checkout is its own work tree (the directory holding the .git file), and its
-	// files keep their mtimes but not their inodes, so stat checks stay minimal.
-	return configure(ctx, gitdir,
-		[]string{"--unset-all", "core.worktree"},
-		[]string{"--bool", "core.bare", "false"},
-		[]string{"core.checkStat", "minimal"},
-		[]string{"--bool", "core.trustctime", "false"},
-		[]string{"--bool", "core.untrackedCache", "false"},
-		[]string{"--bool", "core.fsmonitor", "false"},
-	)
+	return os.Symlink(objects, filepath.Join(gitdir, "objects"))
 }
 
 // UnsetModuleWorktrees removes core.worktree from every submodule git directory
@@ -107,31 +112,16 @@ func (r *Repo) MakeGitdir(ctx context.Context, gitdir, objects, index string) er
 // at creation: git records it when it (re)connects a submodule, as a path into the
 // checkout it ran in, and each restored directory must serve the checkout whose
 // .git file points at it.
-func UnsetModuleWorktrees(ctx context.Context, gitdir string) error {
+func UnsetModuleWorktrees(gitdir string) error {
 	modules, err := moduleGitdirs(gitdir)
 	if err != nil {
 		return err
 	}
 	for _, m := range modules {
-		if err := configure(ctx, filepath.Join(gitdir, filepath.FromSlash(m)), []string{"--unset-all", "core.worktree"}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// configure applies git config edits, each the arguments of one git config call,
-// to gitdir's own config file.
-func configure(ctx context.Context, gitdir string, edits ...[]string) error {
-	config := filepath.Join(gitdir, "config")
-	for _, args := range edits {
-		cmd := exec.CommandContext(ctx, "git", append([]string{"config", "--file", config}, args...)...)
-		if _, err := run(cmd); err != nil {
-			var exit *exec.ExitError
-			// Exit 5 is git config's "nothing to unset".
-			if errors.As(err, &exit) && exit.ExitCode() == 5 {
-				continue
-			}
+		err := rewriteConfig(filepath.Join(gitdir, filepath.FromSlash(m)), func(config string) string {
+			return editConfig(config, "core", nil, "worktree")
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -175,8 +165,9 @@ func moduleGitdirs(gitdir string) ([]string, error) {
 }
 
 // CopyGitdir copies a private git directory to the new path dst, linking the copy's
-// objects to the shared directory instead of copying them. The registry uses it only
-// for snapshots taken by builds that saved a whole directory copy per snapshot.
+// objects to the shared directory instead of copying them. The registry uses it for
+// checkouts that reuse a capture, from a directory MakeGitdir made for them, and for
+// snapshots taken by builds that saved a whole directory copy per snapshot.
 func CopyGitdir(src, dst, objects string) error {
 	if err := os.Mkdir(dst, 0o755); err != nil {
 		return err
@@ -199,16 +190,36 @@ func CopyGitdir(src, dst, objects string) error {
 // MarkCheckout sets ovnfs.checkout to name in a private git directory's own config, so
 // only this directory identifies as an ovnfs checkout (inherited user config and the
 // source repo stay unmarked). The registry calls it whenever it creates or reopens a
-// checkout; it edits the file in place of exec'ing git config, keeps every other line,
-// and leaves the file untouched when the marker already names the checkout.
+// checkout; it keeps every other line and leaves the file untouched when the marker
+// already names the checkout.
 func MarkCheckout(gitdir, name string) error {
+	return rewriteConfig(gitdir, func(config string) string { return markConfig(config, name) })
+}
+
+// MarkNew writes config, with ovnfs.checkout set to name as MarkCheckout sets it,
+// as the config of git directory gitdir, which nothing reads yet: in one write,
+// not atomically.
+func MarkNew(gitdir, config, name string) error {
+	return os.WriteFile(filepath.Join(gitdir, "config"), []byte(markConfig(config, name)), 0o644)
+}
+
+// markConfig rewrites git config text so its [ovnfs] section holds exactly one
+// checkout = name (see editConfig).
+func markConfig(config, name string) string {
+	return editConfig(config, "ovnfs", []configEntry{{"checkout", name}})
+}
+
+// rewriteConfig replaces gitdir's config file with edit's result, atomically and
+// keeping its mode, and leaves it untouched when edit changes nothing. It edits the
+// file in place of exec'ing git config.
+func rewriteConfig(gitdir string, edit func(string) string) error {
 	path := filepath.Join(gitdir, "config")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	marked := markConfig(string(data), name)
-	if marked == string(data) {
+	edited := edit(string(data))
+	if edited == string(data) {
 		return nil
 	}
 	info, err := os.Stat(path)
@@ -221,7 +232,7 @@ func MarkCheckout(gitdir, name string) error {
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
-	_, err = f.WriteString(marked)
+	_, err = f.WriteString(edited)
 	if err == nil {
 		err = f.Chmod(info.Mode().Perm())
 	}
@@ -234,10 +245,30 @@ func MarkCheckout(gitdir, name string) error {
 	return os.Rename(tmp, path)
 }
 
-// markConfig rewrites git config text so its [ovnfs] section holds exactly one
-// checkout = name, placed right after the first [ovnfs] header (or in a new section
-// at the end); every other line, comments and subsections included, is kept.
-func markConfig(config, name string) string {
+// configEntry is one variable a config edit sets.
+type configEntry struct{ key, value string }
+
+// editConfig rewrites git config text as git config --file would: every
+// occurrence of set's and unset's variables in section (no subsection, names
+// compared case-insensitively) is removed, then set's entries are placed right
+// after the section's first header, or in a new section at the end. Every other
+// line, comments and subsections included, is kept; "[section] key = old" keeps
+// its header and loses the old value.
+func editConfig(config, section string, set []configEntry, unset ...string) string {
+	drop := func(line string) bool {
+		key := configKey(line)
+		for _, e := range set {
+			if strings.EqualFold(key, e.key) {
+				return true
+			}
+		}
+		for _, k := range unset {
+			if strings.EqualFold(key, k) {
+				return true
+			}
+		}
+		return false
+	}
 	var out []string
 	insert, inSection, continued := -1, false, false
 	for _, line := range strings.SplitAfter(config, "\n") {
@@ -256,9 +287,8 @@ func markConfig(config, name string) string {
 				out = append(out, line)
 				continue
 			}
-			inSection = strings.EqualFold(strings.TrimSpace(trimmed[1:end]), "ovnfs")
-			if inSection && isCheckoutKey(trimmed[end+1:]) {
-				// "[ovnfs] checkout = old" keeps its header and loses the old value.
+			inSection = strings.EqualFold(strings.TrimSpace(trimmed[1:end]), section)
+			if inSection && drop(trimmed[end+1:]) {
 				continued = continuesLine(line)
 				line = trimmed[:end+1] + "\n"
 			}
@@ -268,32 +298,37 @@ func markConfig(config, name string) string {
 			}
 			continue
 		}
-		if inSection && isCheckoutKey(trimmed) {
+		if inSection && drop(trimmed) {
 			continued = continuesLine(line)
 			continue
 		}
 		out = append(out, line)
 	}
-	entry := "\tcheckout = " + configValue(name) + "\n"
+	if len(set) == 0 {
+		return strings.Join(out, "")
+	}
+	entries := make([]string, 0, len(set))
+	for _, e := range set {
+		entries = append(entries, "\t"+e.key+" = "+configValue(e.value)+"\n")
+	}
 	if insert < 0 {
 		if n := len(out); n != 0 && !strings.HasSuffix(out[n-1], "\n") {
 			out[n-1] += "\n"
 		}
-		out = append(out, "[ovnfs]\n", entry)
+		out = append(append(out, "["+section+"]\n"), entries...)
 	} else {
-		out = append(out[:insert], append([]string{entry}, out[insert:]...)...)
+		out = append(out[:insert], append(entries, out[insert:]...)...)
 	}
 	return strings.Join(out, "")
 }
 
-// isCheckoutKey reports whether a config line inside a section sets the checkout variable.
-func isCheckoutKey(line string) bool {
+// configKey returns the variable name a config line inside a section sets.
+func configKey(line string) string {
 	line = strings.TrimSpace(line)
-	key := line
 	if i := strings.IndexAny(line, "= \t"); i >= 0 {
-		key = line[:i]
+		return line[:i]
 	}
-	return strings.EqualFold(key, "checkout")
+	return line
 }
 
 // continuesLine reports whether a config line ends in an unescaped backslash, which
@@ -374,4 +409,37 @@ func emptyIndex(name string) error {
 	const header = "DIRC\x00\x00\x00\x02\x00\x00\x00\x00"
 	checksum := sha1.Sum([]byte(header))
 	return os.WriteFile(name, append([]byte(header), checksum[:]...), 0o600)
+}
+
+// copyFiles copies the files and symlinks below directory src to the new directory
+// dst, creating only the directories that lead to them.
+func copyFiles(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	made := map[string]bool{dst: true}
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if dir := filepath.Dir(target); !made[dir] {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+			made[dir] = true
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			link, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		return copyFile(p, target)
+	})
 }

@@ -242,7 +242,7 @@ func (r *Registry) prepareGit(ctx context.Context, tree store.OID, legacy, baseI
 		err = git.CopyGitdir(legacy, dst, r.objectsPath(baseID, ""))
 	}
 	if err == nil {
-		err = git.UnsetModuleWorktrees(ctx, dst)
+		err = git.UnsetModuleWorktrees(dst)
 	}
 	if err != nil {
 		return "", errors.Join(err, os.RemoveAll(tmp))
