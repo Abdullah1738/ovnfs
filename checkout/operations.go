@@ -108,7 +108,7 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	if reply, inMount, err := r.forkMounted(ctx, args.Dir, args); inMount {
 		return reply, err
 	}
-	root, err := source.Resolve(args.Dir)
+	root, err := r.resolveRoot(args.Dir)
 	if err != nil {
 		return api.NewReply{}, coded(err)
 	}
