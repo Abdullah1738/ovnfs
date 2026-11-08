@@ -1,28 +1,22 @@
 package main
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"runtime/debug"
 	"slices"
 	"strings"
 
 	"github.com/stencil-hq/ovnfs/api"
+	"github.com/stencil-hq/ovnfs/internal/release"
 	"github.com/stencil-hq/ovnfs/source"
 )
-
-// releases is where send downloads ovnfs for machines that lack it.
-const releases = "https://github.com/stencil-hq/ovnfs/releases"
 
 // runSend attaches a folder or checkout to a machine reached by ssh, preparing
 // that machine first: it installs ovnfs there from a GitHub release when it has
@@ -132,13 +126,13 @@ func (r *remote) install(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", r.host, err)
 	}
-	tag, err := releaseTag(ctx)
+	bin, err := release.Find(ctx, sendTag(), goos, goarch)
 	if err != nil {
 		return err
 	}
 	dir := r.home + "/.local/bin"
-	fmt.Fprintf(os.Stderr, "installing ovnfs %s (%s/%s) on %s as %s/ovnfs\n", tag, goos, goarch, r.host, dir)
-	exe, err := download(ctx, tag, goos, goarch)
+	fmt.Fprintf(os.Stderr, "installing ovnfs %s (%s/%s) on %s as %s/ovnfs\n", bin.Tag, goos, goarch, r.host, dir)
+	exe, err := bin.Fetch(ctx)
 	if err != nil {
 		return err
 	}
@@ -174,70 +168,13 @@ func platform(kernel, machine string) (goos, goarch string, err error) {
 	return goos, goarch, nil
 }
 
-// releaseVersion matches a release tag, as opposed to a development build's
-// pseudo-version or "(devel)".
-var releaseVersion = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
-
-// releaseTag picks the release to install: this binary's own, so both machines
-// speak the same protocols, else (for a development build) the latest.
-func releaseTag(ctx context.Context) (string, error) {
-	if bi, ok := debug.ReadBuildInfo(); ok && releaseVersion.MatchString(bi.Main.Version) {
-		return bi.Main.Version, nil
+// sendTag is the release send installs: this binary's own, so both machines
+// speak the same protocols, else "" (the latest) for a development build.
+func sendTag() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && release.IsTag(bi.Main.Version) {
+		return bi.Main.Version
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, releases+"/latest", nil)
-	if err != nil {
-		return "", err
-	}
-	// GitHub answers /releases/latest with a redirect to /releases/tag/TAG.
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("finding the latest ovnfs release: %w", err)
-	}
-	resp.Body.Close()
-	tag, ok := strings.CutPrefix(resp.Header.Get("Location"), releases+"/tag/")
-	if !ok || tag == "" {
-		return "", fmt.Errorf("finding the latest ovnfs release: %s/latest answered %s", releases, resp.Status)
-	}
-	return tag, nil
-}
-
-// download fetches the ovnfs binary out of a release's archive for one platform.
-func download(ctx context.Context, tag, goos, goarch string) ([]byte, error) {
-	url := fmt.Sprintf("%s/download/%s/ovnfs_%s_%s_%s.tar.gz", releases, tag, strings.TrimPrefix(tag, "v"), goos, goarch)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("downloading %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("downloading %s: %s", url, resp.Status)
-	}
-	gz, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("downloading %s: %w", url, err)
-	}
-	tr := tar.NewReader(gz)
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			return nil, fmt.Errorf("%s holds no ovnfs binary", url)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("downloading %s: %w", url, err)
-		}
-		if h.Name == "ovnfs" && h.Typeflag == tar.TypeReg {
-			exe, err := io.ReadAll(tr)
-			if err != nil {
-				return nil, fmt.Errorf("downloading %s: %w", url, err)
-			}
-			return exe, nil
-		}
-	}
+	return ""
 }
 
 // join makes the machine a member of this machine's mesh, which mesh.setup

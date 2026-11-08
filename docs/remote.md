@@ -68,9 +68,10 @@ ovnfs send . devbox:src/app    # devbox:~/src/app now shows this folder
 ```
 
 1. Without ovnfs on HOST (`--remote-bin`, else on its PATH, else
-   `~/.local/bin/ovnfs`), send downloads the release archive for HOST's
-   `uname` (Linux or macOS, amd64 or arm64) here and installs its binary as
-   `~/.local/bin/ovnfs` over ssh, so HOST needs no network access to GitHub.
+   `~/.local/bin/ovnfs`), send downloads the release binary for HOST's
+   `uname` (Linux or macOS, amd64 or arm64) here from `build.stencil.so` and
+   installs it as `~/.local/bin/ovnfs` over ssh, so HOST needs no network
+   access of its own.
    The release is this binary's own, so both ends speak the same protocols,
    or the latest one when this is a development build.
 2. It starts HOST's daemon and, unless HOST is already a member, joins it to

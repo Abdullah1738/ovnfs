@@ -1,4 +1,6 @@
-# Release archives, published by .github/workflows/release.yml on a v* tag.
+# Release archives, published by .github/workflows/release.yml on a v* tag,
+# which then uploads the binaries from dist/artifacts.json to build.stencil.so
+# (internal/release/upload); keep the platforms in step with release.Targets.
 # The binary reports its version from the tag Go stamps into the build info
 # (ovnfs version), so no -X ldflags are needed.
 version: 2
