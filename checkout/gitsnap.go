@@ -125,11 +125,19 @@ func saveGitdir(st *store.Store, dir string, c *gitCache) (store.OID, error) {
 	if err != nil {
 		return "", err
 	}
+	// Only the innermost empty directories are leaves: one holding nothing but
+	// empty directories is their parent, not a leaf itself.
 	parents := make(map[string]bool, len(dirs))
-	for p := range files {
+	markParents := func(p string) {
 		for d := path.Dir(p); d != "." && !parents[d]; d = path.Dir(d) {
 			parents[d] = true
 		}
+	}
+	for p := range files {
+		markParents(p)
+	}
+	for _, d := range dirs {
+		markParents(d)
 	}
 	for _, d := range dirs {
 		if !parents[d] {

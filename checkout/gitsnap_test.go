@@ -82,8 +82,33 @@ func TestGitSnapshotsStoreGitdir(t *testing.T) {
 	if fork.Checkout.Name != "child" {
 		t.Fatalf("fork = %+v", fork)
 	}
-	if entries, err := os.ReadDir(filepath.Join(f.state, "git")); err != nil || len(entries) != 3 {
-		t.Fatalf("git directories = %v, %v (want one per checkout, no leftovers)", entries, err)
+	if entries := checkoutDirs(t, f.state, "git"); len(entries) != 3 {
+		t.Fatalf("git directories = %v (want one per checkout, no leftovers)", entries)
+	}
+}
+
+// TestGitSnapshotKeepsNestedEmptyDirs snapshots a git directory holding a tree of
+// empty directories, as ref deletions leave behind, and restores it in a checkout
+// from the snapshot.
+func TestGitSnapshotKeepsNestedEmptyDirs(t *testing.T) {
+	f := newFixture(t)
+	dir := revisionRepo(t)
+	f.newCheckout(dir, "app")
+	nested := filepath.Join("refs", "tool", "turns", "a", "b")
+	if err := os.MkdirAll(filepath.Join(f.gitdir("app"), nested), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.gitdir("app"), "refs", "tool", "turns", "c"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := f.snapGit("app")
+	if _, err := f.reg.New(context.Background(), api.NewArgs{Snapshot: id, Name: "view"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{nested, filepath.Join("refs", "tool", "turns", "c")} {
+		if info, err := os.Stat(filepath.Join(f.gitdir("view"), d)); err != nil || !info.IsDir() {
+			t.Fatalf("%s in the restored git directory: %v", d, err)
+		}
 	}
 }
 
