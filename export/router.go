@@ -129,6 +129,9 @@ func (r *Router) OpenFile(name string, flag int, perm os.FileMode) (billy.File, 
 	if co == "" {
 		return &rootFile{router: r, name: name}, nil
 	}
+	if marker(co, p) {
+		return markerFile{&rootFile{router: r, name: name}}, nil
+	}
 	s, err := r.enter(co, "open", name)
 	if err != nil {
 		return nil, err
@@ -160,6 +163,9 @@ func (r *Router) info(name string, nofollow bool) (os.FileInfo, error) {
 	if co == "" {
 		return rootInfo{mtime: r.reg.RootTime()}, nil
 	}
+	if marker(co, p) {
+		return markerInfo{mtime: r.reg.RootTime()}, nil
+	}
 	s, err := r.enter(co, "stat", name)
 	if err != nil {
 		return nil, err
@@ -177,7 +183,8 @@ func (r *Router) info(name string, nofollow bool) (os.FileInfo, error) {
 	return fi, err
 }
 
-// ReadDir lists the live checkout names or a directory in one checkout.
+// ReadDir lists the live checkout names or a directory in one checkout. The
+// root listing leaves out the [neverIndex] marker, which is reachable by name only.
 func (r *Router) ReadDir(name string) ([]os.FileInfo, error) {
 	co, p := splitRouterPath(name)
 	if co == "" {
@@ -280,7 +287,7 @@ func (r *Router) Symlink(target, link string) error {
 // Readlink returns a checkout symlink's stored target.
 func (r *Router) Readlink(name string) (string, error) {
 	co, p := splitRouterPath(name)
-	if co == "" {
+	if co == "" || marker(co, p) {
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: syscall.EINVAL}
 	}
 	s, err := r.enter(co, "readlink", name)

@@ -1,6 +1,7 @@
 package export
 
 import (
+	"io"
 	"os"
 	"sync"
 	"syscall"
@@ -8,6 +9,81 @@ import (
 
 	"github.com/go-git/go-billy/v5"
 )
+
+// neverIndex is the empty file at the export root that tells Spotlight never to
+// index the mount; macOS stats it on every new volume. Checkout names start
+// with [a-z0-9], so it never shadows a checkout.
+const neverIndex = ".metadata_never_index"
+
+// marker reports whether a split export path names the [neverIndex] file.
+func marker(co, p string) bool { return co == neverIndex && p == "" }
+
+// markerInfo describes the read-only, empty [neverIndex] file.
+type markerInfo struct {
+	mtime time.Time
+}
+
+// Name returns the marker's file name.
+func (markerInfo) Name() string { return neverIndex }
+
+// Size returns zero because the marker is empty.
+func (markerInfo) Size() int64 { return 0 }
+
+// Mode returns read-only regular file permissions.
+func (markerInfo) Mode() os.FileMode { return 0o444 }
+
+// ModTime follows the export root's.
+func (i markerInfo) ModTime() time.Time { return i.mtime }
+
+// IsDir reports that the marker is a regular file.
+func (markerInfo) IsDir() bool { return false }
+
+// Sys returns no host-specific stat for the virtual marker.
+func (markerInfo) Sys() any { return nil }
+
+// markerFile is a read-only handle on the empty [neverIndex] file; writes,
+// truncation and locks fail as they do on the export root.
+type markerFile struct{ *rootFile }
+
+// check fails once the handle is closed.
+func (f markerFile) check(op string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return &os.PathError{Op: op, Path: f.name, Err: os.ErrClosed}
+	}
+	return nil
+}
+
+// Read reports end of file.
+func (f markerFile) Read([]byte) (int, error) {
+	if err := f.check("read"); err != nil {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+// ReadAt reports end of file at every offset.
+func (f markerFile) ReadAt([]byte, int64) (int, error) {
+	if err := f.check("readat"); err != nil {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+// Seek keeps the only position an empty file has.
+func (f markerFile) Seek(int64, int) (int64, error) { return 0, f.check("seek") }
+
+// Stat returns the marker's attributes.
+func (f markerFile) Stat() (os.FileInfo, error) {
+	if err := f.check("stat"); err != nil {
+		return nil, err
+	}
+	return markerInfo{mtime: f.router.reg.RootTime()}, nil
+}
+
+// markerFileInterface checks the marker supports the billy file contract.
+var _ billy.File = markerFile{}
 
 // rootInfo describes the virtual directory containing all live checkouts.
 type rootInfo struct {

@@ -18,7 +18,9 @@ client-local locks. The macOS mount uses
 caching (the client's default timeouts are 5 to 60 s). After creating or
 removing a checkout the daemon `statfs`es its own mount, making the client
 revalidate the export root so new checkouts show up immediately. The export
-root is read-only; cross-checkout rename returns EXDEV so `mv` copies.
+root is read-only; cross-checkout rename returns EXDEV so `mv` copies. It also
+holds an empty, unlisted `.metadata_never_index`, the file macOS checks for on
+every new volume to keep Spotlight from indexing it.
 
 The server also accepts NFSv4.0 clients on the same port. These may receive
 read delegations, recalled on changes through another protocol, `pull`,
