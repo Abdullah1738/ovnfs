@@ -134,6 +134,18 @@ func (w *Watcher) Remove(dir string) {
 // reaches fn: false while no stream runs.
 func (w *Watcher) Covers(dir string) bool { return w.covers(dir) }
 
+// Sync returns once every change made before the call has reached fn, or an
+// error when no stream runs or the stream did not deliver a marker in time.
+func (w *Watcher) Sync() error {
+	w.mu.Lock()
+	reached := !w.closed && w.stream != nil && w.barrier()
+	w.mu.Unlock()
+	if !reached || !w.drain() {
+		return errors.New("watch: changes not delivered")
+	}
+	return nil
+}
+
 // Close stops the stream and returns once no fn call is in flight; fn is not
 // called afterwards.
 func (w *Watcher) Close() error {
@@ -209,9 +221,10 @@ func (w *Watcher) restart() error {
 
 // barrier waits briefly until the stream has delivered every event older
 // than the call, by writing a marker file and waiting for its event; FSEvents
-// delivers in event id order. This keeps the next stream's replay short
-// however long the old stream sat idle; w.mu must be held.
-func (w *Watcher) barrier() {
+// delivers in event id order. It reports whether the marker arrived in time.
+// Besides Sync, restart uses it to keep the next stream's replay short however
+// long the old stream sat idle; w.mu must be held.
+func (w *Watcher) barrier() bool {
 	w.seq++
 	p := filepath.Join(w.marker, strconv.Itoa(w.seq))
 	select {
@@ -221,14 +234,16 @@ func (w *Watcher) barrier() {
 	w.want.Store(&p)
 	defer w.want.Store(nil)
 	if err := os.WriteFile(p, nil, 0o600); err != nil {
-		return
+		return false
 	}
 	defer os.Remove(p)
 	t := time.NewTimer(time.Second)
 	defer t.Stop()
 	select {
 	case <-w.reached:
+		return true
 	case <-t.C:
+		return false
 	}
 }
 

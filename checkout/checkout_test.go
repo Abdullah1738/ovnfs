@@ -442,6 +442,34 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// gitdir is the private git directory of checkout name, or where one named name
+// would be when no such checkout exists.
+func (f *fixture) gitdir(name string) string {
+	f.reg.mu.RLock()
+	defer f.reg.mu.RUnlock()
+	if h := f.reg.checkouts[name]; h != nil {
+		return f.reg.gitdirPath(h.meta.dir())
+	}
+	return f.reg.gitdirPath(name)
+}
+
+// checkoutDirs lists the checkout directories below state/kind ("uppers" or "git"),
+// leaving out those of checkouts prepared for later creates (see reuseFolder).
+func checkoutDirs(t *testing.T, state, kind string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(state, kind))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), preparedPrefix) {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	return dirs
+}
+
 // TestRepoCheckoutAndPlan checks git facts in a repository checkout and how plan splits
 // files between the origin (pushed, unchanged) and this machine.
 func TestRepoCheckoutAndPlan(t *testing.T) {

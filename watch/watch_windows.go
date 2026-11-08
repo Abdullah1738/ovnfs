@@ -34,12 +34,16 @@ type Watcher struct {
 	port windows.Handle // completion port of every top's handle
 
 	// Guarded by forest.mu:
-	keys map[uintptr]*top // tops with an open handle, by completion key
-	next uintptr          // the last completion key handed out
-	err  error            // why waiting stopped, once it did
+	keys  map[uintptr]*top                  // tops with an open handle, by completion key
+	next  uintptr                           // the last completion key handed out
+	err   error                             // why waiting stopped, once it did
+	syncs map[*windows.Overlapped]chan bool // barriers posted by Sync, answered true once reached
 
 	reader chan struct{} // closed when wait returns
 }
+
+// syncKey marks the completion packets Sync posts; tops' keys count up from 1.
+const syncKey = ^uintptr(0)
 
 // top is a directory handle with its change request.
 type top struct {
@@ -59,7 +63,7 @@ func New(fn func(paths []string)) (*Watcher, error) {
 	if err != nil {
 		return nil, os.NewSyscallError("CreateIoCompletionPort", err)
 	}
-	w := &Watcher{port: port, keys: map[uintptr]*top{}, reader: make(chan struct{})}
+	w := &Watcher{port: port, keys: map[uintptr]*top{}, syncs: map[*windows.Overlapped]chan bool{}, reader: make(chan struct{})}
 	w.init(w, fn)
 	go w.wait()
 	return w, nil
@@ -75,6 +79,40 @@ func (w *Watcher) Remove(dir string) { w.remove(dir) }
 // Covers reports whether every change below dir, an added directory, now
 // reaches fn.
 func (w *Watcher) Covers(dir string) bool { return w.covers(dir) }
+
+// Sync returns once every change made before the call has reached fn, or an
+// error once the watcher stopped. A write through a handle still open counts
+// once the handle closes: the system reports it only then. Completion packets
+// leave the port in order: a barrier posted now follows the packets of every
+// request a change already completed. Handling those re-arms their tops, and a
+// top that changed while unarmed completes its new request at once, behind the
+// barrier; a second barrier follows those.
+func (w *Watcher) Sync() error {
+	for range 2 {
+		ov := new(windows.Overlapped)
+		reached := make(chan bool, 1)
+		w.mu.Lock()
+		if w.closed || w.err != nil {
+			w.mu.Unlock()
+			return errors.New("watch: watcher stopped")
+		}
+		w.syncs[ov] = reached
+		w.mu.Unlock()
+		if err := windows.PostQueuedCompletionStatus(w.port, 0, syncKey, ov); err != nil {
+			w.mu.Lock()
+			delete(w.syncs, ov)
+			w.mu.Unlock()
+			return os.NewSyscallError("PostQueuedCompletionStatus", err)
+		}
+		if !<-reached {
+			return errors.New("watch: watcher stopped")
+		}
+	}
+	if !w.drain() {
+		return errors.New("watch: watcher stopped")
+	}
+	return nil
+}
 
 // Close stops watching and returns once no fn call is in flight; fn is not
 // called afterwards.
@@ -191,7 +229,15 @@ func (w *Watcher) arm(t *top) error {
 
 // wait handles completed requests until Close has released every top.
 func (w *Watcher) wait() {
-	defer close(w.reader)
+	defer func() {
+		w.mu.Lock()
+		for ov, reached := range w.syncs {
+			delete(w.syncs, ov)
+			reached <- false
+		}
+		w.mu.Unlock()
+		close(w.reader)
+	}()
 	for {
 		var n uint32
 		var key uintptr
@@ -207,7 +253,10 @@ func (w *Watcher) wait() {
 			w.mu.Unlock()
 			return
 		}
-		if t := w.keys[key]; ov != nil && t != nil {
+		if reached := w.syncs[ov]; key == syncKey && reached != nil {
+			delete(w.syncs, ov)
+			reached <- true
+		} else if t := w.keys[key]; ov != nil && t != nil {
 			w.complete(t, n, err)
 		}
 		done := w.closed && len(w.keys) == 0

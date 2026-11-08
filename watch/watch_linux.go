@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -39,6 +40,7 @@ type Watcher struct {
 	evs   []event          // changes found during the current read
 	gen   uint64           // counts rescans
 	err   error            // why reading stopped, once it did
+	syncs []chan bool      // Sync calls waiting for the queue to be read, answered true once it was
 
 	reader chan struct{} // closed when read returns
 }
@@ -83,6 +85,28 @@ func (w *Watcher) Remove(dir string) { w.remove(dir) }
 // Covers reports whether every change below dir, an added directory, now
 // reaches fn.
 func (w *Watcher) Covers(dir string) bool { return w.covers(dir) }
+
+// Sync returns once every change made before the call has reached fn, or an
+// error once the watcher stopped. The kernel queues a record as the change
+// happens; Sync interrupts the reader, which reads the queue empty before
+// answering.
+func (w *Watcher) Sync() error {
+	read := make(chan bool, 1)
+	w.mu.Lock()
+	if w.closed || w.err != nil {
+		w.mu.Unlock()
+		return errors.New("watch: watcher stopped")
+	}
+	w.syncs = append(w.syncs, read)
+	w.mu.Unlock()
+	if err := w.f.SetReadDeadline(time.Now()); err != nil {
+		return err
+	}
+	if !<-read || !w.drain() {
+		return errors.New("watch: watcher stopped")
+	}
+	return nil
+}
 
 // Close stops watching and returns once no fn call is in flight; fn is not
 // called afterwards.
@@ -130,10 +154,21 @@ func (w *Watcher) drop(n *node) {
 
 // read applies inotify records until Close.
 func (w *Watcher) read() {
-	defer close(w.reader)
+	defer func() {
+		w.mu.Lock()
+		for _, read := range w.syncs {
+			read <- false
+		}
+		w.syncs = nil
+		w.mu.Unlock()
+		close(w.reader)
+	}()
 	buf := make([]byte, 64<<10)
 	for {
 		n, err := w.f.Read(buf)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			err = w.readQueued(buf)
+		}
 		w.mu.Lock()
 		if w.closed {
 			w.mu.Unlock()
@@ -154,6 +189,34 @@ func (w *Watcher) read() {
 		w.handle(buf[:n])
 		w.mu.Unlock()
 	}
+}
+
+// readQueued answers the Sync calls made so far once it has applied every
+// record queued now, reading without blocking; n is then 0 for read.
+func (w *Watcher) readQueued(buf []byte) error {
+	if err := w.f.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	waiting := w.syncs
+	w.syncs = nil
+	w.mu.Unlock()
+	for {
+		n, err := unix.Read(w.fd, buf)
+		if errors.Is(err, unix.EAGAIN) {
+			break
+		}
+		if err != nil {
+			return os.NewSyscallError("read", err)
+		}
+		w.mu.Lock()
+		w.handle(buf[:n])
+		w.mu.Unlock()
+	}
+	for _, read := range waiting {
+		read <- true
+	}
+	return nil
 }
 
 // handle applies one read's records; w.mu is held.

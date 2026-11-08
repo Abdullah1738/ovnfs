@@ -28,11 +28,12 @@ import (
 
 // gitSource says how a new checkout gets its private git directory, if at all.
 type gitSource struct {
-	repo    *git.Repo     // build one from this repository's state at capture
-	index   string        // the captured index copy
-	modules []gitModule   // and one below it for each absorbed submodule, parents first
-	ready   string        // or move this git directory prepared by prepareGit into place
-	rev     *git.Revision // optional initial revision, already resolved
+	repo     *git.Repo     // build one from this repository's state at capture
+	index    string        // the captured index copy
+	modules  []gitModule   // and one below it for each absorbed submodule, parents first
+	template string        // or copy this one built the same way (see Registry.gitTemplate)
+	ready    string        // or move this git directory prepared by prepareGit into place
+	rev      *git.Revision // optional initial revision, already resolved
 }
 
 // gitModule is an absorbed submodule whose private git directory a new checkout
@@ -42,13 +43,26 @@ type gitModule struct {
 	source.Repo
 }
 
-// New opens a checkout from any folder (captured and classified now) or from a snapshot.
+// New opens a checkout from any folder (captured and classified now), from a
+// snapshot, or on an existing capture as it was taken.
 func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, error) {
-	if (args.Dir == "") == (args.Snapshot == "") {
-		return api.NewReply{}, failure("invalid", "new needs exactly one of a folder or a snapshot")
+	sources := 0
+	for _, set := range []bool{args.Dir != "", args.Snapshot != "", args.Base != ""} {
+		if set {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return api.NewReply{}, failure("invalid", "new needs exactly one of a folder, a snapshot or a capture")
 	}
 	if err := checkContext(ctx); err != nil {
 		return api.NewReply{}, err
+	}
+	if args.Base != "" {
+		if args.Rev != "" || len(args.Take) != 0 || len(args.Rules) != 0 {
+			return api.NewReply{}, failure("invalid", "a checkout on a capture keeps its revision, takes and rules")
+		}
+		return r.newOnBase(args.Base, args.Name)
 	}
 	if args.Snapshot != "" {
 		if args.Rev != "" {
@@ -108,7 +122,7 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	if reply, inMount, err := r.forkMounted(ctx, args.Dir, args); inMount {
 		return reply, err
 	}
-	root, err := source.Resolve(args.Dir)
+	root, err := r.resolveRoot(args.Dir)
 	if err != nil {
 		return api.NewReply{}, coded(err)
 	}
@@ -134,21 +148,32 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	if err != nil {
 		return api.NewReply{}, failure("invalid", "%v", err)
 	}
+	if revision == nil && len(takes) == 0 && r.watcher != nil {
+		return r.newOnFolder(ctx, root, m, args.Name)
+	}
+	reply, _, err := r.capture(ctx, root, m, args.Name, revision, takes)
+	return reply, err
+}
+
+// capture opens a checkout named name (or one derived from root) on a new base: a
+// capture of folder root classified by m's rules, taken now, at revision when set,
+// with takes applied.
+func (r *Registry) capture(ctx context.Context, root string, m manifest.Manifest, name string, revision *git.Revision, takes []base.Take) (api.NewReply, *baseRecord, error) {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return api.NewReply{}, failure("io", "registry is closed")
+		return api.NewReply{}, nil, failure("io", "registry is closed")
 	}
-	name, err := r.pickNameLocked(args.Name, filepath.Base(root))
+	name, err := r.pickNameLocked(name, filepath.Base(root))
 	if err != nil {
 		r.mu.Unlock()
-		return api.NewReply{}, err
+		return api.NewReply{}, nil, err
 	}
 	id := ""
 	for id == "" || r.bases[id] != nil || exists(filepath.Join(r.config.State, "bases", id)) {
 		if id, err = randomID("b_"); err != nil {
 			r.mu.Unlock()
-			return api.NewReply{}, coded(err)
+			return api.NewReply{}, nil, coded(err)
 		}
 	}
 	r.operations.Add(1)
@@ -159,7 +184,7 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		delete(r.reserved, name)
 		delete(r.intents, name)
 		r.mu.Unlock()
-		return api.NewReply{}, coded(err)
+		return api.NewReply{}, nil, coded(err)
 	}
 	r.mu.Unlock()
 	config := r.baseConfig(id)
@@ -172,7 +197,8 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		if captured, warnings, err = base.Capture(ctx, config, options); err == nil {
 			key := captured.ReuseKey()
 			if b := r.retainReusable(root, key, m.Lock()); b != nil {
-				return r.publishReused(ctx, name, config.StateDir, b, captured.Stats, warnings)
+				reply, err := r.publishReused(ctx, name, config.StateDir, b, captured.Stats, warnings)
+				return reply, b, err
 			}
 			view, err = base.CreateCaptured(config, captured, fork, key)
 		}
@@ -183,14 +209,17 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 		if errors.Is(err, base.ErrTake) {
 			err = failure("invalid", "%v", err)
 		}
-		return api.NewReply{}, r.abortCreate(name, config.StateDir, err)
+		return api.NewReply{}, nil, r.abortCreate(name, config.StateDir, err)
 	}
 	b := &baseRecord{view: view, lock: m.Lock(), rules: m.Rules}
-	gs := capturedGit(view, revision)
-	if gs.repo != nil {
+	gs, err := gitSourceOf(view)
+	gs.rev = revision
+	if err == nil && gs.repo != nil {
 		err = gs.repo.PrepareObjects(r.objectsPath(id, ""))
-		if err == nil {
-			gs.modules, err = r.prepareModules(view, id)
+		for _, sub := range gs.modules {
+			if err == nil {
+				err = sub.repo.PrepareObjects(r.objectsPath(id, sub.Module))
+			}
 		}
 	}
 	if err == nil {
@@ -198,29 +227,15 @@ func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, err
 	}
 	if err != nil {
 		view.Close()
-		return api.NewReply{}, r.abortCreate(name, config.StateDir, err)
+		return api.NewReply{}, nil, r.abortCreate(name, config.StateDir, err)
 	}
 	reply, err := r.publishBase(ctx, name, id, b, gs)
 	if err != nil {
-		return api.NewReply{}, err
+		return api.NewReply{}, nil, err
 	}
 	stats := view.Capture().Stats
 	reply.Capture, reply.Warnings = &stats, append([]string{}, warnings...)
-	return reply, nil
-}
-
-// capturedGit is the private git state a checkout opened on view at revision
-// starts from: the captured repository and index copy, when there is one.
-func capturedGit(view *base.Base, revision *git.Revision) gitSource {
-	gs := gitSource{rev: revision}
-	if gs.repo = view.Domains().Repo(""); gs.repo != nil {
-		for _, rr := range view.Capture().Repos {
-			if rr.Path == "" {
-				gs.index = rr.Index
-			}
-		}
-	}
-	return gs
+	return reply, b, nil
 }
 
 // retainReusable retains and returns a base that an ordinary capture of root
@@ -256,7 +271,11 @@ func (r *Registry) publishReused(ctx context.Context, name, stateDir string, b *
 	if err := os.RemoveAll(stateDir); err != nil {
 		return api.NewReply{}, r.abortCreate(name, stateDir, err)
 	}
-	reply, err := r.publishBase(ctx, name, b.view.Meta().ID, b, capturedGit(b.view, nil))
+	gs, err := gitSourceOf(b.view)
+	if err != nil {
+		return api.NewReply{}, r.abortCreate(name, stateDir, err)
+	}
+	reply, err := r.publishBase(ctx, name, b.view.Meta().ID, b, gs)
 	if err != nil {
 		return api.NewReply{}, err
 	}
@@ -264,21 +283,29 @@ func (r *Registry) publishReused(ctx context.Context, name, stateDir string, b *
 	return reply, nil
 }
 
-// prepareModules creates the shared object directories of a new base's absorbed
-// submodules and returns what their private git directories are built from.
-func (r *Registry) prepareModules(view *base.Base, id string) ([]gitModule, error) {
-	var modules []gitModule
+// gitSourceOf says how checkouts on view get their private git directories: from
+// the captured repository and index, with one below for each absorbed submodule.
+// A capture of no repository gives none.
+func gitSourceOf(view *base.Base) (gitSource, error) {
+	var gs gitSource
+	repo := view.Domains().Repo("")
+	if repo == nil {
+		return gs, nil
+	}
+	gs.repo = repo
+	for _, rr := range view.Capture().Repos {
+		if rr.Path == "" {
+			gs.index = rr.Index
+		}
+	}
 	for _, sub := range submodules(view) {
 		repo := view.Domains().Repo(sub.Path)
 		if repo == nil {
-			return nil, fmt.Errorf("submodule %s: repository unavailable", sub.Path)
+			return gs, fmt.Errorf("submodule %s: repository unavailable", sub.Path)
 		}
-		if err := repo.PrepareObjects(r.objectsPath(id, sub.Module)); err != nil {
-			return nil, err
-		}
-		modules = append(modules, gitModule{repo: repo, Repo: sub})
+		gs.modules = append(gs.modules, gitModule{repo: repo, Repo: sub})
 	}
-	return modules, nil
+	return gs, nil
 }
 
 // submodules lists the absorbed submodules of a base's capture, parents first;
@@ -462,31 +489,51 @@ func sanitizeName(hint string) string {
 	return name
 }
 
-// installCheckoutLocked creates the upper and private git directory before publication.
+// installCheckoutLocked creates the upper and private git directory and registers
+// the checkout before publication.
 func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *baseRecord, stack []string, parent *string, gs gitSource) (*checkoutRecord, error) {
 	layers, err := r.layerStackLocked(stack, b.view.Meta().ID)
 	if err != nil {
 		return nil, err
 	}
-	upper := r.upperPath(name)
-	if err = os.MkdirAll(upper, 0o755); err != nil {
+	h, err := r.prepareCheckout(name, name, b, layers, stack, parent, gs, r.lineageCheckoutsLocked(deref(parent)))
+	if err != nil {
+		return nil, err
+	}
+	r.checkouts[name] = h
+	r.retainLocked(b, stack)
+	return h, nil
+}
+
+// prepareCheckout creates the upper and private git directory of checkout name
+// below uppers/dir and git/dir, and opens its overlay on b and layers (stack's),
+// without registering it. It reads registry state only for gitfiles the layers
+// carry (installGitfiles), so with an empty stack it runs without r.mu while the
+// name is reserved; owners are lineageCheckoutsLocked's for parent. An empty name
+// prepares a checkout to be named later (see markPrepared): its git directory is
+// not marked yet.
+func (r *Registry) prepareCheckout(name, dir string, b *baseRecord, layers []*overlay.Layer, stack []string, parent *string, gs gitSource, owners map[string]bool) (*checkoutRecord, error) {
+	upper := r.upperPath(dir)
+	if err := os.MkdirAll(upper, 0o755); err != nil {
 		return nil, err
 	}
 	hasGit := gs.repo != nil || gs.ready != ""
 	if hasGit {
-		gitdir := r.gitdirPath(name)
-		if err = os.RemoveAll(gitdir); err != nil {
-			return nil, err
-		}
-		if gs.repo != nil {
-			err = r.makeGitdirs(ctx, gitdir, b.view.Meta().ID, gs)
-		} else {
+		gitdir := r.gitdirPath(dir)
+		err := os.RemoveAll(gitdir)
+		switch {
+		case err != nil:
+		case gs.template != "":
+			err = git.CopyGitdir(gs.template, gitdir, r.objectsPath(b.view.Meta().ID, ""))
+		case gs.repo != nil:
+			err = r.makeGitdirs(gitdir, b.view.Meta().ID, gs)
+		default:
 			err = os.Rename(gs.ready, gitdir)
 		}
 		if err == nil && gs.rev != nil {
 			err = gs.rev.SetHEAD(gitdir)
 		}
-		if err == nil {
+		if err == nil && name != "" {
 			err = markGitdirs(gitdir, name, b.view)
 		}
 		if err == nil {
@@ -502,14 +549,16 @@ func (r *Registry) installCheckoutLocked(ctx context.Context, name string, b *ba
 	}
 	var copied map[string]copiedDir
 	if hasGit {
-		if copied, err = r.installGitfiles(fs, name, b.view, r.lineageCheckoutsLocked(deref(parent))); err != nil {
+		if copied, err = r.installGitfiles(fs, name, dir, b.view, owners); err != nil {
 			return nil, err
 		}
 	}
-	h := &checkoutRecord{meta: checkoutMeta{Name: name, Base: b.view.Meta().ID, Parent: copyString(parent), Git: hasGit, Created: time.Now().UTC(), Copied: copied}, base: b, stack: append([]string{}, stack...), upper: upper, fs: fs}
+	meta := checkoutMeta{Name: name, Base: b.view.Meta().ID, Parent: copyString(parent), Git: hasGit, Created: time.Now().UTC(), Copied: copied}
+	if dir != name {
+		meta.Dir = dir
+	}
+	h := &checkoutRecord{meta: meta, base: b, stack: append([]string{}, stack...), upper: upper, fs: fs}
 	h.generation.Store(1)
-	r.checkouts[name] = h
-	r.retainLocked(b, stack)
 	return h, nil
 }
 
@@ -519,8 +568,8 @@ func writeGitfile(upper, gitdir string) error { return git.WriteGitfile(upper, g
 // makeGitdirs builds a new checkout's private git directory and, below it where git
 // looks for them, one for each absorbed submodule, all from the repositories' state
 // at capture and each borrowing its repository's objects through the base.
-func (r *Registry) makeGitdirs(ctx context.Context, gitdir, baseID string, gs gitSource) error {
-	if err := gs.repo.MakeGitdir(ctx, gitdir, r.objectsPath(baseID, ""), gs.index); err != nil {
+func (r *Registry) makeGitdirs(gitdir, baseID string, gs gitSource) error {
+	if err := gs.repo.MakeGitdir(gitdir, r.objectsPath(baseID, ""), gs.index); err != nil {
 		return err
 	}
 	for _, m := range gs.modules {
@@ -528,7 +577,7 @@ func (r *Registry) makeGitdirs(ctx context.Context, gitdir, baseID string, gs gi
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return err
 		}
-		if err := m.repo.MakeGitdir(ctx, dir, r.objectsPath(baseID, m.Module), m.Index); err != nil {
+		if err := m.repo.MakeGitdir(dir, r.objectsPath(baseID, m.Module), m.Index); err != nil {
 			return err
 		}
 	}
@@ -551,18 +600,19 @@ func markGitdirs(gitdir, name string, view *base.Base) error {
 }
 
 // installGitfiles points a new checkout's submodules at their private git
-// directories below its own, as the root's .git points at that directory, and
-// returns the directories it copied up to hold the gitfiles (copiedDir). A
-// gitfile inherited from the snapshot's layers keeps its place (a moved submodule
-// stays moved, a deinitialized one stays without .git) and only changes its target
-// when that lies below the private git directory of a checkout in the snapshot's
-// lineage (owners), whose git state this checkout's was copied from: it moves to
-// the same place in this one's. An absorbed submodule of the capture that no layer
-// touched gets the gitfile it had when its checkout was opened, which was
-// infrastructure and never frozen into a layer (see upperEmpty). Writes go
-// through fsys, which copies directories up with their metadata.
-func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Base, owners map[string]bool) (map[string]copiedDir, error) {
-	gitdir := r.gitdirPath(name)
+// directories below its own (git/dir), as the root's .git points at that
+// directory, and returns the directories it copied up to hold the gitfiles
+// (copiedDir). A gitfile inherited from the snapshot's layers keeps its place (a
+// moved submodule stays moved, a deinitialized one stays without .git) and only
+// changes its target when that lies below the private git directory of a checkout
+// in the snapshot's lineage (owners, by checkoutMeta.dir), whose git state this
+// checkout's was copied from: it moves to the same place in this one's. An
+// absorbed submodule of the capture that no layer touched gets the gitfile it had
+// when its checkout was opened, which was infrastructure and never frozen into a
+// layer (see upperEmpty). Writes go through fsys, which copies directories up
+// with their metadata.
+func (r *Registry) installGitfiles(fsys *overlay.FS, name, dir string, view *base.Base, owners map[string]bool) (map[string]copiedDir, error) {
+	gitdir := r.gitdirPath(dir)
 	subs := submodules(view)
 	if len(subs) == 0 && !exists(filepath.Join(gitdir, "modules")) {
 		return nil, nil
@@ -591,7 +641,7 @@ func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Bas
 			target = filepath.Join(mount, filepath.FromSlash(path.Dir(p)), target)
 		}
 		owner, rest, ok := r.gitdirOwner(target)
-		if !ok || owner == name || !owners[owner] || rest == "" {
+		if !ok || owner == dir || !owners[owner] || rest == "" {
 			continue
 		}
 		if err := writeGitfileAt(fsys, p, filepath.Join(gitdir, rest)); err != nil {
@@ -647,24 +697,24 @@ func (r *Registry) installGitfiles(fsys *overlay.FS, name string, view *base.Bas
 	return copied, nil
 }
 
-// lineageCheckoutsLocked names the checkouts whose snapshots make up snapshot
-// id's lineage, the snapshot's own included: a checkout from it inherits their
-// layers and a copy of their git state.
+// lineageCheckoutsLocked names, by checkoutMeta.dir, the checkouts whose snapshots
+// make up snapshot id's lineage, the snapshot's own included: a checkout from it
+// inherits their layers and a copy of their git state.
 func (r *Registry) lineageCheckoutsLocked(id string) map[string]bool {
-	names := map[string]bool{}
+	dirs := map[string]bool{}
 	for id != "" {
 		s := r.lineage[id]
 		if s == nil {
 			break
 		}
-		names[s.meta.Checkout] = true
+		dirs[s.meta.dir()] = true
 		id = s.stackParent
 	}
-	return names
+	return dirs
 }
 
-// gitdirOwner reports which checkout's private git directory holds target, and
-// target's path inside it ("" for the directory itself); ok is false for a target
+// gitdirOwner reports, by checkoutMeta.dir, which checkout's private git directory
+// holds target, and target's path inside it ("" for the directory itself); ok is false for a target
 // outside every one. Paths are compared as spelled, never resolved, so a target
 // inside the mount is not looked up through it.
 func (r *Registry) gitdirOwner(target string) (owner, rest string, ok bool) {
@@ -887,7 +937,7 @@ func (r *Registry) upperEmpty(h *checkoutRecord) (bool, error) {
 	}
 	own := ""
 	if h.meta.Git {
-		own = r.gitdirPath(h.meta.Name)
+		own = r.gitdirPath(h.meta.dir())
 	}
 	empty, _, err := infraOnly(h.fs, h.upper, "", own, h.meta.Copied)
 	return empty, err
@@ -1010,11 +1060,11 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 		stack = append([]string{layerID}, stack...)
 	}
 	stackParent := deref(parent)
-	s := &snapRecord{meta: snapMeta{ID: id, Checkout: h.meta.Name, Parent: copyString(parent), Label: label, Created: time.Now().UTC()}, base: h.base, stack: stack, layer: layerID, stackParent: stackParent, git: gitTree, done: make(chan struct{})}
+	s := &snapRecord{meta: snapMeta{ID: id, Checkout: h.meta.Name, Dir: h.meta.Dir, Parent: copyString(parent), Label: label, Created: time.Now().UTC()}, base: h.base, stack: stack, layer: layerID, stackParent: stackParent, git: gitTree, done: make(chan struct{})}
 	r.snapshots[id] = s
 	r.lineage[id] = s
 	if layerID != "" {
-		r.intents[h.meta.Name] = diskIntent{Op: "freezing", Checkout: h.meta.Name, Layer: layerID, Snapshot: id}
+		r.intents[h.meta.Name] = diskIntent{Op: "freezing", Checkout: h.meta.Name, Dir: h.meta.Dir, Layer: layerID, Snapshot: id}
 		if err = r.persistIntentLocked(); err != nil {
 			delete(r.snapshots, id)
 			delete(r.lineage, id)
@@ -1088,7 +1138,7 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 			return rollback(err)
 		}
 		if h.meta.Git {
-			if err = writeGitfile(h.upper, r.gitdirPath(h.meta.Name)); err != nil {
+			if err = writeGitfile(h.upper, r.gitdirPath(h.meta.dir())); err != nil {
 				return rollback(err)
 			}
 		}
@@ -1116,7 +1166,11 @@ func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label st
 	return s, nil
 }
 
-// Rm retires handles while frozen and deletes writable state; snapshots stay until dropped.
+// Rm retires handles while frozen and deletes writable state; snapshots stay until
+// dropped. The removal is published before the checkout's files go, outside the
+// registry lock and with a state write shared with concurrent operations; a crash
+// in between leaves files no checkout names, which reopening removes. The name
+// stays reserved until they are gone.
 func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -1132,36 +1186,37 @@ func (r *Registry) Rm(ctx context.Context, args api.RmArgs) error {
 		r.mu.Unlock()
 		return failure("not_found", "no checkout %s", name)
 	}
+	r.operations.Add(1)
+	defer r.operations.Done()
 	h.freeze.Lock()
-	r.intents[name] = diskIntent{Op: "removing", Checkout: name, Layer: h.meta.Base}
-	if err := r.persistIntentLocked(); err != nil {
-		delete(r.intents, name)
-		h.freeze.Unlock()
-		r.mu.Unlock()
-		return coded(err)
-	}
+	defer h.freeze.Unlock()
 	h.retired.Store(true)
 	if r.config.Retire != nil {
 		r.config.Retire(name)
 	}
 	h.fs.Discard()
 	h.fs.CloseFiles()
-	if err := errors.Join(os.RemoveAll(r.gitdirPath(name)), os.RemoveAll(h.upper)); err != nil {
-		h.freeze.Unlock()
-		r.mu.Unlock()
-		return coded(err)
-	}
 	delete(r.checkouts, name)
-	delete(r.intents, name)
+	r.reserved[name] = true
 	r.releaseLocked(h.base, h.stack)
 	r.moveRootLocked()
-	err := r.persistLocked()
-	if err != nil {
-		r.intents[name] = diskIntent{Op: "removing", Checkout: name, Layer: h.meta.Base}
-	}
-	h.freeze.Unlock()
+	seq := r.requestCommitLocked()
 	r.mu.Unlock()
+	err := r.commitState(seq)
 	if err != nil {
+		// The state on disk still names the checkout: record its removal for the
+		// next commit, or for recovery at reopen should none succeed.
+		r.mu.Lock()
+		r.intents[name] = diskIntent{Op: "removing", Checkout: name, Dir: h.meta.Dir, Layer: h.meta.Base}
+		r.mu.Unlock()
+	}
+	removeErr := errors.Join(os.RemoveAll(r.gitdirPath(h.meta.dir())), os.RemoveAll(h.upper))
+	r.mu.Lock()
+	if removeErr == nil {
+		delete(r.reserved, name)
+	}
+	r.mu.Unlock()
+	if err = errors.Join(err, removeErr); err != nil {
 		return coded(err)
 	}
 	r.emit(Event{Name: "removed", Payload: map[string]any{"name": name}})

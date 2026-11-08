@@ -11,6 +11,11 @@ import "time"
 // Ops lists every operation the daemon serves, in CLI help order.
 var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "drop", "explain", "plan", "attach", "pull", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
 
+// Features names optional request fields this daemon honors, so clients can rely on
+// them without a new protocol generation: "new.base" (NewArgs.Base) and
+// "diff.binary" (DiffArgs.Binary).
+var Features = []string{"new.base", "diff.binary"}
+
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
 	Name    string    `json:"name"`
@@ -70,11 +75,14 @@ type LsReply struct {
 	Snapshots []Snapshot `json:"snapshots"`
 }
 
-// NewArgs opens a checkout from a folder (any folder, repo or not) or from a snapshot.
+// NewArgs opens a checkout from a folder (any folder, repo or not), from a snapshot,
+// or on an existing capture (Checkout.Base) as it was taken: its files and the git
+// state checkouts opened on it started from, whatever the folder holds now.
 type NewArgs struct {
-	Dir      string   `json:"dir,omitempty"`      // absolute; exactly one of Dir and Snapshot
+	Dir      string   `json:"dir,omitempty"`      // absolute; exactly one of Dir, Snapshot and Base
 	Snapshot string   `json:"snapshot,omitempty"` // snapshot id
-	Rev      string   `json:"rev,omitempty"`      // commit or local branch; incompatible with Snapshot
+	Base     string   `json:"base,omitempty"`     // capture id; a capture of a linked work tree may keep no git state to start from
+	Rev      string   `json:"rev,omitempty"`      // commit or local branch; folder only
 	Take     []string `json:"take,omitempty"`     // "SRC:PATH" overrides of the starting tree; SRC is "." (folder), "" (index) or a revision
 	Name     string   `json:"name,omitempty"`     // default: derived from the folder name
 	Rules    []string `json:"rules,omitempty"`    // extra rule lines, highest precedence
@@ -94,7 +102,8 @@ type Capture struct {
 	Seconds     float64  `json:"seconds"`
 }
 
-// NewReply returns the created checkout.
+// NewReply returns the created checkout. Capture describes the capture it sits
+// on, which a create of an unchanged folder reuses from an earlier one.
 type NewReply struct {
 	Checkout Checkout `json:"checkout"`
 	Capture  *Capture `json:"capture,omitempty"` // nil when opened from a snapshot
@@ -127,10 +136,15 @@ type SnapReply struct {
 }
 
 // DiffArgs compares a checkout's current state with a snapshot (default: its base).
+// Binary makes Patch the patch git diff --binary writes, which git apply takes
+// whole: git headers, full blob ids, modes and binary content, each side as git's
+// end-of-line conversion stores it; a path under a filter, ident or encoding is
+// refused with code "unsupported".
 type DiffArgs struct {
 	Checkout string `json:"checkout"`
 	From     string `json:"from,omitempty"` // snapshot id; default: the checkout's base capture
 	Patch    bool   `json:"patch,omitempty"`
+	Binary   bool   `json:"binary,omitempty"`
 }
 
 // Change is one source-class path that differs; Status is A, M, D or T (type change).
@@ -139,11 +153,13 @@ type Change struct {
 	Status string `json:"status"`
 }
 
-// DiffReply lists changed source paths; Patch is a unified diff when requested.
+// DiffReply lists changed source paths; Patch is a unified diff when requested,
+// a git patch when Binary says so (a daemon that knows DiffArgs.Binary sets it).
 type DiffReply struct {
 	From    string   `json:"from"` // snapshot id or "base"
 	Changes []Change `json:"changes"`
 	Patch   string   `json:"patch,omitempty"`
+	Binary  bool     `json:"binary,omitempty"`
 }
 
 // ApplyArgs merges a checkout's source changes back into the folder it came from.

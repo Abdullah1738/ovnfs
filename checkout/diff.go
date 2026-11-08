@@ -108,8 +108,20 @@ func (r *Registry) Diff(ctx context.Context, args api.DiffArgs) (api.DiffReply, 
 	if reply.From == "" {
 		reply.From = "base"
 	}
-	if args.Patch {
+	if args.Patch || args.Binary {
+		var eol *eolConverter
+		if args.Binary {
+			paths := make([]string, len(reply.Changes))
+			for i, c := range reply.Changes {
+				paths[i] = c.Path
+			}
+			if eol, err = newEOLConverter(ctx, h.base.view, paths); err != nil {
+				return api.DiffReply{}, coded(err)
+			}
+			defer eol.Close()
+		}
 		var patch strings.Builder
+		kept := reply.Changes[:0:0]
 		for _, c := range reply.Changes {
 			old, err := r.content(h, c.Path, from[c.Path], nil)
 			if err != nil {
@@ -119,9 +131,28 @@ func (r *Registry) Diff(ctx context.Context, args api.DiffArgs) (api.DiffReply, 
 			if err != nil {
 				return api.DiffReply{}, coded(err)
 			}
-			unified(&patch, c.Path, old, cur)
+			if !args.Binary {
+				unified(&patch, c.Path, old, cur)
+				kept = append(kept, c)
+				continue
+			}
+			// A git patch shows what git stores: a change of line endings that git
+			// normalizes away is no change.
+			a, old, err := eol.blob(c.Path, from[c.Path], old)
+			if err != nil {
+				return api.DiffReply{}, coded(err)
+			}
+			b, cur, err := eol.blob(c.Path, now.files[c.Path], cur)
+			if err != nil {
+				return api.DiffReply{}, coded(err)
+			}
+			if a == b {
+				continue
+			}
+			gitPatch(&patch, c.Path, a, b, old, cur)
+			kept = append(kept, c)
 		}
-		reply.Patch = patch.String()
+		reply.Changes, reply.Patch, reply.Binary = kept, patch.String(), args.Binary
 	}
 	return reply, nil
 }
@@ -184,8 +215,6 @@ func unified(w *strings.Builder, p string, old, cur []byte) {
 		fmt.Fprintf(w, "Binary files a/%s and b/%s differ\n", p, p)
 		return
 	}
-	a, b := splitLines(old), splitLines(cur)
-	script := lineDiff(a, b)
 	labelA, labelB := "a/"+p, "b/"+p
 	if old == nil {
 		labelA = "/dev/null"
@@ -193,38 +222,7 @@ func unified(w *strings.Builder, p string, old, cur []byte) {
 	if cur == nil {
 		labelB = "/dev/null"
 	}
-	header := false
-	for i := 0; i < len(script); {
-		if script[i] == opEqual {
-			i++
-			continue
-		}
-		// A hunk spans changes separated by at most 2*diffContext equal lines,
-		// padded with diffContext equal lines on either side.
-		start := max(0, i-diffContext)
-		end := i
-		for end < len(script) {
-			if script[end] != opEqual {
-				end++
-				continue
-			}
-			run := end
-			for run < len(script) && script[run] == opEqual {
-				run++
-			}
-			if run == len(script) || run-end > 2*diffContext {
-				end = min(run, end+diffContext)
-				break
-			}
-			end = run
-		}
-		if !header {
-			fmt.Fprintf(w, "--- %s\n+++ %s\n", labelA, labelB)
-			header = true
-		}
-		writeHunk(w, script, start, end, a, b)
-		i = end
-	}
+	unifiedHunks(w, labelA, labelB, old, cur)
 }
 
 // diffContext is the number of unchanged lines around each change, as diff -u.
@@ -483,7 +481,7 @@ func (r *Registry) Apply(ctx context.Context, args api.ApplyArgs) (reply api.App
 		if !h.meta.Git || repo == nil {
 			return api.ApplyReply{}, failure("invalid", "checkout %s has no git directory; --branch needs a repository source", h.meta.Name)
 		}
-		commit, updated, err := repo.FetchBranch(ctx, r.gitdirPath(h.meta.Name), args.Branch, args.DryRun)
+		commit, updated, err := repo.FetchBranch(ctx, r.gitdirPath(h.meta.dir()), args.Branch, args.DryRun)
 		if errors.Is(err, git.ErrBranchConflict) {
 			return api.ApplyReply{}, failure("conflict", "%s", err)
 		}

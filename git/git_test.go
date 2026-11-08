@@ -121,7 +121,7 @@ func TestGitdir(t *testing.T) {
 	if err := r.PrepareObjects(objects); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.MakeGitdir(ctx, gitdir, objects, filepath.Join(r.GitDir, "index")); err != nil {
+	if err := r.MakeGitdir(gitdir, objects, filepath.Join(r.GitDir, "index")); err != nil {
 		t.Fatal(err)
 	}
 	// The checkout holds the user's working file with its mtime, as pins do.

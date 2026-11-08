@@ -18,7 +18,7 @@ func branchCheckout(t *testing.T, r *Repo) (string, string) {
 	if err := r.PrepareObjects(objects); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.MakeGitdir(context.Background(), gitdir, objects, r.IndexPath()); err != nil {
+	if err := r.MakeGitdir(gitdir, objects, r.IndexPath()); err != nil {
 		t.Fatal(err)
 	}
 	for path := range strings.SplitSeq(testGit(t, r.Top, "ls-files"), "\n") {

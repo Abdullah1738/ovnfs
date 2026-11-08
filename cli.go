@@ -47,7 +47,7 @@ func commands() []command {
 		{"run", "[DIR] [--rev REV] [--take SRC:PATH]... [--keep] [--on HOST] -- CMD...", "run a command in a disposable checkout (also --name, --rule, --remote-bin)", true, runRun},
 		{"fork", "CHECKOUT [--name N] [-m LABEL]", "snapshot a checkout and open a second checkout on it", true, runFork},
 		{"snap", "CHECKOUT [-m LABEL] [--wait]", "freeze a checkout's changes into a snapshot", true, runSnap},
-		{"diff", "CHECKOUT [SNAP] [-p|--patch]", "list source changes since a snapshot (default: the base)", true, runDiff},
+		{"diff", "CHECKOUT [SNAP] [-p|--patch] [--binary]", "list source changes since a snapshot (default: the base)", true, runDiff},
 		{"grep", "PATTERN [DIR|CHECKOUT] [--glob GLOB] [-F] [-i] [-C N] [--max-count N]", "search contents in the daemon, bypassing the checkout mount", true, runGrep},
 		{"glob", "PATTERN [DIR|CHECKOUT] [--type file|dir|symlink] [--limit N] [--mtime]", "list matching paths in the daemon, bypassing the checkout mount", true, runGlob},
 		{"apply", "CHECKOUT [--dry-run] [--branch B]", "merge a checkout's source changes back into its folder", true, runApply},
@@ -212,12 +212,13 @@ func runLs(c *cli, args []string) error {
 	return nil
 }
 
-// runNew opens a checkout on a folder or a snapshot and prints its path.
+// runNew opens a checkout on a folder, a snapshot or a capture and prints its path.
 func runNew(c *cli, args []string) error {
 	fs := c.flags("new")
 	var a api.NewArgs
 	fs.StringVar(&a.Name, "name", "", "checkout name")
 	fs.StringVar(&a.Snapshot, "from", "", "open on this snapshot instead of a folder")
+	fs.StringVar(&a.Base, "base", "", "open on this capture (a checkout's base) as it was taken, instead of a folder")
 	fs.StringVar(&a.Rev, "rev", "", "start at this git commit or local branch; keep ignored files")
 	fs.Var((*stringList)(&a.Take), "take", "replace source path from working tree (.), index (empty), or revision (repeatable)")
 	fs.Var((*stringList)(&a.Rules), "rule", "extra rule line (repeatable)")
@@ -225,15 +226,18 @@ func runNew(c *cli, args []string) error {
 	if err != nil {
 		return err
 	}
-	if a.Snapshot != "" {
+	if a.Snapshot != "" && a.Base != "" {
+		return fmt.Errorf("new: give either --from SNAP or --base CAPTURE, not both")
+	}
+	if a.Snapshot != "" || a.Base != "" {
 		if a.Rev != "" {
-			return fmt.Errorf("new: --rev and --from cannot be combined")
+			return fmt.Errorf("new: --rev needs a folder")
 		}
 		if len(a.Take) != 0 {
-			return fmt.Errorf("new: --take and --from cannot be combined")
+			return fmt.Errorf("new: --take needs a folder")
 		}
 		if len(pos) != 0 {
-			return fmt.Errorf("new: give either DIR or --from SNAP, not both")
+			return fmt.Errorf("new: give either DIR, --from SNAP or --base CAPTURE")
 		}
 	} else {
 		dir := "."
@@ -324,6 +328,7 @@ func runDiff(c *cli, args []string) error {
 	var a api.DiffArgs
 	fs.BoolVar(&a.Patch, "p", false, "print a unified diff")
 	fs.BoolVar(&a.Patch, "patch", false, "print a unified diff")
+	fs.BoolVar(&a.Binary, "binary", false, "print the patch as git diff --binary does, for git apply")
 	pos, err := c.parse(fs, args, 1, 2)
 	if err != nil {
 		return err

@@ -282,7 +282,7 @@ type Conversion struct {
 // Conversion reads the repository's effective core.autocrlf and filter drivers.
 func (r *Repo) Conversion(ctx context.Context) (Conversion, error) {
 	c := Conversion{Filters: map[string]bool{}}
-	out, err := r.optional(ctx, "config", "-z", "--get-regexp", `^(core\.autocrlf|filter\..+\.(clean|smudge|process))$`)
+	out, err := r.configValue(ctx, "-z", "--get-regexp", `^(core\.autocrlf|filter\..+\.(clean|smudge|process))$`)
 	if err != nil {
 		return c, err
 	}

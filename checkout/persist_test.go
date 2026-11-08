@@ -201,7 +201,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 		if err := os.RemoveAll(filepath.Join(f.state, "layers", layer)); err != nil {
 			t.Fatal(err)
 		}
-		frozenChanges(t, upper, f.reg.gitdirPath("app"))
+		frozenChanges(t, upper, f.gitdir("app"))
 		if err := writeState(f.state, intentState(d, snapshot, layer)); err != nil {
 			t.Fatal(err)
 		}
@@ -240,7 +240,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 			if got := f.read("app", "tracked.txt"); got != "changed\n" {
 				t.Fatalf("checkout reads %q", got)
 			}
-			if got := f.read("app", ".git"); got != "gitdir: "+f.reg.gitdirPath("app")+"\n" {
+			if got := f.read("app", ".git"); got != "gitdir: "+f.gitdir("app")+"\n" {
 				t.Fatalf("recreated upper's .git = %q", got)
 			}
 			reply, err := f.reg.waitHashed(ctx, f.reg.snapshots[snapshot])
@@ -250,7 +250,7 @@ func TestFreezeCrashRecovery(t *testing.T) {
 			if _, err := f.reg.New(ctx, api.NewArgs{Snapshot: snapshot, Name: "view"}); err != nil {
 				t.Fatal(err)
 			}
-			if got := gitRun(t, dir, "--git-dir", f.reg.gitdirPath("view"), "ls-files"); got == "" {
+			if got := gitRun(t, dir, "--git-dir", f.gitdir("view"), "ls-files"); got == "" {
 				t.Fatal("view of recovered snapshot has an empty index")
 			}
 		})

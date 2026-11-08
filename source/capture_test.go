@@ -163,6 +163,46 @@ func TestCaptureReusesKnownContent(t *testing.T) {
 	}
 }
 
+// TestCaptureRemembersTrackedContent keeps a clean tracked file's index blob in
+// the stat cache, so the next capture takes it without asking git, and stores
+// the file once git stops tracking it, since only the index kept its blob in
+// the repository.
+func TestCaptureRemembersTrackedContent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	st, err := store.Open(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(t.TempDir(), "x.stat")
+	repo := t.TempDir()
+	write(t, filepath.Join(repo, "tracked.txt"), "t")
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(filepath.Join(repo, "tracked.txt"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "add", "tracked.txt")
+	runGit(t, repo, "commit", "-qm", "init")
+	time.Sleep(10 * time.Millisecond)
+	runGit(t, repo, "update-index", "--refresh")
+	first := capture(t, repo, st, cache)
+	id := first.Files["tracked.txt"].ID
+	if first.Stats.Hashed != 0 || st.Has(id) {
+		t.Fatalf("first capture hashed %d files, stored the tracked blob %v", first.Stats.Hashed, st.Has(id))
+	}
+	if got := loadStatCache(cache, st).Entries["tracked.txt"].OID; got != id {
+		t.Fatalf("stat cache holds %q for the tracked file, want %s", got, id)
+	}
+
+	runGit(t, repo, "rm", "-q", "--cached", "tracked.txt")
+	second := capture(t, repo, st, cache)
+	if second.Files["tracked.txt"].ID != id || second.Stats.Hashed != 1 || !st.Has(id) {
+		t.Fatalf("untracked file: id %s, hashed %d, stored %v; want it hashed into the store", second.Files["tracked.txt"].ID, second.Stats.Hashed, st.Has(id))
+	}
+}
+
 // TestCaptureAbsorbedSubmodules leaves the .git of a submodule absorbed into the
 // root, and of one absorbed into it, to private git directories placed as git
 // nests them, while a nested repository with its own .git directory stays local.

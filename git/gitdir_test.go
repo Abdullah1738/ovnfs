@@ -1,7 +1,6 @@
 package git
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,7 +147,7 @@ func TestUnsetModuleWorktrees(t *testing.T) {
 			}
 		}
 	}
-	if err := UnsetModuleWorktrees(context.Background(), gitdir); err != nil {
+	if err := UnsetModuleWorktrees(gitdir); err != nil {
 		t.Fatal(err)
 	}
 	for dir, want := range map[string]bool{"": true, "modules/vendor/sub": false, "modules/vendor/sub/modules/lib/inner": false, "modules/dep.lock": false} {
@@ -158,6 +157,66 @@ func TestUnsetModuleWorktrees(t *testing.T) {
 		}
 		if got := strings.Contains(string(data), "worktree"); got != want {
 			t.Errorf("%q: core.worktree kept = %v, want %v", dir, got, want)
+		}
+	}
+}
+
+// TestMakeGitdirConfig gives a private git directory the repository's config with
+// the checkout's core settings, as git config would have written them: every
+// earlier value replaced, core.worktree gone, everything else kept.
+func TestMakeGitdirConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	r := testRepo(t)
+	source := "[core] worktree = /elsewhere\n" +
+		"\trepositoryformatversion = 0\n" +
+		"\tBare = true\n" +
+		"\tcheckstat = default\n" +
+		"\tfsmonitor = tr\\\nue\n" +
+		"[core \"sub\"]\n\tbare = true\n" +
+		"[user]\n\tname = me\n" +
+		"[core]\n\tuntrackedCache = true\n\ttrustctime = true\n\tautocrlf = input\n"
+	if err := os.WriteFile(filepath.Join(r.CommonDir, "config"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitdir := filepath.Join(t.TempDir(), "git")
+	objects := filepath.Join(t.TempDir(), "objects")
+	if err := r.PrepareObjects(objects); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MakeGitdir(gitdir, objects, r.IndexPath()); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(gitdir, "config")
+	out, err := exec.Command("git", "config", "--file", file, "--list").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config --list: %v\n%s", err, out)
+	}
+	got := map[string][]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		key, value, _ := strings.Cut(line, "=")
+		got[key] = append(got[key], value)
+	}
+	want := map[string][]string{
+		"core.repositoryformatversion": {"0"},
+		"core.bare":                    {"false"},
+		"core.checkstat":               {"minimal"},
+		"core.trustctime":              {"false"},
+		"core.untrackedcache":          {"false"},
+		"core.fsmonitor":               {"false"},
+		"core.autocrlf":                {"input"},
+		"core.sub.bare":                {"true"},
+		"user.name":                    {"me"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("config = %v, want %v", got, want)
+	}
+	for key, values := range want {
+		if strings.Join(got[key], ",") != strings.Join(values, ",") {
+			t.Errorf("%s = %v, want %v", key, got[key], values)
 		}
 	}
 }

@@ -10,7 +10,9 @@ share one) and prints its status, whose `socket` is the admin socket.
 On it, frames are JSON objects behind a little-endian u32 length:
 
 1. the client sends `{"hello": {"client": "…"}}`;
-2. the daemon replies `{"welcome": {"version": 5, "ops": […], …}}`;
+2. the daemon replies `{"welcome": {"version": 5, "ops": […], "features": […], …}}`,
+   where `features` names optional request fields it honors (`api.Features`:
+   `new.base`, `diff.binary`);
 3. each request is `{"id": N, "<op>": {args}}`, answered by
    `{"id": N, "ok": reply}` or `{"id": N, "error": {"code", "message"}}`.
 
@@ -50,7 +52,12 @@ result count, file filters or reported line width.
 When omp finds the ovnfs binary, it tells its agents to open ovnfs checkouts
 instead of git worktrees or copies, and uses this protocol to give
 each isolated subagent its own checkout (`new` when it starts, `rm` when its
-changes are merged back). Its `grep` and `glob` tools learn the daemon's mount
+changes are merged back). The checkout's capture is the state the subagent
+started from, so omp takes no baseline of it: the subagent's patch is
+`diff {binary}`, and a branch commit reads its baseline from a second checkout
+on the same capture (`new {base}`). A capture holding nested repositories or
+submodules, or a daemon without those features, gets omp's own baseline
+instead. Its `grep` and `glob` tools learn the daemon's mount
 and admin socket from `ovnfs --json status` (nothing is read from the mount)
 and send `grep`/`glob` to the daemon for search paths below that mount,
 falling back to reading through the mount when it refuses.
@@ -70,10 +77,10 @@ refused.
 
 | path under state | holds |
 | --- | --- |
-| `bases/<id>/` | a capture (`capture.bin`: compressed binary per-file stat data; bases from older builds keep `capture.json`), its lock, index copies and the git objects its checkouts commit |
+| `bases/<id>/` | a capture (`capture.bin`: compressed binary per-file stat data; bases from older builds keep `capture.json`), its lock, index copies, the git objects its checkouts commit, and `git-template/`, the private git directory its prepared checkouts copy |
 | `layers/` | frozen uppers until hashed, then only their non-source files and, above 1 KiB, the layer's compressed manifest; smaller manifests live in `state.json`, so such a stored-only layer needs no file or directory |
-| `uppers/` | each checkout's writable copy-on-write layer |
-| `git/` | private git directories; a snapshot keeps its checkout's as a store tree, so an unchanged index costs nothing per snapshot |
+| `uppers/` | each checkout's writable copy-on-write layer, named after the checkout, or `_p<id>` for one prepared before it had a name |
+| `git/` | private git directories, named like the uppers; a snapshot keeps its checkout's as a store tree, so an unchanged index costs nothing per snapshot |
 | `store/` | git-format objects in append-only `packs/<n>.pack` (a full pack also gets `<n>.idx`); large blobs use content-defined chunks, or plain files under `objects/` when reflinks work |
 | `sources/` | each source folder's stat cache: which files still match the blob ids of its last capture's tree |
 | `nodes.log` | stable node ids (NFS handles, inode numbers); survive restarts and follow renames. A file's id is derived from its directory and name, so reading a tree logs only its directories; moved files and the rare name-hash collision are logged too. Ids stay below 2^53 so JavaScript runtimes see exact inode numbers |
@@ -142,6 +149,40 @@ renames (ext4's defaults do). Store objects are synced only when a full pack is
 sealed or a pack is rewritten. `snap --wait` waits for hashing, not an object
 durability barrier: a kernel crash or power loss can lose active-pack appends
 even when snapshot metadata was synced.
+
+## Fast creates
+
+A folder create needs the folder as it is when the create arrives. The daemon
+keeps the latest capture of each folder it created checkouts of and watches the
+folder; a create first waits until every change made before it was reported
+(`watch.Watcher.Sync`), then reuses that capture unless a change since it began
+can alter it. Edits below cache, local or hidden roots, and git's object, log and
+lock files, cannot. Creates that arrive while a capture runs share it: the
+capture is a base no checkout is on yet, and once it is the folder's capture
+every waiting create opens on it.
+
+A capture of an unchanged file reads no content and asks git nothing: the
+folder's stat cache (`sources/`) holds each file's blob id, including tracked
+files a capture found to hold their index blob unconverted, whose blob the
+repository keeps while its index still names it. git's content checks
+(`check-attr`, `cat-file`) start only for a tracked file the cache does not
+know. Answers about where a repository lives, what HEAD names and what
+its configuration says are remembered with those files' states
+(`git/memo.go`). The walk classifies a directory's entries, then lists the
+source directories among them on eight readers while it descends; directories
+it leaves alone are never listed, since listing one can update its access time,
+which the watcher reports as an edit.
+
+Checkouts on such a capture are prepared ahead of time, as many as the largest
+burst of creates seen (at least 8, at most 256): upper, private git directory
+copied from the capture's `git-template/`, and overlay, below directories named
+`_p<id>`. A create names one, which writes only its git directory's
+`ovnfs.checkout` marker, and publishes it with a state write shared with
+concurrent creates. When only work-tree files changed, the prepared checkouts
+move onto the new capture, whose `git-template/` is written after the creates
+waiting on it have their checkouts; a change below `.git` discards them.
+Prepared checkouts are in no state: a restart removes them, and an unused
+capture is released after 15 minutes.
 
 ## Memory tiers
 

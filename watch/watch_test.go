@@ -155,6 +155,48 @@ func TestReportsChangesUnderAddSpelling(t *testing.T) {
 	}
 }
 
+// TestSyncReportsEarlierChanges finds every change made before Sync already
+// reported when it returns, with no waiting: new files, rewritten files, and a
+// file written through a handle once the handle closed (Windows reports such
+// writes only then).
+func TestSyncReportsEarlierChanges(t *testing.T) {
+	var r recorder
+	w := start(t, r.fn)
+	dir := tempDir(t)
+	add(t, w, dir)
+	kept := filepath.Join(dir, "kept")
+	write(t, kept, "0")
+	for i := range 100 {
+		if err := w.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		r.reset()
+		fresh := filepath.Join(dir, "new"+strconv.Itoa(i))
+		write(t, fresh, "x")
+		write(t, kept, strings.Repeat("y", i+2))
+		open, err := os.OpenFile(filepath.Join(dir, "open"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = open.Write([]byte("z"))
+		if closeErr := open.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		got := r.snapshot()
+		for _, p := range []string{fresh, kept, open.Name()} {
+			if !slices.Contains(got, p) {
+				t.Fatalf("round %d: %s not reported by Sync; got %q", i, p, got)
+			}
+		}
+	}
+}
+
 func TestReportsUnderCaseInsensitiveSpelling(t *testing.T) {
 	var r recorder
 	w := start(t, r.fn)

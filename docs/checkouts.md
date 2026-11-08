@@ -15,7 +15,12 @@ branch name instead. Unrelated staged work stays staged. `--dry-run` previews
 this checked-out-branch update without writing.
 
 On a 49k-file repository, opening a checkout takes about a second and
-`git status` inside it under three.
+`git status` inside it under three. Later creates of the same folder reuse that
+capture while the folder has not changed in a way a checkout shows, and take a
+checkout prepared ahead of time: on a 3,000-file repository on Windows, a create
+returns in about 15 ms, and after a source edit the folder is captured again in
+about 50 ms, once for all the creates waiting on it (see
+[internals](internals.md#fast-creates)).
 
 Repeated ordinary `new` calls share a captured base when the folder's fresh
 stat-backed capture, rules and git metadata still match. Each checkout still
@@ -103,9 +108,12 @@ content-defined chunks. Copy-up and hashing still process the whole changed
 file. The metadata of a small snapshot (about 15 changed files) lives in the
 registry state instead of a manifest file of its own. `fork`
 snapshots a checkout and opens a second one on that snapshot; parent and child
-diverge. `new --from SNAP` opens a checkout on any snapshot. `rm` removes a
-checkout and keeps its snapshots; `drop` releases one. Nothing replaces the
-content of a live folder: rollback means a new checkout from a snapshot.
+diverge. `new --from SNAP` opens a checkout on any snapshot, and
+`new --base CAPTURE` on a live checkout's base (`ls --json` shows it) as it was
+captured, with the git state that checkout started from, however the folder and
+the checkout have changed since. `rm` removes a checkout and keeps its
+snapshots; `drop` releases one. Nothing replaces the content of a live folder:
+rollback means a new checkout from a snapshot.
 
 `new` (and `run`) on a checkout's own folder forks that checkout: capturing it
 would make the daemon serve the new checkout by reading through its own mount,
@@ -176,7 +184,13 @@ result limits, narrower patterns or grep's column limit to reduce the reply.
 ## Diff and apply
 
 `diff CHECKOUT [SNAP] [-p]` compares the checkout now with its base capture (or
-a snapshot). `apply CHECKOUT` snapshots the checkout and merges each changed
+a snapshot); `--binary` prints the patch as `git diff --binary` does, with git
+headers, full blob ids, modes and binary content, so `git apply` takes it whole,
+also with `--cached`. Like git, it shows each side as git would store it: under
+`core.autocrlf` or `text`/`eol` attributes, CRLF text becomes LF, and a change of
+line endings only is no change. A changed path git would store through a filter
+driver, `ident` or a `working-tree-encoding` is refused (code `unsupported`).
+`apply CHECKOUT` snapshots the checkout and merges each changed
 source path into the folder against the base: a path the user left alone takes
 the checkout's version, and a text file changed on both sides is merged with
 `git merge-file`.

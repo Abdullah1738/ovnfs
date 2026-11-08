@@ -22,12 +22,13 @@ var errFrameTooLarge = errors.New("admin frame too large")
 
 // Welcome describes the server and negotiated operations.
 type Welcome struct {
-	Version int      `json:"version"`
-	Ops     []string `json:"ops"`
-	Proto   string   `json:"proto"`
-	Port    int      `json:"port"`
-	Mount   string   `json:"mount"`
-	State   string   `json:"state"`
+	Version  int      `json:"version"`
+	Ops      []string `json:"ops"`
+	Features []string `json:"features,omitempty"`
+	Proto    string   `json:"proto"`
+	Port     int      `json:"port"`
+	Mount    string   `json:"mount"`
+	State    string   `json:"state"`
 }
 
 // Handler executes one admin request.
