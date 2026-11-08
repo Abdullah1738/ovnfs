@@ -40,7 +40,8 @@ searches the live merged checkout without reading through the mount. A `dir`
 under the configured mount is resolved to the same direct overlay access;
 other absolute directories use native host I/O. Searches hold the checkout's
 shared freeze lock until their workers finish, so snapshot/removal waits for
-an active search; ordinary writes can continue.
+an active search; ordinary writes can continue. That wait never holds the
+registry lock, so a slow file call or search stalls only its own checkout.
 
 Searches through the daemon skip AppleDouble `._` sidecars, which the mount
 does not list.

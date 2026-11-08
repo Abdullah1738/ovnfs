@@ -169,18 +169,30 @@ func (r *Registry) AttachRemote(ctx context.Context, o peer.Offer) (api.Checkout
 	if name == "" {
 		name = sanitizeName(path.Base(o.Source))
 	}
-	r.mu.Lock()
-	for _, h := range r.checkouts {
-		m := h.base.view.Meta()
-		if m.Remote == nil || m.Remote.Node != o.Node || m.Remote.Source != o.Source || h.meta.Name != name {
-			continue
-		}
-		if m.Tree == o.Tree {
+	// A checkout of that name attached from the same source takes the offer in
+	// place while its upper holds only cache paths.
+	r.mu.RLock()
+	h := r.checkouts[name]
+	if h != nil {
+		switch m := h.base.view.Meta(); {
+		case m.Remote == nil || m.Remote.Node != o.Node || m.Remote.Source != o.Source:
+			h = nil
+		case m.Tree == o.Tree:
 			reply := r.checkoutLocked(h)
+			r.mu.RUnlock()
+			return reply, nil
+		}
+	}
+	r.mu.RUnlock()
+	if h == nil || r.freezeAndLock(h) != nil {
+		r.mu.Lock()
+	} else {
+		if h.base.view.Meta().Tree == o.Tree {
+			reply := r.checkoutLocked(h)
+			h.freeze.Unlock()
 			r.mu.Unlock()
 			return reply, nil
 		}
-		h.freeze.Lock()
 		clean, err := r.cacheOnlyLocked(h)
 		if err != nil {
 			h.freeze.Unlock()

@@ -884,12 +884,11 @@ func (r *Registry) Snap(ctx context.Context, args api.SnapArgs) (api.SnapReply, 
 	if err != nil {
 		return api.SnapReply{}, coded(err)
 	}
-	r.mu.Lock()
-	if err = r.stillLiveLocked(h); err != nil {
-		r.mu.Unlock()
+	if err = r.freezeAndLock(h); err != nil {
 		return api.SnapReply{}, err
 	}
 	s, err := r.freezeLocked(ctx, h, args.Label, tree, true)
+	h.freeze.Unlock()
 	var result snapMeta
 	if s != nil {
 		result = cloneSnapMeta(s.meta)
@@ -942,20 +941,22 @@ func (r *Registry) Fork(ctx context.Context, args api.ForkArgs) (api.ForkReply, 
 		return api.ForkReply{}, coded(err)
 	}
 	defer discardGit(ready)
-	r.mu.Lock()
-	if err = r.stillLiveLocked(h); err == nil && h.meta.Base != baseID {
-		err = failure("conflict", "checkout %s moved to another base while forking; retry", h.meta.Name)
-	}
-	if err != nil {
-		r.mu.Unlock()
+	if err = r.freezeAndLock(h); err != nil {
 		return api.ForkReply{}, err
 	}
-	child, err := r.pickNameLocked(args.Name, args.Checkout)
+	child := ""
+	if h.meta.Base != baseID {
+		err = failure("conflict", "checkout %s moved to another base while forking; retry", h.meta.Name)
+	} else {
+		child, err = r.pickNameLocked(args.Name, args.Checkout)
+	}
 	if err != nil {
+		h.freeze.Unlock()
 		r.mu.Unlock()
 		return api.ForkReply{}, err
 	}
 	s, err := r.freezeLocked(ctx, h, args.Label, tree, false)
+	h.freeze.Unlock()
 	if err != nil {
 		r.mu.Unlock()
 		return api.ForkReply{}, coded(err)
@@ -1077,13 +1078,26 @@ func (r *Registry) stillLiveLocked(h *checkoutRecord) error {
 	return nil
 }
 
+// freezeAndLock takes h's freeze lock exclusively and then the registry lock,
+// in that order (see checkoutRecord.freeze), and confirms h is still live; on
+// failure it holds neither.
+func (r *Registry) freezeAndLock(h *checkoutRecord) error {
+	h.freeze.Lock()
+	r.mu.Lock()
+	if err := r.stillLiveLocked(h); err != nil {
+		r.mu.Unlock()
+		h.freeze.Unlock()
+		return err
+	}
+	return nil
+}
+
 // freezeLocked freezes an upper into a snapshot whose private git directory saveGit
 // stored as gitTree; fork defers its durable commit into child publication. Only a
 // freeze that moves the upper publishes a recovery intent first; with no layer the
-// snapshot is all metadata and simply does not exist until committed.
+// snapshot is all metadata and simply does not exist until committed. The caller
+// holds h's freeze lock and the registry lock (see freezeAndLock).
 func (r *Registry) freezeLocked(ctx context.Context, h *checkoutRecord, label string, gitTree store.OID, commit bool) (*snapRecord, error) {
-	h.freeze.Lock()
-	defer h.freeze.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -1252,7 +1266,10 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time) (b
 	}
 	r.operations.Add(1)
 	defer r.operations.Done()
-	h.freeze.Lock()
+	r.mu.Unlock()
+	if err := r.freezeAndLock(h); err != nil {
+		return false, err
+	}
 	defer h.freeze.Unlock()
 	// The freeze lock waits out file calls in flight, so none touches it from here.
 	if !picked.IsZero() && !r.touched(h).Equal(picked) {

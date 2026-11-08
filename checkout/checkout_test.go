@@ -551,3 +551,73 @@ func TestRepoCheckoutAndPlan(t *testing.T) {
 		t.Fatalf("checkout plan = origin %+v here %+v", checkoutPlan.Origin, checkoutPlan.Here)
 	}
 }
+
+// TestFreezeWaitsOutsideRegistryLock checks that snap, fork and rm wait out a
+// checkout's file calls without the registry lock, so a slow call stalls only
+// its own checkout and every other one keeps serving.
+func TestFreezeWaitsOutsideRegistryLock(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"a.txt": "a"})
+	f.newCheckout(dir, "other")
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name string
+		op   func(name string) error
+	}{
+		{"snap", func(name string) error { _, err := f.reg.Snap(ctx, api.SnapArgs{Checkout: name}); return err }},
+		{"fork", func(name string) error {
+			_, err := f.reg.Fork(ctx, api.ForkArgs{Checkout: name, Name: name + "-child"})
+			return err
+		}},
+		{"rm", func(name string) error { return f.reg.Rm(ctx, api.RmArgs{Checkout: name}) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f.newCheckout(dir, tt.name)
+			call, err := f.reg.Enter(tt.name) // a slow file call in flight
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.reg.mu.RLock()
+			h := f.reg.checkouts[tt.name]
+			f.reg.mu.RUnlock()
+			done := make(chan error, 1)
+			go func() { done <- tt.op(tt.name) }()
+			// A writer queued for the freeze lock makes TryRLock fail.
+			for deadline := time.Now().Add(5 * time.Second); h.freeze.TryRLock(); {
+				h.freeze.RUnlock()
+				select {
+				case err := <-done:
+					call.Done()
+					t.Fatalf("%s finished during a file call: %v", tt.name, err)
+				default:
+				}
+				if time.Now().After(deadline) {
+					call.Done()
+					t.Fatalf("%s never waited for the file call", tt.name)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			entered := make(chan error, 1)
+			go func() {
+				s, err := f.reg.Enter("other")
+				if err == nil {
+					s.Done()
+				}
+				entered <- err
+			}()
+			select {
+			case err := <-entered:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				call.Done()
+				t.Fatalf("checkout other stalled while %s waited for a file call", tt.name)
+			}
+			call.Done()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

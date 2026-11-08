@@ -177,15 +177,20 @@ type Registry struct {
 
 // checkoutRecord holds one freeze lock for all calls against a live folder.
 type checkoutRecord struct {
-	meta       checkoutMeta
-	base       *baseRecord
-	stack      []string
-	upper      string
-	fs         *overlay.FS
+	meta  checkoutMeta
+	base  *baseRecord
+	stack []string
+	upper string
+	fs    *overlay.FS
+	// freeze is held shared by every file call (Session) and exclusively to
+	// change the checkout under them. It is taken before Registry.mu, never
+	// while holding it: a file call may be slow (a source folder on a network
+	// share), and waiting for it under the registry lock would stall every
+	// checkout instead of this one.
 	freeze     sync.RWMutex
 	generation atomic.Uint64
 	retired    atomic.Bool
-	merge      sync.Mutex   // serializes apply and pull, which rewrite meta.MergeBases; taken before Registry.mu and freeze
+	merge      sync.Mutex   // serializes apply and pull, which rewrite meta.MergeBases; taken before freeze and Registry.mu
 	git        gitCache     // stored files of the private git directory, for the next snapshot
 	wrote      atomic.Int64 // unix nanoseconds of the last change through the checkout's folder (see Session.Touch); 0 for none
 }

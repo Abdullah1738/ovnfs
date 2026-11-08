@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -386,12 +387,16 @@ func (r *Registry) Close() error {
 		}
 		r.mu.Unlock()
 		r.discardPrepared(prepared)
-		r.mu.Lock()
-		for _, h := range r.checkouts {
+		// Closed and drained, the registry gains and loses no checkout from here.
+		r.mu.RLock()
+		checkouts := slices.Collect(maps.Values(r.checkouts))
+		r.mu.RUnlock()
+		for _, h := range checkouts {
 			h.freeze.Lock()
 		}
+		r.mu.Lock()
 		// A planned stop keeps memory files: they reach the uppers before exit.
-		for _, h := range r.checkouts {
+		for _, h := range checkouts {
 			if err := h.fs.Flush(); r.closeErr == nil {
 				r.closeErr = err
 			}
@@ -404,7 +409,7 @@ func (r *Registry) Close() error {
 				r.closeErr = err
 			}
 		}
-		for _, h := range r.checkouts {
+		for _, h := range checkouts {
 			h.retired.Store(true)
 			h.freeze.Unlock()
 		}
