@@ -57,6 +57,34 @@ usual path order. If the link fails a batch, grep reads those files through the
 checkout instead, fetching them as any read does. Searching repeatedly costs a
 round trip each time, since scanned files are never fetched.
 
+## Send
+
+`ovnfs send [DIR|CHECKOUT] HOST[:PATH]` attaches to a machine you reach by ssh,
+preparing it first, so one command takes a folder to a fresh box:
+
+```sh
+ovnfs send . devbox:src/app    # devbox:~/src/app now shows this folder
+```
+
+1. Without ovnfs on HOST (`--remote-bin`, else on its PATH, else
+   `~/.local/bin/ovnfs`), send downloads the release archive for HOST's
+   `uname` (Linux or macOS, amd64 or arm64) here and installs its binary as
+   `~/.local/bin/ovnfs` over ssh, so HOST needs no network access to GitHub.
+   The release is this binary's own, so both ends speak the same protocols,
+   or the latest one when this is a development build.
+2. It starts HOST's daemon and, unless HOST is already a member, joins it to
+   this machine's [mesh](#mesh), setting one up here first if this machine is
+   in none. The two machines must then reach each other directly or through
+   the relay.
+3. It attaches over the mesh. The remote name defaults to the folder's name,
+   as for `run --on`, so repeated sends keep one lane name.
+4. With `:PATH`, it points a symlink at PATH on HOST (relative to its home;
+   `~/` expands there) to the attached checkout, replacing one from an earlier
+   send. Anything else at PATH stops send before it attaches.
+
+ssh runs in batch mode, so HOST must accept a key without prompting, and the
+scripts send runs there need a POSIX `sh`.
+
 ## Pull
 
 `ovnfs pull CHECKOUT [--from HOST] [--dry-run]` brings the attached remote

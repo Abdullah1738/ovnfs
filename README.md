@@ -42,6 +42,7 @@ More, from `~/src/app`:
 ovnfs run -- make test         # a disposable checkout: run, then remove
 ovnfs new --rev main           # start from a revision instead of the working tree
 ovnfs attach app --to devbox   # the same checkout on another machine, fetched lazily
+ovnfs send . devbox:src/app    # attach over ssh, installing ovnfs and joining the mesh there first
 ovnfs grep 'TODO' app          # search in the daemon, without traversing the mount
 ovnfs glob '*.go' app          # matching paths, recursively and ignore-aware
 ovnfs ls .                     # the checkouts of this folder
@@ -71,7 +72,7 @@ ovnfs isolates files, not processes: it is not a sandbox.
 
 - [Configuration](docs/configuration.md): classes, rules, `.o2/ovnfs.yml`, where state and checkouts live
 - [Checkouts](docs/checkouts.md): `--rev`, `--take`, `run`, snapshots, forks, `diff` and `apply`
-- [Remote checkouts](docs/remote.md): `attach`, `pull`, `share`, the mesh
+- [Remote checkouts](docs/remote.md): `attach`, `send`, `pull`, `share`, the mesh
 - [Platforms](docs/platforms.md): NFS, FUSE, SMB and WinFsp frontends
 - [Internals](docs/internals.md): admin protocol for embedding, persistence, memory tiers
 - [Limitations](docs/limitations.md)

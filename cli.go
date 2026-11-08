@@ -59,6 +59,7 @@ func commands() []command {
 		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", true, runExplain},
 		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", true, runPlan},
 		{"attach", "[DIR|CHECKOUT] --to MEMBER|HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine (a mesh member, else over ssh); content moves on first read", true, runAttach},
+		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there and joining the mesh as needed; PATH there links to the checkout", true, runSend},
 		{"pull", "CHECKOUT [--from HOST] [--dry-run]", "merge attached remote source changes into the local checkout", true, runPull},
 		{"share", "CHECKOUT [--rw]", "serve a checkout over remote-fs for a VM (vmon --remote-fs TAG:SOCK[:rw]) or a peer", true, runShare},
 		{"mesh", "setup|join TOKEN|ls|rm MEMBER|leave", "join machines into a mesh; attach --to a member then runs over it", true, runMesh},
@@ -158,13 +159,25 @@ func (c *cli) close() {
 
 // call performs op, prints the raw reply under --json, and decodes it for human output.
 func call[T any](c *cli, op string, args any) (T, error) {
-	var reply T
 	raw, err := c.call(op, args)
+	if err == nil && c.json {
+		fmt.Println(string(raw))
+	}
+	return decodeReply[T](op, raw, err)
+}
+
+// quietCall performs op and decodes its reply without printing it under --json,
+// for the intermediate steps of a verb that prints one final reply.
+func quietCall[T any](c *cli, op string, args any) (T, error) {
+	raw, err := c.call(op, args)
+	return decodeReply[T](op, raw, err)
+}
+
+// decodeReply decodes the raw reply to op unless the call failed.
+func decodeReply[T any](op string, raw json.RawMessage, err error) (T, error) {
+	var reply T
 	if err != nil {
 		return reply, err
-	}
-	if c.json {
-		fmt.Println(string(raw))
 	}
 	if err := json.Unmarshal(raw, &reply); err != nil {
 		return reply, fmt.Errorf("%s: decoding reply: %w", op, err)
@@ -569,9 +582,15 @@ func runAttach(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
-	fmt.Printf("%s:%s\n", *to, reply.RemotePath)
-	fmt.Fprintf(os.Stderr, "%s@%s  →  %s:%s (content moves on first read; the link reconnects while this daemon runs)\n", reply.Checkout, reply.Snapshot.ID, reply.Host, reply.RemoteCheckout)
+	printAttached(*to, reply.RemotePath, reply)
 	return nil
+}
+
+// printAttached reports an attach: host:path on stdout for scripts, the
+// checkout and link on stderr.
+func printAttached(host, path string, r api.AttachReply) {
+	fmt.Printf("%s:%s\n", host, path)
+	fmt.Fprintf(os.Stderr, "%s@%s  →  %s:%s (content moves on first read; the link reconnects while this daemon runs)\n", r.Checkout, r.Snapshot.ID, r.Host, r.RemoteCheckout)
 }
 
 // runLink pipes stdin and stdout to the daemon's link socket; attach runs it over ssh.
