@@ -160,7 +160,8 @@ copied from the capture's `git-template/`, and overlay, below directories named
 `_p<id>`. A create names one, which writes only its git directory's
 `ovnfs.checkout` marker, and publishes it with a state write shared with
 concurrent creates. When only work-tree files changed, the prepared checkouts
-move onto the new capture; a change below `.git` discards them.
+move onto the new capture, whose `git-template/` is written after the creates
+waiting on it have their checkouts; a change below `.git` discards them.
 Prepared checkouts are in no state: a restart removes them, and an unused
 capture is released after 15 minutes.
 

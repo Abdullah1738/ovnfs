@@ -35,8 +35,9 @@ import (
 // the git directory's marker. The pool holds as many as the largest burst of
 // creates the folder has seen, at least poolMin, is refilled in the background and
 // goes with the warm capture, or moves onto the next one while the repository's
-// git state stays the same. Prepared checkouts are in no state: the next Open
-// removes any a stop left behind.
+// git state stays the same; that capture's git template is then written in the
+// background too. Prepared checkouts are in no state: the next Open removes any a
+// stop left behind.
 
 const (
 	// warmTTL is how long an unused warm capture stays retained.
@@ -65,12 +66,13 @@ type reuseFolder struct {
 	warmGitGen uint64            // gitGen then
 	warmLock   string            // hash of the manifest lock warm was classified with
 	warmUsed   time.Time         // when a create last reused or made warm
-	template   string            // warm's private git directory for new checkouts to copy; "" for none
+	template   string            // warm's private git directory for new checkouts to copy; "" for none or while warm.template is pending
 	config     string            // template's config, which prepared checkouts' git directories hold
 	capturing  chan struct{}     // closed when the capture in flight for this folder ends
 	pool       []*checkoutRecord // prepared on warm, unnamed and unregistered, each retaining warm
 	poolSize   int               // how many the pool should hold
-	filling    bool              // a fillPool goroutine runs
+	filling    int               // fillPool goroutines running
+	preparing  int               // checkouts they are preparing
 	burst      int               // creates in the current burst
 	last       time.Time         // the latest create
 }
@@ -150,16 +152,30 @@ func (r *Registry) newOnFolder(ctx context.Context, root string, m manifest.Mani
 		reply.Capture, reply.Warnings = &stats, append(reply.Warnings, warnings...)
 		return reply, nil
 	}
-	r.mu.Unlock()
-	if template, config, err = r.baseTemplate(b, reused); err != nil {
-		r.enqueueNotice(baseNotice{base: b.view.Meta().ID, fault: "reusable git directory: " + err.Error()})
-		template, config, reusable = "", "", false
+	// The prepared checkouts move onto the capture when the repository's git
+	// state is the one they were prepared from (see setWarmLocked); the private
+	// git directory later checkouts copy is then written in the background. A
+	// reused base already has one.
+	keep := reusable && !reused && f.keepsPoolLocked(b, beganGit, hash)
+	if !keep {
+		r.mu.Unlock()
+		if template, config, err = r.baseTemplate(b, reused); err != nil {
+			r.enqueueNotice(baseNotice{base: b.view.Meta().ID, fault: "reusable git directory: " + err.Error()})
+			template, config, reusable = "", "", false
+		}
+		r.mu.Lock()
 	}
-	r.mu.Lock()
 	var drained []*checkoutRecord
 	var reply api.NewReply
 	if reusable {
+		if keep {
+			config = f.config
+			b.template = make(chan struct{})
+		}
 		drained = r.setWarmLocked(f, b, began, beganGit, hash, template, config)
+		if keep {
+			r.templateLater(f, b)
+		}
 		endCapture()
 		reply, err = r.openWarmLocked(f, name)
 	} else {
@@ -252,10 +268,16 @@ func (r *Registry) captureBase(ctx context.Context, root string, m manifest.Mani
 
 // baseTemplate returns the private git directory checkouts on capture b copy, and
 // its config: written now for a new capture (gitTemplate), or the one a reused
-// capture already keeps.
+// capture already keeps, once any still being written is done.
 func (r *Registry) baseTemplate(b *baseRecord, reused bool) (dir, config string, err error) {
 	if !reused || b.view.Domains().Repo("") == nil {
 		return r.gitTemplate(b)
+	}
+	r.mu.Lock()
+	written := b.template
+	r.mu.Unlock()
+	if written != nil {
+		<-written
 	}
 	dir = r.templatePath(b.view.Meta().ID)
 	data, err := os.ReadFile(filepath.Join(dir, "config"))
@@ -266,6 +288,41 @@ func (r *Registry) baseTemplate(b *baseRecord, reused bool) (dir, config string,
 		return "", "", err
 	}
 	return dir, string(data), nil
+}
+
+// keepsPoolLocked reports whether f's prepared checkouts can move onto capture
+// b, taken from git generation gitGen with the manifest lock hash: the same git
+// state and rules, a repository, and no submodules, whose git directories the
+// pool does not rebuild. Their configuration is then f.config.
+func (f *reuseFolder) keepsPoolLocked(b *baseRecord, gitGen uint64, hash string) bool {
+	return f.warm != nil && f.template != "" && f.warmGitGen == gitGen && f.warmLock == hash &&
+		b.view.Domains().Repo("") != nil && len(submodules(b.view)) == 0
+}
+
+// templateLater writes b's private git directory template in the background,
+// then lets f's pool fill from it while b is still f's warm capture. Until then
+// b.template, which the caller made, is open: checkouts prepared meanwhile build
+// their git directories from the repository, whose git state is still the
+// template's. r.mu is held.
+func (r *Registry) templateLater(f *reuseFolder, b *baseRecord) {
+	r.retainLocked(b, nil)
+	r.workers.Add(1)
+	go func() {
+		defer r.workers.Done()
+		template, _, err := r.gitTemplate(b)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		defer r.releaseLocked(b, nil)
+		close(b.template)
+		if err != nil {
+			r.enqueueNotice(baseNotice{base: b.view.Meta().ID, fault: "reusable git directory: " + err.Error()})
+			return
+		}
+		if f.warm == b {
+			f.template = template
+			r.fillPoolLocked(f)
+		}
+	}()
 }
 
 // noteCreateLocked counts a create in the folder's current burst and grows the
@@ -286,6 +343,19 @@ func (f *reuseFolder) noteCreateLocked() {
 func (r *Registry) openWarmLocked(f *reuseFolder, name string) (api.NewReply, error) {
 	f.warmUsed = time.Now()
 	return r.openOnLocked(f.warm, f.template, f.config, name, filepath.Base(f.root), f)
+}
+
+// pending reports whether ch, a base's template signal, is still open.
+func pending(ch chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return false
+	default:
+		return true
+	}
 }
 
 // openOnLocked opens checkout name (or one derived from fallback) on capture b,
@@ -404,30 +474,33 @@ func (r *Registry) abandonCheckout(name string, h *checkoutRecord, b *baseRecord
 	return err
 }
 
-// fillPoolLocked starts refilling f's pool in the background unless it is full
-// or already being refilled.
+// fillPoolLocked starts refilling f's pool in the background, with up to
+// prepareSlots workers, unless it is full or its git template is pending.
 func (r *Registry) fillPoolLocked(f *reuseFolder) {
-	if f.filling || f.warm == nil || len(f.pool) >= f.poolSize || r.closed {
+	if f.warm == nil || r.closed || pending(f.warm.template) {
 		return
 	}
-	f.filling = true
-	r.workers.Add(1)
-	go r.fillPool(f)
+	for f.filling < prepareSlots && f.filling < f.poolSize-len(f.pool) {
+		f.filling++
+		r.workers.Add(1)
+		go r.fillPool(f)
+	}
 }
 
 // fillPool prepares checkouts on f's warm capture, one at a time, until the pool
-// holds poolSize or the warm capture changes; a failure stops it until the next
-// create starts it again.
+// with those being prepared holds poolSize or the warm capture changes; a failure
+// stops it until the next create starts it again.
 func (r *Registry) fillPool(f *reuseFolder) {
 	defer r.workers.Done()
 	for {
 		r.mu.Lock()
 		b, template := f.warm, f.template
-		if r.closed || b == nil || len(f.pool) >= f.poolSize {
-			f.filling = false
+		if r.closed || b == nil || len(f.pool)+f.preparing >= f.poolSize || pending(b.template) {
+			f.filling--
 			r.mu.Unlock()
 			return
 		}
+		f.preparing++
 		r.retainLocked(b, nil)
 		r.mu.Unlock()
 		dir, err := randomID(preparedPrefix)
@@ -436,12 +509,13 @@ func (r *Registry) fillPool(f *reuseFolder) {
 			h, err = r.prepareOnWarm(b, template, "", dir)
 		}
 		r.mu.Lock()
+		f.preparing--
 		if err == nil && f.warm == b && !r.closed {
 			f.pool = append(f.pool, h)
 			r.mu.Unlock()
 			continue
 		}
-		f.filling = false
+		f.filling--
 		r.mu.Unlock()
 		if err != nil {
 			if dir != "" {
@@ -639,7 +713,7 @@ func (r *Registry) coolFolders() {
 		forgot := false
 		r.mu.Lock()
 		for root, f := range r.folders {
-			if f.capturing != nil || f.filling {
+			if f.capturing != nil || f.filling > 0 {
 				continue
 			}
 			if f.warm != nil && (f.warmGen != f.gen.Load() || time.Since(f.warmUsed) > warmTTL) {

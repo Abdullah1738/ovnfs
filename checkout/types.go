@@ -212,6 +212,10 @@ type baseRecord struct {
 	lock  manifest.Lock
 	rules rules.Set
 	refs  int
+	// template is closed once the private git directory checkouts on the base
+	// start from is written in the background (or failed); nil when it was
+	// written with the capture, or the base keeps none.
+	template chan struct{}
 }
 
 // layerRecord counts checkout, snapshot and active hash references to a layer.
