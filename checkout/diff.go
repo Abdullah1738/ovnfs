@@ -109,7 +109,19 @@ func (r *Registry) Diff(ctx context.Context, args api.DiffArgs) (api.DiffReply, 
 		reply.From = "base"
 	}
 	if args.Patch || args.Binary {
+		var eol *eolConverter
+		if args.Binary {
+			paths := make([]string, len(reply.Changes))
+			for i, c := range reply.Changes {
+				paths[i] = c.Path
+			}
+			if eol, err = newEOLConverter(ctx, h.base.view, paths); err != nil {
+				return api.DiffReply{}, coded(err)
+			}
+			defer eol.Close()
+		}
 		var patch strings.Builder
+		kept := reply.Changes[:0:0]
 		for _, c := range reply.Changes {
 			old, err := r.content(h, c.Path, from[c.Path], nil)
 			if err != nil {
@@ -119,13 +131,28 @@ func (r *Registry) Diff(ctx context.Context, args api.DiffArgs) (api.DiffReply, 
 			if err != nil {
 				return api.DiffReply{}, coded(err)
 			}
-			if args.Binary {
-				gitPatch(&patch, c.Path, from[c.Path], now.files[c.Path], old, cur)
-			} else {
+			if !args.Binary {
 				unified(&patch, c.Path, old, cur)
+				kept = append(kept, c)
+				continue
 			}
+			// A git patch shows what git stores: a change of line endings that git
+			// normalizes away is no change.
+			a, old, err := eol.blob(c.Path, from[c.Path], old)
+			if err != nil {
+				return api.DiffReply{}, coded(err)
+			}
+			b, cur, err := eol.blob(c.Path, now.files[c.Path], cur)
+			if err != nil {
+				return api.DiffReply{}, coded(err)
+			}
+			if a == b {
+				continue
+			}
+			gitPatch(&patch, c.Path, a, b, old, cur)
+			kept = append(kept, c)
 		}
-		reply.Patch, reply.Binary = patch.String(), args.Binary
+		reply.Changes, reply.Patch, reply.Binary = kept, patch.String(), args.Binary
 	}
 	return reply, nil
 }

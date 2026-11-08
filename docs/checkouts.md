@@ -177,7 +177,11 @@ result limits, narrower patterns or grep's column limit to reduce the reply.
 
 `diff CHECKOUT [SNAP] [-p]` compares the checkout now with its base capture (or
 a snapshot); `--binary` prints the patch as `git diff --binary` does, with git
-headers, full blob ids, modes and binary content, so `git apply` takes it whole.
+headers, full blob ids, modes and binary content, so `git apply` takes it whole,
+also with `--cached`. Like git, it shows each side as git would store it: under
+`core.autocrlf` or `text`/`eol` attributes, CRLF text becomes LF, and a change of
+line endings only is no change. A changed path git would store through a filter
+driver, `ident` or a `working-tree-encoding` is refused (code `unsupported`).
 `apply CHECKOUT` snapshots the checkout and merges each changed
 source path into the folder against the base: a path the user left alone takes
 the checkout's version, and a text file changed on both sides is merged with

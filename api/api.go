@@ -128,7 +128,9 @@ type SnapReply struct {
 
 // DiffArgs compares a checkout's current state with a snapshot (default: its base).
 // Binary makes Patch the patch git diff --binary writes, which git apply takes
-// whole: git headers, full blob ids, modes and binary content.
+// whole: git headers, full blob ids, modes and binary content, each side as git's
+// end-of-line conversion stores it; a path under a filter, ident or encoding is
+// refused with code "unsupported".
 type DiffArgs struct {
 	Checkout string `json:"checkout"`
 	From     string `json:"from,omitempty"` // snapshot id; default: the checkout's base capture

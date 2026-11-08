@@ -2,9 +2,11 @@ package checkout
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -82,5 +84,76 @@ func TestBinaryPatchAppliesWithGit(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "gone.txt")); !os.IsNotExist(err) {
 		t.Errorf("gone.txt survived git apply: %v", err)
+	}
+}
+
+// TestBinaryPatchStoresLineEndingsAsGit checks that with core.autocrlf a git patch
+// holds what git stores: CRLF work-tree text as LF with the index's blob ids, so
+// it applies to the index; a file whose index blob keeps CRLF stays as it is; and
+// a change of line endings git normalizes away is none.
+func TestBinaryPatchStoresLineEndingsAsGit(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"kept.txt": "a\r\nb\r\n"})
+	gitRun(t, dir, "init", "-q", "-b", "main")
+	gitRun(t, dir, "config", "core.autocrlf", "false")
+	gitRun(t, dir, "add", "--all")
+	gitRun(t, dir, "commit", "-qm", "crlf blob")
+	gitRun(t, dir, "config", "core.autocrlf", "true")
+	for p, data := range map[string]string{"crlf.txt": "one\r\ntwo\r\n", "eol.txt": "x\r\n", "data.bin": "\x00\r\n"} {
+		write(t, filepath.Join(dir, p), data)
+	}
+	gitRun(t, dir, "add", "--all")
+	gitRun(t, dir, "commit", "-qm", "lf blobs")
+	f.newCheckout(dir, "app")
+	f.put("app", "crlf.txt", "one\r\n2\r\n")
+	f.put("app", "kept.txt", "a\r\nB\r\n")
+	f.put("app", "eol.txt", "x\n")
+	f.put("app", "data.bin", "\x00\r\n!")
+	reply, err := f.reg.Diff(context.Background(), api.DiffArgs{Checkout: "app", Binary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changed []string
+	for _, c := range reply.Changes {
+		changed = append(changed, c.Path)
+	}
+	if want := []string{"crlf.txt", "data.bin", "kept.txt"}; !slices.Equal(changed, want) {
+		t.Fatalf("changes %v, want %v", changed, want)
+	}
+	for _, want := range []string{
+		"index " + gitRun(t, dir, "rev-parse", ":crlf.txt") + "..",
+		"-two\n+2\n",
+		"-b\r\n+B\r\n",
+	} {
+		if !strings.Contains(reply.Patch, want) {
+			t.Errorf("patch lacks %q:\n%s", want, reply.Patch)
+		}
+	}
+	patch := filepath.Join(t.TempDir(), "app.patch")
+	if err := os.WriteFile(patch, []byte(reply.Patch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "apply", "--cached", "--check", patch)
+	gitRun(t, dir, "apply", "--check", patch)
+}
+
+// TestBinaryPatchRefusesFilteredPaths refuses a git patch of a change git would
+// store through a filter driver: only git can tell what it stores.
+func TestBinaryPatchRefusesFilteredPaths(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{".gitattributes": "*.big filter=big\n", "a.big": "x\n"})
+	gitRun(t, dir, "init", "-q", "-b", "main")
+	gitRun(t, dir, "config", "filter.big.clean", "cat")
+	gitRun(t, dir, "add", "--all")
+	gitRun(t, dir, "commit", "-qm", "init")
+	f.newCheckout(dir, "app")
+	f.put("app", "a.big", "y\n")
+	_, err := f.reg.Diff(context.Background(), api.DiffArgs{Checkout: "app", Binary: true})
+	var coded *Error
+	if !errors.As(err, &coded) || coded.Code != "unsupported" {
+		t.Fatalf("diff of a filtered path: %v, want code unsupported", err)
+	}
+	if _, err := f.reg.Diff(context.Background(), api.DiffArgs{Checkout: "app", Patch: true}); err != nil {
+		t.Fatalf("plain patch of a filtered path: %v", err)
 	}
 }
