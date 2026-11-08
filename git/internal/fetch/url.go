@@ -63,7 +63,8 @@ func schemeOf(s, sep string) (string, bool) {
 
 // isLocalPath implements urls.adoc's disambiguation: an address with no
 // colon, or a slash before the first colon, is a local path rather than the
-// scp-like "[user@]host:path"; so is a Windows drive-letter path.
+// scp-like "[user@]host:path"; so, on Windows, is a valid path with a drive
+// prefix. A backslash counts for nothing, as with Git for Windows.
 func isLocalPath(s string) bool {
 	colon := strings.IndexByte(s, ':')
 	if colon < 0 {
@@ -72,15 +73,68 @@ func isLocalPath(s string) bool {
 	if slash := strings.IndexByte(s, '/'); slash >= 0 && slash < colon {
 		return true
 	}
-	if runtime.GOOS == "windows" {
-		if slash := strings.IndexByte(s, '\\'); slash >= 0 && slash < colon {
-			return true
-		}
-		if colon == 1 && isSchemeChar(s[0], true) {
-			return true
+	return runtime.GOOS == "windows" && dosDrivePrefix(s) > 0 && validWin32Path(s)
+}
+
+// dosDrivePrefix returns the length of the drive prefix ("C:") s starts
+// with, or 0. Like Git for Windows, it takes any ASCII character or UTF-8
+// sequence for a drive: subst can assign virtually any.
+func dosDrivePrefix(s string) int {
+	i := 1
+	if s != "" && s[0] >= 0x80 {
+		for i < min(len(s), 4) && s[i] >= 0x80 {
+			i++
 		}
 	}
-	return false
+	if s != "" && i < len(s) && s[i] == ':' {
+		return i + 1
+	}
+	return 0
+}
+
+// validWin32Path ports Git for Windows' is_valid_win32_path with the
+// default core.protectNTFS: after the drive prefix, no character Windows
+// forbids in names, no component ending in a space or period other than "."
+// and "..", and no component naming a device.
+func validWin32Path(p string) bool {
+	for seg := range strings.FieldsFuncSeq(p[dosDrivePrefix(p):], isDirSep) {
+		if reservedName(seg) || strings.ContainsFunc(seg, func(r rune) bool {
+			return r < 0x20 || strings.ContainsRune(`:<>"|?*`, r)
+		}) {
+			return false
+		}
+		if last := seg[len(seg)-1]; (last == ' ' || last == '.') && seg != "." && seg != ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func isDirSep(r rune) bool { return r == '/' || r == '\\' }
+
+// reservedName reports a path component Windows takes for a device: AUX,
+// CON, CONIN$, CONOUT$, NUL, PRN, COM1-COM9 or LPT0-LPT9 in any case,
+// followed by nothing, spaces, a period or a colon.
+func reservedName(seg string) bool {
+	hasPrefix := func(name string) bool {
+		return len(seg) >= len(name) && strings.EqualFold(seg[:len(name)], name)
+	}
+	var n int
+	switch {
+	case hasPrefix("CONIN$"):
+		n = 6
+	case hasPrefix("CONOUT$"):
+		n = 7
+	case hasPrefix("AUX"), hasPrefix("CON"), hasPrefix("NUL"), hasPrefix("PRN"):
+		n = 3
+	case len(seg) > 3 && (hasPrefix("COM") && '1' <= seg[3] && seg[3] <= '9' ||
+		hasPrefix("LPT") && '0' <= seg[3] && seg[3] <= '9'):
+		n = 4
+	default:
+		return false
+	}
+	rest := strings.TrimLeft(seg[n:], " ")
+	return rest == "" || rest[0] == '.' || rest[0] == ':'
 }
 
 // parseEndpoint classifies a (rewritten) remote address and refuses any
@@ -291,14 +345,25 @@ func parseGitURL(rest string) (*endpoint, error) {
 }
 
 // parseFileURL takes everything from the first slash after "file://" as the
-// path: git ignores any host ("file://host/p" is "/p").
+// path: git ignores any host ("file://host/p" is "/p"). On Windows, as with
+// Git for Windows, a host makes a UNC path ("//host/p") and a drive may
+// follow "file://" directly ("file://C:/p").
 func parseFileURL(rest string) (*endpoint, error) {
+	rest = percentDecode(rest) // git decodes the whole URL before parsing
+	if runtime.GOOS == "windows" {
+		if dosDrivePrefix(rest) > 0 {
+			return &endpoint{transport: "file", path: rest}, nil
+		}
+		if rest != "" && rest[0] != '/' && strings.ContainsAny(rest, `/\`) {
+			return &endpoint{transport: "file", path: "//" + rest}, nil
+		}
+	}
 	i := strings.IndexByte(rest, '/')
 	if i < 0 {
 		return nil, fmt.Errorf("fetch: no path specified in %q", redactURL("file://"+rest))
 	}
-	p := percentDecode(rest[i:])
-	if runtime.GOOS == "windows" && len(p) >= 3 && p[2] == ':' && isSchemeChar(p[1], true) {
+	p := rest[i:]
+	if runtime.GOOS == "windows" && dosDrivePrefix(p[1:]) > 0 {
 		p = p[1:] // file:///C:/repo
 	}
 	return &endpoint{transport: "file", path: p}, nil

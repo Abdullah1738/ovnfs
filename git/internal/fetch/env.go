@@ -91,28 +91,42 @@ func (e environ) lookPath(name string) (string, error) {
 	return "", fmt.Errorf("%s: %w", name, exec.ErrNotFound)
 }
 
-// findProgram finds a helper program git would run (git-credential-<name>,
-// git-remote-<name>) in PATH, then $GIT_EXEC_PATH, then the libexec/git-core
-// directory of the git installation found on PATH.
-func (e environ) findProgram(name string) (string, error) {
-	if p, err := e.lookPath(name); err == nil {
-		return p, nil
+// gitBuiltinHelpers are the helpers git implements as builtins. git runs
+// them in itself whatever git-<name> programs exist, and Git for Windows
+// installs no such programs for them.
+var gitBuiltinHelpers = map[string]bool{
+	"credential-cache": true, "credential-store": true,
+	"remote-ext": true, "remote-fd": true,
+}
+
+// findProgram returns the command line of the helper git runs as
+// "git <name>" (credential-<helper>, remote-<transport>): the git found on
+// PATH for one of its builtins, else the git-<name> program in PATH, then
+// $GIT_EXEC_PATH, then the libexec/git-core directory of that git.
+func (e environ) findProgram(name string) ([]string, error) {
+	git, gitErr := e.lookPath("git")
+	if gitErr == nil && gitBuiltinHelpers[name] {
+		return []string{git, name}, nil
+	}
+	prog := "git-" + name
+	if p, err := e.lookPath(prog); err == nil {
+		return []string{p}, nil
 	}
 	if dir := e.get("GIT_EXEC_PATH"); dir != "" {
-		if p, ok := findExecutable(dir, name); ok {
-			return p, nil
+		if p, ok := findExecutable(dir, prog); ok {
+			return []string{p}, nil
 		}
 	}
-	if git, err := e.lookPath("git"); err == nil {
+	if gitErr == nil {
 		if real, err := filepath.EvalSymlinks(git); err == nil {
 			// <prefix>/bin/git → <prefix>/libexec/git-core
 			dir := filepath.Join(filepath.Dir(filepath.Dir(real)), "libexec", "git-core")
-			if p, ok := findExecutable(dir, name); ok {
-				return p, nil
+			if p, ok := findExecutable(dir, prog); ok {
+				return []string{p}, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("%s not found in PATH, GIT_EXEC_PATH or git's libexec directory", name)
+	return nil, fmt.Errorf("%s not found in PATH, GIT_EXEC_PATH or git's libexec directory", prog)
 }
 
 // shellCommand runs script through the shell with args available as "$@",

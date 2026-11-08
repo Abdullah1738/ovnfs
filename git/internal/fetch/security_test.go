@@ -240,7 +240,7 @@ func TestErrorsRedactUserinfo(t *testing.T) {
 		"http://u:SECRET@h:bad port/r",
 		"https://u:SECRET@/r",
 		"git://u:SECRET@h/a%00",
-		"file://u:SECRET@h",
+		"file://user:SECRET@h", // "file://u:..." is drive U: on Windows
 	} {
 		_, err := parseEndpoint(raw, allowed)
 		if err == nil {

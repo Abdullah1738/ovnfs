@@ -10,11 +10,12 @@ import (
 // The expectations come from running git 2.56 against a logging
 // GIT_SSH_COMMAND and a listening socket.
 func TestClassifyURLs(t *testing.T) {
-	for _, tc := range []struct {
+	type classifyCase struct {
 		in                          string
 		transport, user, host, port string
 		path                        string
-	}{
+	}
+	cases := []classifyCase{
 		{"ssh://u@h:2222/~al/r.git", "ssh", "u", "h", "2222", "~al/r.git"},
 		{"ssh://h:abc/r", "ssh", "", "h:abc", "", "/r"},
 		{"ssh://h:/r", "ssh", "", "h", "", "/r"},
@@ -29,19 +30,51 @@ func TestClassifyURLs(t *testing.T) {
 		{"u@[h:2]:p a/r", "ssh", "u", "h", "2", "p a/r"},
 		{"[::1]:r", "ssh", "", "::1", "", "r"},
 		{"u@[::1]:r", "ssh", "u", "::1", "", "r"},
-		{"h:it's/r", "ssh", "", "h", "", "it's/r"},
-		{"h:~/r", "ssh", "", "h", "", "~/r"},
-		{"h:", "ssh", "", "h", "", ""},
+		{"host:it's/r", "ssh", "", "host", "", "it's/r"},
+		{"host:~/r", "ssh", "", "host", "", "~/r"},
+		{"host:", "ssh", "", "host", "", ""},
 		{"file:/tmp/x", "ssh", "", "file", "", "/tmp/x"},
 		{"git://127.0.0.1:19418/~al/r%20x.git", "git", "", "127.0.0.1", "19418", "~al/r x.git"},
 		{"git://localhost/r.git/", "git", "", "localhost", "", "/r.git/"},
 		{"file:///tmp/s%72c", "file", "", "", "", "/tmp/src"},
-		{"file://host/tmp/src", "file", "", "", "", "/tmp/src"},
 		{"/abs/path", "file", "", "", "", "/abs/path"},
 		{"./foo:bar", "file", "", "", "", "./foo:bar"},
 		{"rel/a:b", "file", "", "", "", "rel/a:b"},
 		{"plain", "file", "", "", "", "plain"},
-	} {
+	}
+	if runtime.GOOS == "windows" {
+		// Git for Windows takes "X:" for a drive unless the rest is not a
+		// valid Windows path, gives file URLs a drive or a UNC host, and
+		// does not take a backslash for a local path's slash.
+		cases = append(cases, []classifyCase{
+			{`C:\repo`, "file", "", "", "", `C:\repo`},
+			{"C:/repo", "file", "", "", "", "C:/repo"},
+			{"h:", "file", "", "", "", "h:"},
+			{"h:-r", "file", "", "", "", "h:-r"},
+			{"1:r", "file", "", "", "", "1:r"},
+			{"ä:r", "file", "", "", "", "ä:r"},
+			{`rel\a:b`, "ssh", "", `rel\a`, "", "b"},
+			{"h:a:b", "ssh", "", "h", "", "a:b"},
+			{"h:a|b", "ssh", "", "h", "", "a|b"},
+			{"h:r.", "ssh", "", "h", "", "r."},
+			{"h:r /x", "ssh", "", "h", "", "r /x"},
+			{"h:con", "ssh", "", "h", "", "con"},
+			{"h:x/aux.txt", "ssh", "", "h", "", "x/aux.txt"},
+			{"file://C:/repo", "file", "", "", "", "C:/repo"},
+			{`file://C:\repo`, "file", "", "", "", `C:\repo`},
+			{"file://C:/s%72c", "file", "", "", "", "C:/src"},
+			{"file:///C:/repo", "file", "", "", "", "C:/repo"},
+			{"file://host/tmp/src", "file", "", "", "", "//host/tmp/src"},
+			{"file://localhost/C:/r", "file", "", "", "", "//localhost/C:/r"},
+		}...)
+	} else {
+		cases = append(cases, []classifyCase{
+			{"h:", "ssh", "", "h", "", ""},
+			{"file://h%2Fx/r", "file", "", "", "", "/x/r"}, // decoded before the host is split off
+			{"file://host/tmp/src", "file", "", "", "", "/tmp/src"},
+		}...)
+	}
+	for _, tc := range cases {
 		ep, err := classify(tc.in)
 		if err != nil {
 			t.Errorf("%q: %v", tc.in, err)
@@ -71,7 +104,7 @@ func TestClassifyRefuses(t *testing.T) {
 	for in, want := range map[string]string{
 		"ssh://-oProxy/r": "strange hostname '-oProxy' blocked",
 		"ssh://-u@h/r":    "strange hostname '***@h' blocked", // the user part is redacted
-		"h:-r":            "strange pathname '-r' blocked",
+		"host:-r":         "strange pathname '-r' blocked",
 		"ssh://h":         "no path specified",
 	} {
 		if _, err := classify(in); err == nil || !strings.Contains(err.Error(), want) {
@@ -111,17 +144,6 @@ func TestAllowlist(t *testing.T) {
 	for _, in := range []string{"https://h/r", "http://h/r", "ssh://h/r", "h:r", "git://h/r", "file:///r", "/r"} {
 		if _, err := parseEndpoint(in, allowed); err != nil {
 			t.Errorf("%q: %v", in, err)
-		}
-	}
-}
-
-func TestWindowsPaths(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("drive letters are only local paths on Windows")
-	}
-	for _, in := range []string{`C:\repo`, "C:/repo", `rel\a:b`} {
-		if ep, err := classify(in); err != nil || ep.transport != "file" {
-			t.Errorf("%q: %v %v", in, ep, err)
 		}
 	}
 }

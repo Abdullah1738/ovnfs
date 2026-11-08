@@ -94,15 +94,15 @@ type readCloser struct {
 	io.Closer
 }
 
-// startHelper runs git-remote-<ep.transport> with the remote URL and its
-// address as arguments, as git does, gitDir as GIT_DIR, and reads its
+// startHelper runs the helper git runs as "git remote-<ep.transport>" with
+// the remote URL and its address as arguments, gitDir as GIT_DIR, and reads its
 // capabilities.
 func startHelper(ctx context.Context, env environ, ep *endpoint, gitDir string) (*remoteHelper, error) {
-	prog, err := env.findProgram("git-remote-" + ep.transport)
+	argv, err := env.findProgram("remote-" + ep.transport)
 	if err != nil {
 		return nil, fmt.Errorf("fetch: remote helper '%s': %w", ep.transport, err)
 	}
-	cmd := command(ctx, prog, ep.remote, ep.path)
+	cmd := command(ctx, argv[0], append(argv[1:], ep.remote, ep.path)...)
 	cmd.Dir = gitDir
 	cmd.Env = env.childEnv("GIT_DIR=" + gitDir)
 	pc, err := startProcess(cmd)

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/stencil-hq/ovnfs/git/internal/config"
@@ -321,10 +322,10 @@ func (s *credentialStore) run(ctx context.Context, h, op string, c *credential) 
 
 // helperCommand turns a credential.helper value into a command running
 // operation op: "!snippet" runs the snippet through the shell, an absolute
-// path runs verbatim through the shell, and "name args" runs the
-// git-credential-name program with args. That program is looked up directly
-// instead of running "git credential-name", and needs the shell only when
-// args use shell syntax.
+// path runs verbatim through the shell, and "name args" runs what git runs
+// as "git credential-name args": git itself for its builtins, else the
+// git-credential-name program looked up directly. The shell is needed only
+// when args use shell syntax.
 func (s *credentialStore) helperCommand(ctx context.Context, h, op string) (*exec.Cmd, error) {
 	if snippet, ok := strings.CutPrefix(h, "!"); ok {
 		return s.env.shellCommand(ctx, snippet, op)
@@ -333,17 +334,21 @@ func (s *credentialStore) helperCommand(ctx context.Context, h, op string) (*exe
 		return s.env.shellCommand(ctx, h, op)
 	}
 	name, args, _ := strings.Cut(h, " ")
-	prog, err := s.env.findProgram("git-credential-" + name)
+	argv, err := s.env.findProgram("credential-" + name)
 	if err != nil {
 		return nil, fmt.Errorf("fetch: credential helper '%s': %w", name, err)
 	}
 	if strings.TrimSpace(args) == "" {
-		return command(ctx, prog, op), nil
+		return command(ctx, argv[0], append(argv[1:], op)...), nil
 	}
 	if words, ok := plainWords(args); ok {
-		return command(ctx, prog, append(words, op)...), nil
+		return command(ctx, argv[0], slices.Concat(argv[1:], words, []string{op})...), nil
 	}
-	return s.env.shellCommand(ctx, shellQuote(prog)+" "+args, op)
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = shellQuote(a)
+	}
+	return s.env.shellCommand(ctx, strings.Join(quoted, " ")+" "+args, op)
 }
 
 func isAbsHelper(h string) bool {
