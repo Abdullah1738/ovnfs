@@ -35,11 +35,9 @@ jobs:
             echo "GOOS=$goos"
             GOOS=$goos go vet ./...
           done
+      # Same goreleaser as release.yml, from the module proxy.
       - name: release build
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: "~> v2"
-          args: release --snapshot --clean
+        run: go run github.com/goreleaser/goreleaser/v2@v2.20.0 release --snapshot --clean
 
   test:
     strategy:
