@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
+
 	"github.com/stencil-hq/ovnfs/api"
 )
 
@@ -24,13 +27,56 @@ func TestPrintCheckoutsOrphanSnapshots(t *testing.T) {
 		var out strings.Builder
 		printCheckouts(&out, r)
 		got := out.String()
-		if !strings.Contains(got, "orphan-id\tremoved\tsaved") || !strings.Contains(got, "ORPHAN SNAPSHOT") {
+		if !strings.Contains(got, "ORPHAN SNAPSHOT") || !hasRow(got, "orphan-id", "removed", "saved") {
 			t.Fatalf("orphan missing from %q", got)
 		}
 		if strings.Contains(got, "live-id") || live && strings.Count(got, "active") != 1 {
 			t.Fatalf("live checkout duplicated in %q", got)
 		}
 	}
+}
+
+// TestTablePadding checks that columns are padded by visible width, so a styled
+// cell aligns with the plain text a script would see, and that a writer without
+// colour gets no escapes at all.
+func TestTablePadding(t *testing.T) {
+	var plain strings.Builder
+	table(&plain, [][]string{{"ID", "NAME"}, {"3f2a", "app"}})
+	if got, want := plain.String(), "ID    NAME\n3f2a  app\n"; got != want {
+		t.Fatalf("plain table = %q, want %q", got, want)
+	}
+
+	var styled strings.Builder
+	w := &colorprofile.Writer{Forward: &styled, Profile: colorprofile.ANSI}
+	table(w, [][]string{{paint(w, styleBold, "ID"), "NAME"}, {paint(w, styleAccent, "3f2a"), "app"}})
+	lines := strings.Split(strings.TrimSuffix(styled.String(), "\n"), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "\x1b") {
+		t.Fatalf("styled table = %q, want two coloured lines", styled.String())
+	}
+	for i, want := range []string{"ID    NAME", "3f2a  app"} {
+		if got := lipgloss.Width(lines[i]); got != lipgloss.Width(want) {
+			t.Fatalf("styled row %d is %d wide, want %d: %q", i, got, lipgloss.Width(want), lines[i])
+		}
+	}
+}
+
+// hasRow reports whether some line of out holds every field, in order.
+func hasRow(out string, fields ...string) bool {
+	for line := range strings.Lines(out) {
+		at := 0
+		for _, field := range fields {
+			i := strings.Index(line[at:], field)
+			if i < 0 {
+				at = -1
+				break
+			}
+			at += i + len(field)
+		}
+		if at >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // TestParseInterspersed checks that flags are found anywhere among positionals and "--" ends flag parsing.

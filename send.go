@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"runtime/debug"
 	"strings"
@@ -117,7 +116,8 @@ func (r *remote) install(ctx context.Context) error {
 		return err
 	}
 	dir := r.home + "/.local/bin"
-	fmt.Fprintf(os.Stderr, "installing ovnfs %s (%s/%s) on %s as %s/ovnfs\n", bin.Tag, goos, goarch, r.host, dir)
+	fmt.Fprintf(stderr, "%s ovnfs %s (%s/%s) on %s as %s/ovnfs\n", paint(stderr, styleYellow, "installing"), bin.Tag, goos, goarch,
+		paint(stderr, styleAccent, r.host), paint(stderr, styleDim, dir))
 	exe, err := bin.Fetch(ctx)
 	if err != nil {
 		return err

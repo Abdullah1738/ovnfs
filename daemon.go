@@ -57,7 +57,7 @@ func (c *cli) client() (*admin.Client, error) {
 			return nil, err
 		}
 		if pid != 0 {
-			fmt.Fprintf(os.Stderr, "started ovnfs (pid %d, log %s)\n", pid, logPath(c.state))
+			fmt.Fprintf(stderr, "%s ovnfs (pid %d, log %s)\n", paint(stderr, styleGreen, "started"), pid, paint(stderr, styleDim, logPath(c.state)))
 		}
 		c.conn = client
 		return client, nil
@@ -205,9 +205,9 @@ func runStart(c *cli, args []string) error {
 		return err
 	}
 	if started {
-		fmt.Fprintf(os.Stderr, "started ovnfs (pid %d, log %s)\n", st.PID, logPath(c.state))
+		fmt.Fprintf(stderr, "%s ovnfs (pid %d, log %s)\n", paint(stderr, styleGreen, "started"), st.PID, paint(stderr, styleDim, logPath(c.state)))
 	} else {
-		fmt.Fprintf(os.Stderr, "already running (pid %d)\n", st.PID)
+		fmt.Fprintf(stderr, "%s (pid %d)\n", paint(stderr, styleDim, "already running"), st.PID)
 	}
 	return nil
 }
@@ -245,7 +245,7 @@ func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
 			}
 			if !noticed {
 				noticed = true
-				fmt.Fprintf(os.Stderr, "waiting for ovnfs (pid %d) to finish shutting down\n", st.PID)
+				fmt.Fprintf(stderr, "%s (pid %d)\n", paint(stderr, styleDim, "waiting for ovnfs to finish shutting down"), st.PID)
 			}
 		}
 		select {
@@ -262,7 +262,7 @@ func runStop(c *cli, args []string) error {
 		return err
 	}
 	if !accepting(c.state) {
-		fmt.Fprintln(os.Stderr, "not running")
+		fmt.Fprintln(stderr, paint(stderr, styleDim, "not running"))
 		return nil
 	}
 	raw, err := stopDaemon(c, api.StopArgs{})
@@ -270,9 +270,9 @@ func runStop(c *cli, args []string) error {
 		return err
 	}
 	if c.json && raw != nil {
-		fmt.Println(string(raw))
+		fmt.Fprintln(stdout, string(raw))
 	}
-	fmt.Fprintln(os.Stderr, "stopped ovnfs")
+	fmt.Fprintln(stderr, paint(stderr, styleGreen, "stopped ovnfs"))
 	return nil
 }
 
@@ -312,7 +312,7 @@ func runRestart(c *cli, args []string) error {
 		_, err := call[api.Status](c, "status", struct{}{})
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "restarted ovnfs (pid %d, log %s)\n", pid, logPath(c.state))
+	fmt.Fprintf(stderr, "%s ovnfs (pid %d, log %s)\n", paint(stderr, styleGreen, "restarted"), pid, paint(stderr, styleDim, logPath(c.state)))
 	return nil
 }
 
@@ -331,11 +331,11 @@ func runStatus(c *cli, args []string) error {
 	}
 	if !accepting(c.state) {
 		// Under --json stdout carries only JSON; the exit status says it all.
-		out := os.Stdout
+		out := io.Writer(stdout)
 		if c.json {
-			out = os.Stderr
+			out = stderr
 		}
-		fmt.Fprintln(out, "not running")
+		fmt.Fprintln(out, paint(out, styleRed, "not running"))
 		return exitCode(1)
 	}
 	st, err := call[api.Status](c, "status", struct{}{})
@@ -361,7 +361,7 @@ func runStatus(c *cli, args []string) error {
 		{"blob cache", usage(st.BlobCache, "off")},
 	}
 	for _, row := range rows {
-		fmt.Printf("%-10s  %s\n", row[0], row[1])
+		fmt.Fprintf(stdout, "%s%s%s\n", paint(stdout, styleDim, row[0]), strings.Repeat(" ", max(2, 12-len(row[0]))), row[1])
 	}
 	return nil
 }

@@ -166,6 +166,9 @@ is always pruned.
   example, `ovnfs --json new` returns `{"checkout":{"name","path","base","git",...},"capture":{...},"warnings":[]}`.
   `ovnfs start --json` makes sure the daemon runs and prints its admin socket,
   for embedding.
+- Output is coloured on a terminal only: a captured or piped stream is plain
+  text. `--color auto|always|never` overrides it. Parse `--json`, never the
+  human tables, which pad and colour by terminal width.
 - To tell whether you are in a checkout, run `git config --get ovnfs.checkout`
   inside it (it prints the name; the folder's repository never gets this key),
   or check `$OVNFS_CHECKOUT` under `ovnfs run`.

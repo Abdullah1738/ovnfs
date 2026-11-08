@@ -36,7 +36,7 @@ func runUpdate(c *cli, args []string) error {
 		return err
 	}
 	if accepting(c.state) {
-		fmt.Fprintln(os.Stderr, "the running daemon is the old version; 'ovnfs restart' swaps in the new one")
+		fmt.Fprintln(stderr, paint(stderr, styleYellow, "the running daemon is the old version; 'ovnfs restart' swaps in the new one"))
 	}
 	return nil
 }
@@ -68,10 +68,10 @@ func update(ctx context.Context, exe string, bi *debug.BuildInfo) (bool, error) 
 		latest = bin.Tag
 	}
 	if latest == current {
-		fmt.Fprintf(os.Stderr, "ovnfs %s is the latest\n", current)
+		fmt.Fprintf(stderr, "%s is the latest\n", paint(stderr, styleGreen, "ovnfs "+current))
 		return false, nil
 	}
-	fmt.Fprintf(os.Stderr, "updating %s from ovnfs %s to %s\n", exe, current, latest)
+	fmt.Fprintf(stderr, "%s %s from ovnfs %s to %s\n", paint(stderr, styleYellow, "updating"), exe, current, paint(stderr, styleGreen, latest))
 
 	// Stage the new binary beside exe, on the same volume, so it can be renamed over it.
 	dir, err := os.MkdirTemp(filepath.Dir(exe), ".ovnfs-update-")
@@ -105,7 +105,7 @@ func update(ctx context.Context, exe string, bi *debug.BuildInfo) (bool, error) 
 	if err := replaceExe(exe, next); err != nil {
 		return false, fmt.Errorf("replacing %s: %w", exe, err)
 	}
-	fmt.Fprintf(os.Stderr, "updated to ovnfs %s\n", latest)
+	fmt.Fprintf(stderr, "%s to %s\n", paint(stderr, styleGreen, "updated"), paint(stderr, styleGreen, "ovnfs "+latest))
 	return true, nil
 }
 

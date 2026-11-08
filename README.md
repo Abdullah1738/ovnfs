@@ -72,7 +72,9 @@ ovnfs ls .                     # the checkouts of this folder
 ovnfs prune . --idle 7d        # remove those untouched for a week (--dry-run first)
 ```
 
-`ovnfs help` lists every verb. Verbs start the daemon when none is running;
+`ovnfs help` lists every verb, grouped by what they do and coloured on a
+terminal (`--color auto|always|never`, `NO_COLOR` honoured; a pipe gets plain
+text). Verbs start the daemon when none is running;
 `start`, `stop`, `restart` and `status` manage it, `serve` runs it in the
 foreground. `restart` swaps in the daemon of the binary you run, e.g. after an
 upgrade, leaving an NFS or SMB mount and the shells inside it in place. `stop`

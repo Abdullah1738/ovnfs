@@ -81,13 +81,13 @@ func runRun(c *cli, args []string) error {
 	}
 	defer func() {
 		if o.keep {
-			fmt.Fprintf(os.Stderr, "kept %s %s\n", r.Checkout.Name, r.Checkout.Path)
+			fmt.Fprintf(stderr, "%s %s %s\n", paint(stderr, styleGreen, "kept"), paint(stderr, styleAccent, r.Checkout.Name), paint(stderr, styleDim, r.Checkout.Path))
 			return
 		}
 		// SIGINT/SIGTERM cancel the CLI context, but must not cancel removal.
 		c.ctx = context.WithoutCancel(c.ctx)
 		if _, err := call[struct{}](c, "rm", api.RmArgs{Checkout: r.Checkout.Name}); err != nil {
-			fmt.Fprintf(os.Stderr, "run: removing %s: %v\n", r.Checkout.Name, err)
+			fmt.Fprintf(stderr, "%s %v\n", paint(stderr, styleYellow, "run: removing "+r.Checkout.Name+":"), err)
 		}
 	}()
 	cmd := exec.Command(o.command[0], o.command[1:]...)
@@ -117,7 +117,7 @@ func runRemote(c *cli, o runOptions, cwd string, signals <-chan os.Signal) error
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "lane %s → %s:%s\n", r.Checkout, o.on, r.RemotePath)
+	fmt.Fprintf(stderr, "%s %s %s %s\n", paint(stderr, styleDim, "lane"), paint(stderr, styleAccent, r.Checkout), paint(stderr, styleDim, "→"), paint(stderr, styleAccent, o.on+":"+r.RemotePath))
 	remoteDir := path.Join(r.RemotePath, filepath.ToSlash(runRelativeDir(root, cwd)))
 	cmd := sshCommand(o.on, runRemoteCommand(remoteDir, o.command))
 	return runChild(cmd, signals)
@@ -176,7 +176,7 @@ func runRemoteCommand(dir string, args []string) string {
 func runChild(cmd *exec.Cmd, signals <-chan os.Signal) error {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "run: %v\n", err)
+		fmt.Fprintln(stderr, colorError(fmt.Errorf("run: %w", err)))
 		return exitCode(127)
 	}
 	done := make(chan struct{})

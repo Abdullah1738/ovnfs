@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"unicode/utf8"
 
 	"github.com/stencil-hq/ovnfs/api"
@@ -38,7 +37,7 @@ func runPush(c *cli, args []string) error {
 	if err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	rows := [][]string{}
 	failed := 0
 	for _, p := range r.Pushed {
 		if p.Error != "" {
@@ -47,12 +46,12 @@ func runPush(c *cli, args []string) error {
 			if p.TotalBlobs > 0 {
 				got = fmt.Sprintf(" (%s of %s fetched)", commas(p.Blobs), plural(int(p.TotalBlobs), "blob", "blobs"))
 			}
-			fmt.Fprintf(os.Stderr, "push %s to %s: %s%s\n", p.Checkout, p.To, p.Error, got)
+			fmt.Fprintf(stderr, "%s %s: %s%s\n", paint(stderr, styleRed, "push "+p.Checkout), paint(stderr, styleDim, "to "+p.To), paint(stderr, styleRed, p.Error), got)
 		} else if !c.json {
-			fmt.Fprintf(tw, "%s\t→ %s\t%s\t%s\n", p.Checkout, p.To, plural(int(p.Blobs), "blob", "blobs"), humanBytes(p.Bytes))
+			rows = append(rows, []string{paint(stdout, styleAccent, p.Checkout), paint(stdout, styleDim, "→ "+p.To), plural(int(p.Blobs), "blob", "blobs"), humanBytes(p.Bytes)})
 		}
 	}
-	tw.Flush()
+	table(stdout, rows)
 	if failed > 0 {
 		return exitCode(1)
 	}

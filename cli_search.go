@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 
 	"github.com/stencil-hq/ovnfs/api"
@@ -80,30 +82,44 @@ func runGrep(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
+	pattern := ""
+	if a.Literal && !a.IgnoreCase {
+		pattern = a.Pattern
+	}
 	for _, m := range r.Matches {
 		switch a.Mode {
 		case "filesWithMatches":
-			fmt.Println(m.Path)
+			fmt.Fprintln(stdout, paint(stdout, styleAccent, m.Path))
 		case "count":
-			fmt.Printf("%s:%d\n", m.Path, m.Count)
+			fmt.Fprintf(stdout, "%s:%s\n", paint(stdout, styleAccent, m.Path), paint(stdout, styleGreen, strconv.Itoa(m.Count)))
 		default:
 			for _, line := range m.Before {
-				fmt.Printf("%s-%d-%s\n", m.Path, line.Line, line.Text)
+				grepLine(stdout, m.Path, line.Line, line.Text, false, pattern)
 			}
 			for lineNumber, text := m.Line, m.Text; ; lineNumber++ {
 				line, rest, more := strings.Cut(text, "\n")
-				fmt.Printf("%s:%d:%s\n", m.Path, lineNumber, line)
+				grepLine(stdout, m.Path, lineNumber, line, true, pattern)
 				if !more {
 					break
 				}
 				text = rest
 			}
 			for _, line := range m.After {
-				fmt.Printf("%s-%d-%s\n", m.Path, line.Line, line.Text)
+				grepLine(stdout, m.Path, line.Line, line.Text, false, pattern)
 			}
 		}
 	}
 	return nil
+}
+
+// grepLine prints one `path:line:text` match or `path-line-text` context line,
+// colouring the path, the line number and the matched text.
+func grepLine(w io.Writer, path string, line int, text string, match bool, pattern string) {
+	num, sep := styleDim, "-"
+	if match {
+		num, sep = styleGreen, ":"
+	}
+	fmt.Fprintf(w, "%s%s%s%s%s\n", paint(w, styleAccent, path), paint(w, styleDim, sep), paint(w, num, strconv.Itoa(line)), paint(w, styleDim, sep), highlight(w, text, pattern))
 }
 
 // runGlob lists matching paths, marking directories with a trailing slash.
@@ -133,11 +149,11 @@ func runGlob(c *cli, args []string) error {
 		return err
 	}
 	for _, m := range r.Matches {
-		path := m.Path
 		if m.Type == "dir" {
-			path = strings.TrimSuffix(path, "/") + "/"
+			fmt.Fprintln(stdout, paint(stdout, styleAccent, strings.TrimSuffix(m.Path, "/")+"/"))
+			continue
 		}
-		fmt.Println(path)
+		fmt.Fprintln(stdout, m.Path)
 	}
 	return nil
 }

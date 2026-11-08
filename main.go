@@ -14,11 +14,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"slices"
+	"strings"
 	"syscall"
-	"text/tabwriter"
 
-	"github.com/stencil-hq/ovnfs/api"
+	"charm.land/lipgloss/v2"
+
 	"github.com/stencil-hq/ovnfs/manifest"
 )
 
@@ -68,7 +68,7 @@ func main() {
 	case errors.As(err, &code):
 		os.Exit(int(code))
 	default:
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(stderr, colorError(err))
 		os.Exit(1)
 	}
 }
@@ -86,21 +86,20 @@ The old mesh state in <state>/mesh can be deleted.`
 func run(args []string) error {
 	c := &cli{}
 	fs := c.flags("ovnfs")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			printUsage(os.Stdout)
-			return nil
-		}
+	if err := fs.Parse(args); err != nil && !errors.Is(err, flag.ErrHelp) {
 		return fmt.Errorf("%w; run 'ovnfs help'", err)
 	}
+	if err := c.setColor(); err != nil {
+		return err
+	}
 	if fs.NArg() == 0 {
-		printUsage(os.Stdout)
+		printUsage(stdout)
 		return nil
 	}
 	verb, rest := fs.Arg(0), fs.Args()[1:]
 	switch verb {
 	case "help":
-		printUsage(os.Stdout)
+		printUsage(stdout)
 		return nil
 	case "version":
 		// version reads no configuration, so it runs where none parses.
@@ -168,28 +167,40 @@ func runVersion(c *cli, args []string) error {
 	return nil
 }
 
-// printUsage lists every verb, daemon operations first in api.Ops order.
+// printUsage lists every verb, grouped into the helpGroups sections, then the
+// global options.
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: ovnfs [--state DIR] [--mount DIR] [--json] VERB [ARGS]")
-	fmt.Fprintln(w)
-	cmds := slices.Clone(commands())
-	rank := func(name string) int {
-		if i := slices.Index(api.Ops, name); i >= 0 {
-			return i
+	fmt.Fprintf(w, "%s %s\n", paint(w, styleBold, "usage:"), "ovnfs [options] VERB [ARGS]")
+	rows := helpRows()
+	width := 0
+	for _, cmd := range rows {
+		width = max(width, lipgloss.Width(strings.TrimSpace(cmd.name+" "+cmd.args)))
+	}
+	for _, group := range helpGroups {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, paint(w, styleAccent.Bold(true), group))
+		for _, cmd := range rows {
+			if cmd.group != group {
+				continue
+			}
+			verb := paint(w, styleBold, cmd.name) + paintIf(w, cmd.args != "", styleDim, " "+cmd.args)
+			pad := strings.Repeat(" ", width-lipgloss.Width(strings.TrimSpace(cmd.name+" "+cmd.args))+2)
+			fmt.Fprintf(w, "  %s%s%s\n", verb, pad, cmd.desc)
 		}
-		return len(api.Ops)
 	}
-	slices.SortStableFunc(cmds, func(a, b command) int { return rank(a.name) - rank(b.name) })
-	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	for _, cmd := range cmds {
-		fmt.Fprintf(tw, "  %s %s\t%s\n", cmd.name, cmd.args, cmd.desc)
-	}
-	fmt.Fprintf(tw, "  serve [-proto nfs|smb|fuse|winfsp] [-listen ADDR]\trun the daemon in the foreground\n")
-	fmt.Fprintf(tw, "  help\tshow this help\n")
-	tw.Flush()
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "options (before the verb or among its arguments):")
-	fmt.Fprintln(w, "  --state DIR   daemon state, env OVNFS_STATE, state in ~/.o2/ovnfs.yml (default "+defaultState+")")
-	fmt.Fprintln(w, "  --mount DIR   checkout mount (a free drive letter on Windows), env OVNFS_MOUNT, mount in ~/.o2/ovnfs.yml (default "+defaultMount+")")
-	fmt.Fprintln(w, "  --json        print the raw reply JSON")
+	fmt.Fprintln(w, paint(w, styleBold, "options (before the verb or among its arguments)"))
+	options := [][2]string{
+		{"--state DIR", "daemon state, env OVNFS_STATE, state in ~/.o2/ovnfs.yml (default " + defaultState + ")"},
+		{"--mount DIR", "checkout mount (a free drive letter on Windows), env OVNFS_MOUNT, mount in ~/.o2/ovnfs.yml (default " + defaultMount + ")"},
+		{"--json", "print the raw reply JSON"},
+		{"--color WHEN", "colour the output: auto on a terminal, always or never (NO_COLOR is honored)"},
+	}
+	owidth := 0
+	for _, o := range options {
+		owidth = max(owidth, len(o[0]))
+	}
+	for _, o := range options {
+		fmt.Fprintf(w, "  %s%s%s\n", paint(w, styleAccent, o[0]), strings.Repeat(" ", owidth-len(o[0])+2), o[1])
+	}
 }

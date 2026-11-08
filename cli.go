@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/stencil-hq/ovnfs/admin"
@@ -26,7 +25,8 @@ type cli struct {
 	state     string
 	mount     string
 	json      bool
-	autostart bool // start the daemon when its socket does not accept connections
+	color     string // --color: auto, always or never
+	autostart bool   // start the daemon when its socket does not accept connections
 	cmd       command
 	conn      *admin.Client
 }
@@ -36,42 +36,64 @@ type command struct {
 	name      string
 	args      string
 	desc      string
+	group     string // help section, one of helpGroups
 	autostart bool
 	run       func(c *cli, args []string) error
 }
 
-// commands returns the verb table; a function so help can refer to it without an init cycle.
+// Help sections, in the order `ovnfs help` prints them.
+const (
+	groupCheckouts = "checkouts"
+	groupInspect   = "inspect"
+	groupCleanup   = "clean up"
+	groupRemote    = "other machines"
+	groupDaemon    = "daemon"
+	groupBinary    = "ovnfs itself"
+)
+
+// helpGroups orders the sections of `ovnfs help`.
+var helpGroups = []string{groupCheckouts, groupInspect, groupCleanup, groupRemote, groupDaemon, groupBinary}
+
+// helpExtras are the verbs serve and help, which run before a resolved
+// configuration and so stay out of commands(); they still take a help row.
+var helpExtras = []command{
+	{name: "serve", args: "[-proto nfs|smb|fuse|winfsp] [-listen ADDR]", desc: "run the daemon in the foreground", group: groupDaemon},
+	{name: "help", desc: "show this help", group: groupBinary},
+}
+
+// commands returns the verb table, ordered by help section; a function so help
+// can refer to it without an init cycle.
 func commands() []command {
 	return []command{
-		{"status", "", "show the running daemon", false, runStatus},
-		{"ls", "[CHECKOUT|DIR] [--idle DUR] [--no-diff]", "list checkouts (of DIR: . or a path with /), or one checkout's snapshots", true, runLs},
-		{"new", "[DIR] [--name N] [--rev REV | --from SNAP] [--take SRC:PATH]... [--rule LINE]...", "open a checkout on a folder (default .), git revision, or snapshot", true, runNew},
-		{"run", "[DIR] [--rev REV] [--take SRC:PATH]... [--keep] [--on HOST] -- CMD...", "run a command in a disposable checkout (also --name, --rule, --remote-bin)", true, runRun},
-		{"fork", "CHECKOUT [--name N] [-m LABEL]", "snapshot a checkout and open a second checkout on it", true, runFork},
-		{"snap", "CHECKOUT [-m LABEL] [--wait]", "freeze a checkout's changes into a snapshot", true, runSnap},
-		{"diff", "CHECKOUT [SNAP] [-p|--patch] [--binary]", "list source changes since a snapshot (default: the base)", true, runDiff},
-		{"grep", "PATTERN [DIR|CHECKOUT] [--glob GLOB] [-F] [-i] [-C N] [--max-count N]", "search contents in the daemon, bypassing the checkout mount", true, runGrep},
-		{"glob", "PATTERN [DIR|CHECKOUT] [--type file|dir|symlink] [--limit N] [--mtime]", "list matching paths in the daemon, bypassing the checkout mount", true, runGlob},
-		{"apply", "CHECKOUT [--dry-run] [--branch B]", "merge a checkout's source changes back into its folder", true, runApply},
-		{"rm", "CHECKOUT [--sticky-snapshots]", "remove a checkout and its unused snapshots; --sticky-snapshots retains them", true, runRm},
-		{"prune", "[DIR] [--idle DUR] [--no-diff] [--dry-run] [--sticky-snapshots]", "remove matching checkouts and unused snapshots; --sticky-snapshots retains them", true, runPrune},
-		{"drop", "SNAP", "release a snapshot", true, runDrop},
-		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", true, runExplain},
-		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", true, runPlan},
-		{"profile", "[KIND] [--seconds D] [-o FILE]", "capture a runtime profile from the daemon (cpu, heap, allocs, goroutine, block, mutex, threadcreate)", true, runProfile},
-		{"attach", "[DIR|CHECKOUT] --to HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine over ssh; content moves on first read", true, runAttach},
-		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there if missing; PATH there links to the checkout", true, runSend},
-		{"pull", "CHECKOUT [--from HOST] [--dry-run]", "merge attached remote source changes into the local checkout", true, runPull},
-		{"push", "[CHECKOUT] [--to HOST]", "have attached machines fetch all content they still read from this one, so they work without it", true, runPush},
-		{"share", "CHECKOUT [--rw]", "serve a checkout over remote-fs for a VM (vmon --remote-fs TAG:SOCK[:rw]) or a peer", true, runShare},
-		{"link", "", "pipe an attach session from ssh into this machine's daemon (run by attach)", true, runLink},
-		{"subscribe", "", "stream daemon events as JSON lines until interrupted", true, runSubscribe},
-		{"stop", "", "stop the daemon", false, runStop},
-		{"restart", "[--json]", "stop the daemon and start a new one from this binary; --json prints the new one's status", false, runRestart},
-		{"start", "[--json]", "make sure the daemon runs (starting it in the background); --json prints its status and socket", false, runStart},
-		{"ctl", "OP ['JSON']", "send one raw admin request and print the raw reply", true, runCtl},
-		{"version", "[--json]", "print the version and toolchain this binary was built from", false, runVersion},
-		{"update", "", "replace this binary with the latest ovnfs, by go install if it built it, else from the latest release", false, runUpdate},
+		{"ls", "[CHECKOUT|DIR] [--idle DUR] [--no-diff]", "list checkouts (of DIR: . or a path with /), or one checkout's snapshots", groupCheckouts, true, runLs},
+		{"new", "[DIR] [--name N] [--rev REV | --from SNAP] [--take SRC:PATH]... [--rule LINE]...", "open a checkout on a folder (default .), git revision, or snapshot", groupCheckouts, true, runNew},
+		{"run", "[DIR] [--rev REV] [--take SRC:PATH]... [--keep] [--on HOST] -- CMD...", "run a command in a disposable checkout (also --name, --rule, --remote-bin)", groupCheckouts, true, runRun},
+		{"fork", "CHECKOUT [--name N] [-m LABEL]", "snapshot a checkout and open a second checkout on it", groupCheckouts, true, runFork},
+		{"snap", "CHECKOUT [-m LABEL] [--wait]", "freeze a checkout's changes into a snapshot", groupCheckouts, true, runSnap},
+		{"diff", "CHECKOUT [SNAP] [-p|--patch] [--binary]", "list source changes since a snapshot (default: the base)", groupCheckouts, true, runDiff},
+		{"apply", "CHECKOUT [--dry-run] [--branch B]", "merge a checkout's source changes back into its folder", groupCheckouts, true, runApply},
+		{"grep", "PATTERN [DIR|CHECKOUT] [--glob GLOB] [-F] [-i] [-C N] [--max-count N]", "search contents in the daemon, bypassing the checkout mount", groupInspect, true, runGrep},
+		{"glob", "PATTERN [DIR|CHECKOUT] [--type file|dir|symlink] [--limit N] [--mtime]", "list matching paths in the daemon, bypassing the checkout mount", groupInspect, true, runGlob},
+		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", groupInspect, true, runExplain},
+		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", groupInspect, true, runPlan},
+		{"rm", "CHECKOUT [--sticky-snapshots]", "remove a checkout and its unused snapshots; --sticky-snapshots retains them", groupCleanup, true, runRm},
+		{"prune", "[DIR] [--idle DUR] [--no-diff] [--dry-run] [--sticky-snapshots]", "remove matching checkouts and unused snapshots; --sticky-snapshots retains them", groupCleanup, true, runPrune},
+		{"drop", "SNAP", "release a snapshot", groupCleanup, true, runDrop},
+		{"attach", "[DIR|CHECKOUT] --to HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine over ssh; content moves on first read", groupRemote, true, runAttach},
+		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there if missing; PATH there links to the checkout", groupRemote, true, runSend},
+		{"pull", "CHECKOUT [--from HOST] [--dry-run]", "merge attached remote source changes into the local checkout", groupRemote, true, runPull},
+		{"push", "[CHECKOUT] [--to HOST]", "have attached machines fetch all content they still read from this one, so they work without it", groupRemote, true, runPush},
+		{"share", "CHECKOUT [--rw]", "serve a checkout over remote-fs for a VM (vmon --remote-fs TAG:SOCK[:rw]) or a peer", groupRemote, true, runShare},
+		{"link", "", "pipe an attach session from ssh into this machine's daemon (run by attach)", groupRemote, true, runLink},
+		{"status", "", "show the running daemon", groupDaemon, false, runStatus},
+		{"start", "[--json]", "make sure the daemon runs (starting it in the background); --json prints its status and socket", groupDaemon, false, runStart},
+		{"stop", "", "stop the daemon", groupDaemon, false, runStop},
+		{"restart", "[--json]", "stop the daemon and start a new one from this binary; --json prints the new one's status", groupDaemon, false, runRestart},
+		{"subscribe", "", "stream daemon events as JSON lines until interrupted", groupDaemon, true, runSubscribe},
+		{"ctl", "OP ['JSON']", "send one raw admin request and print the raw reply", groupDaemon, true, runCtl},
+		{"profile", "[KIND] [--seconds D] [-o FILE]", "capture a runtime profile from the daemon (cpu, heap, allocs, goroutine, block, mutex, threadcreate)", groupDaemon, true, runProfile},
+		{"version", "[--json]", "print the version and toolchain this binary was built from", groupBinary, false, runVersion},
+		{"update", "", "replace this binary with the latest ovnfs, by go install if it built it, else from the latest release", groupBinary, false, runUpdate},
 	}
 }
 
@@ -101,6 +123,7 @@ func (c *cli) flags(name string) *flag.FlagSet {
 	fs.StringVar(&c.state, "state", c.state, "daemon state directory")
 	fs.StringVar(&c.mount, "mount", c.mount, "checkout mount directory")
 	fs.BoolVar(&c.json, "json", c.json, "print the raw reply JSON")
+	fs.StringVar(&c.color, "color", "auto", "colour the output: auto, always or never")
 	return fs
 }
 
@@ -127,11 +150,15 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 func (c *cli) parse(fs *flag.FlagSet, args []string, minPos, maxPos int) ([]string, error) {
 	pos, err := parseInterspersed(fs, args)
 	if errors.Is(err, flag.ErrHelp) {
-		fmt.Printf("usage: ovnfs %s %s\n  %s\n", c.cmd.name, c.cmd.args, c.cmd.desc)
+		fmt.Fprintf(stdout, "%s ovnfs %s%s\n  %s\n", paint(stdout, styleBold, "usage:"),
+			paint(stdout, styleAccent, c.cmd.name), paintIf(stdout, c.cmd.args != "", styleDim, " "+c.cmd.args), c.cmd.desc)
 		return nil, exitCode(0)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w\n%s", c.cmd.name, err, c.usage())
+	}
+	if err := c.setColor(); err != nil {
+		return nil, err
 	}
 	if len(pos) < minPos || len(pos) > maxPos {
 		return nil, errors.New(c.usage())
@@ -141,7 +168,12 @@ func (c *cli) parse(fs *flag.FlagSet, args []string, minPos, maxPos int) ([]stri
 
 // usage is the one-line synopsis of the running verb.
 func (c *cli) usage() string {
-	return strings.TrimSpace("usage: ovnfs " + c.cmd.name + " " + c.cmd.args)
+	return strings.TrimSpace("usage: ovnfs " + paint(stdout, styleAccent, c.cmd.name) + paintIf(stdout, c.cmd.args != "", styleDim, " "+c.cmd.args))
+}
+
+// helpRows is the `ovnfs help` table: every command plus the extras.
+func helpRows() []command {
+	return append(commands(), helpExtras...)
 }
 
 // call sends one operation and returns the raw reply, starting the daemon if allowed.
@@ -207,26 +239,21 @@ func runLs(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	defer tw.Flush()
 	if name == "" {
-		printCheckouts(tw, r)
+		printCheckouts(stdout, r)
 		return nil
 	}
+	rows := [][]string{{paint(stdout, styleBold, "ID"), paint(stdout, styleBold, "LABEL"), paint(stdout, styleBold, "CREATED"), paint(stdout, styleBold, "TREE")}}
 	header := false
 	for _, s := range r.Snapshots {
 		if s.Checkout != name {
 			continue
 		}
-		if !header {
-			fmt.Fprintln(tw, "ID\tLABEL\tCREATED\tTREE")
-			header = true
-		}
-		tree := "hashing…"
-		if s.Tree != "" {
-			tree = abbrev(s.Tree, 12)
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.ID, s.Label, stamp(s.Created), tree)
+		header = true
+		rows = append(rows, []string{paint(stdout, styleAccent, s.ID), s.Label, paint(stdout, styleDim, stamp(s.Created)), treeCell(stdout, s.Tree)})
+	}
+	if header {
+		table(stdout, rows)
 	}
 	if !header && !slices.ContainsFunc(r.Checkouts, func(h api.Checkout) bool { return h.Name == name }) {
 		if isDirArg(name) {
@@ -245,30 +272,45 @@ func printCheckouts(w io.Writer, r api.LsReply) {
 		snaps[s.Checkout]++
 	}
 	if len(r.Checkouts) > 0 {
-		fmt.Fprintln(w, "CHECKOUT\tSOURCE\tSNAPS\tCHANGED\tTOUCHED\tPATH")
+		rows := [][]string{{paint(w, styleBold, "CHECKOUT"), paint(w, styleBold, "SOURCE"), paint(w, styleBold, "SNAPS"), paint(w, styleBold, "CHANGED"), paint(w, styleBold, "TOUCHED"), paint(w, styleBold, "PATH")}}
 		for _, h := range r.Checkouts {
 			live[h.Name] = true
-			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", h.Name, h.Source, snaps[h.Name], yesNo(h.Dirty), stamp(h.Touched), h.Path)
+			rows = append(rows, []string{
+				paint(w, styleAccent.Bold(true), h.Name),
+				paint(w, styleDim, h.Source),
+				fmt.Sprint(snaps[h.Name]),
+				paintIf(w, h.Dirty, styleYellow, paintIf(w, !h.Dirty, styleGreen, yesNo(h.Dirty))),
+				paint(w, styleDim, stamp(h.Touched)),
+				h.Path,
+			})
 		}
+		table(w, rows)
 	}
-	header := false
+	var orphans [][]string
 	for _, s := range r.Snapshots {
 		if live[s.Checkout] {
 			continue
 		}
-		if !header {
-			if len(r.Checkouts) > 0 {
-				fmt.Fprintln(w)
-			}
-			fmt.Fprintln(w, "ORPHAN SNAPSHOT\tCHECKOUT\tLABEL\tCREATED\tTREE")
-			header = true
+		if len(orphans) == 0 {
+			orphans = append(orphans, []string{paint(w, styleBold, "ORPHAN SNAPSHOT"), paint(w, styleBold, "CHECKOUT"), paint(w, styleBold, "LABEL"), paint(w, styleBold, "CREATED"), paint(w, styleBold, "TREE")})
 		}
-		tree := "hashing…"
-		if s.Tree != "" {
-			tree = abbrev(s.Tree, 12)
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Checkout, s.Label, stamp(s.Created), tree)
+		orphans = append(orphans, []string{paint(w, styleAccent, s.ID), paint(w, styleAccent, s.Checkout), s.Label, paint(w, styleDim, stamp(s.Created)), treeCell(w, s.Tree)})
 	}
+	if len(orphans) > 0 {
+		if len(r.Checkouts) > 0 {
+			fmt.Fprintln(w)
+		}
+		table(w, orphans)
+	}
+}
+
+// treeCell renders a snapshot's content id: abbreviated and dim, or a placeholder
+// while the daemon hashes it.
+func treeCell(w io.Writer, tree string) string {
+	if tree == "" {
+		return paint(w, styleDim, "hashing…")
+	}
+	return paint(w, styleDim, abbrev(tree, 12))
 }
 
 // selectFlags registers the flags ls and prune pick checkouts by (see api.Select).
@@ -325,17 +367,17 @@ func runPrune(c *cli, args []string) error {
 		return err
 	}
 	for _, h := range r.Removed {
-		fmt.Println(h.Name)
+		fmt.Fprintln(stdout, h.Name)
 	}
 	switch n := plural(len(r.Removed), "checkout", "checkouts"); {
 	case len(r.Removed) == 0:
-		fmt.Fprintln(os.Stderr, "no checkout matches")
+		fmt.Fprintln(stderr, paint(stderr, styleYellow, "no checkout matches"))
 	case a.DryRun:
-		fmt.Fprintf(os.Stderr, "would remove %s\n", n)
+		fmt.Fprintf(stderr, "%s %s\n", paint(stderr, styleYellow, "would remove"), n)
 	case a.StickySnapshots:
-		fmt.Fprintf(os.Stderr, "removed %s; snapshots retained\n", n)
+		fmt.Fprintf(stderr, "%s %s; snapshots retained\n", paint(stderr, styleGreen, "removed"), n)
 	default:
-		fmt.Fprintf(os.Stderr, "removed %s and their snapshots\n", n)
+		fmt.Fprintf(stderr, "%s %s and their snapshots\n", paint(stderr, styleGreen, "removed"), n)
 	}
 	return nil
 }
@@ -380,15 +422,15 @@ func runNew(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
-	fmt.Println(r.Checkout.Path)
+	fmt.Fprintln(stdout, r.Checkout.Path)
 	from := r.Checkout.Source
 	if a.Snapshot != "" {
 		from = strings.TrimPrefix(from+"@", "@") + a.Snapshot
 	}
-	fmt.Fprintf(os.Stderr, "%s  ←  %s\n", r.Checkout.Name, from)
+	fmt.Fprintf(stderr, "%s  %s  %s\n", paint(stderr, styleAccent.Bold(true), r.Checkout.Name), paint(stderr, styleDim, "←"), paint(stderr, styleDim, from))
 	if cp := r.Capture; cp != nil {
-		fmt.Fprintf(os.Stderr, "  source %s files (%s) · hashed %s (%s) in %.1fs\n",
-			commas(int64(cp.Files)), humanBytes(cp.Bytes), commas(int64(cp.Hashed)), humanBytes(cp.HashedBytes), cp.Seconds)
+		fmt.Fprintf(stderr, "  %s %s files (%s) · %s %s (%s) in %.1fs\n", paint(stderr, styleDim, "source"),
+			commas(int64(cp.Files)), humanBytes(cp.Bytes), paint(stderr, styleDim, "hashed"), commas(int64(cp.Hashed)), humanBytes(cp.HashedBytes), cp.Seconds)
 		git := "none"
 		if len(cp.Repos) > 0 {
 			repos := make([]string, len(cp.Repos))
@@ -397,11 +439,14 @@ func runNew(c *cli, args []string) error {
 			}
 			git = strings.Join(repos, ", ")
 		}
-		fmt.Fprintf(os.Stderr, "  cache %s · local %s · hidden %s · git: %s\n",
-			commas(int64(cp.Cache)), commas(int64(cp.Local)), commas(int64(cp.Hidden)), git)
+		fmt.Fprintf(stderr, "  %s · %s · %s · %s\n",
+			paint(stderr, styleDim, "cache "+commas(int64(cp.Cache))),
+			paint(stderr, styleDim, "local "+commas(int64(cp.Local))),
+			paint(stderr, styleDim, "hidden "+commas(int64(cp.Hidden))),
+			paint(stderr, styleDim, "git: "+git))
 	}
 	for _, w := range r.Warnings {
-		fmt.Fprintln(os.Stderr, "warning:", w)
+		fmt.Fprintln(stderr, paint(stderr, styleYellow, "warning:"), w)
 	}
 	return nil
 }
@@ -421,8 +466,9 @@ func runFork(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
-	fmt.Println(r.Checkout.Path)
-	fmt.Fprintf(os.Stderr, "%s  ←  %s@%s\n", r.Checkout.Name, a.Checkout, r.Snapshot.ID)
+	fmt.Fprintln(stdout, r.Checkout.Path)
+	fmt.Fprintf(stderr, "%s  %s  %s@%s\n", paint(stderr, styleAccent.Bold(true), r.Checkout.Name), paint(stderr, styleDim, "←"),
+		paint(stderr, styleAccent, a.Checkout), paint(stderr, styleDim, r.Snapshot.ID))
 	return nil
 }
 
@@ -441,12 +487,13 @@ func runSnap(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
-	fmt.Println(r.Snapshot.ID)
-	line := fmt.Sprintf("snapshot %s of %s", r.Snapshot.ID, a.Checkout)
+	fmt.Fprintln(stdout, r.Snapshot.ID)
+	line := fmt.Sprintf("%s %s %s %s", paint(stderr, styleDim, "snapshot"), paint(stderr, styleAccent, r.Snapshot.ID),
+		paint(stderr, styleDim, "of"), paint(stderr, styleAccent, a.Checkout))
 	if r.Snapshot.Tree != "" {
-		line += " tree " + abbrev(r.Snapshot.Tree, 12)
+		line += " " + paint(stderr, styleDim, "tree "+abbrev(r.Snapshot.Tree, 12))
 	}
-	fmt.Fprintln(os.Stderr, line)
+	fmt.Fprintln(stderr, line)
 	return nil
 }
 
@@ -470,12 +517,12 @@ func runDiff(c *cli, args []string) error {
 		return err
 	}
 	for _, ch := range r.Changes {
-		fmt.Printf("%s\t%s\n", ch.Status, ch.Path)
+		fmt.Fprintf(stdout, "%s\t%s\n", mark(stdout, ch.Status), ch.Path)
 	}
 	if r.Patch != "" {
-		fmt.Print(r.Patch)
+		colorPatch(stdout, r.Patch)
 		if !strings.HasSuffix(r.Patch, "\n") {
-			fmt.Println()
+			fmt.Fprintln(stdout)
 		}
 	}
 	return nil
@@ -526,27 +573,27 @@ func runPull(c *cli, args []string) error {
 func printMerge(c *cli, r api.ApplyReply, dryRun bool, again string) error {
 	if !c.json {
 		if dryRun {
-			fmt.Fprintln(os.Stderr, "dry run: nothing written")
+			fmt.Fprintln(stderr, paint(stderr, styleYellow, "dry run: nothing written"))
 		}
 		for _, ch := range r.Applied {
 			if r.Branch != "" {
-				fmt.Printf("index %s\t%s\n", ch.Status, ch.Path)
+				fmt.Fprintf(stdout, "%s %s\t%s\n", paint(stdout, styleDim, "index"), mark(stdout, ch.Status), ch.Path)
 			} else {
-				fmt.Printf("%s\t%s\n", ch.Status, ch.Path)
+				fmt.Fprintf(stdout, "%s\t%s\n", mark(stdout, ch.Status), ch.Path)
 			}
 		}
 		for _, p := range r.Merged {
-			fmt.Printf("merged %s\n", p)
+			fmt.Fprintf(stdout, "%s %s\n", paint(stdout, styleBlue, "merged"), p)
 		}
 		for _, cf := range r.Conflicts {
 			verb := "conflict"
 			if cf.Markers {
 				verb = "marked"
 			}
-			fmt.Printf("%s %s: %s\n", verb, cf.Path, cf.Reason)
+			fmt.Fprintf(stdout, "%s %s: %s\n", paint(stdout, styleRed, verb), cf.Path, paint(stdout, styleDim, cf.Reason))
 		}
 		if r.Branch != "" {
-			fmt.Printf("branch %s at %s\n", r.Branch, abbrev(r.Commit, 12))
+			fmt.Fprintf(stdout, "%s %s %s %s\n", paint(stdout, styleDim, "branch"), paint(stdout, styleAccent, r.Branch), paint(stdout, styleDim, "at"), paint(stdout, styleDim, abbrev(r.Commit, 12)))
 		}
 	}
 	if len(r.Conflicts) == 0 {
@@ -559,13 +606,13 @@ func printMerge(c *cli, r api.ApplyReply, dryRun bool, again string) error {
 		}
 	}
 	if untouched := len(r.Conflicts) - marked; untouched > 0 {
-		fmt.Fprintf(os.Stderr, "%s left untouched\n", plural(untouched, "conflict", "conflicts"))
+		fmt.Fprintf(stderr, "%s left untouched\n", paint(stderr, styleYellow, plural(untouched, "conflict", "conflicts")))
 	}
 	switch {
 	case marked > 0 && dryRun:
-		fmt.Fprintf(os.Stderr, "%s would have conflict markers\n", plural(marked, "file", "files"))
+		fmt.Fprintf(stderr, "%s would have conflict markers\n", paint(stderr, styleYellow, plural(marked, "file", "files")))
 	case marked > 0:
-		fmt.Fprintf(os.Stderr, "%s conflict markers: resolve them, then run `%s` again\n", plural(marked, "file has", "files have"), again)
+		fmt.Fprintf(stderr, "%s conflict markers: resolve them, then run `%s` again\n", paint(stderr, styleYellow, plural(marked, "file has", "files have")), paint(stderr, styleAccent, again))
 	}
 	return exitCode(1)
 }
@@ -616,8 +663,10 @@ func runAttach(c *cli, args []string) error {
 // printAttached reports an attach: host:path on stdout for scripts, the
 // checkout and link on stderr.
 func printAttached(host, path string, r api.AttachReply) {
-	fmt.Printf("%s:%s\n", host, path)
-	fmt.Fprintf(os.Stderr, "%s@%s  →  %s:%s (content moves on first read; the link reconnects while this daemon runs)\n", r.Checkout, r.Snapshot.ID, r.Host, r.RemoteCheckout)
+	fmt.Fprintf(stdout, "%s:%s\n", host, path)
+	fmt.Fprintf(stderr, "%s@%s  %s  %s:%s %s\n", paint(stderr, styleAccent.Bold(true), r.Checkout), paint(stderr, styleDim, r.Snapshot.ID),
+		paint(stderr, styleDim, "→"), paint(stderr, styleAccent, r.Host), paint(stderr, styleAccent, r.RemoteCheckout),
+		paint(stderr, styleDim, "(content moves on first read; the link reconnects while this daemon runs)"))
 }
 
 // runLink pipes stdin and stdout to the daemon's link socket; attach runs it over ssh.
@@ -656,12 +705,12 @@ func runShare(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
-	fmt.Println(reply.Socket)
+	fmt.Fprintln(stdout, reply.Socket)
 	mode := ""
 	if reply.Writable {
 		mode = ":rw"
 	}
-	fmt.Fprintf(os.Stderr, "vmon --remote-fs home:%s%s\n", reply.Socket, mode)
+	fmt.Fprintf(stderr, "%s home:%s\n", paint(stderr, styleAccent, "vmon --remote-fs"), paint(stderr, styleDim, reply.Socket+mode))
 	return nil
 }
 
@@ -698,14 +747,15 @@ func runExplain(c *cli, args []string) error {
 	if err != nil || c.json {
 		return err
 	}
-	line := fmt.Sprintf("%-7s  %s  %s %s", r.Class, r.Rule.Origin, r.Rule.Class, r.Rule.Text)
+	line := paint(stdout, classStyle(r.Class), r.Class) + strings.Repeat(" ", max(1, 9-len(r.Class))) +
+		paint(stdout, styleDim, r.Rule.Origin) + "  " + paint(stdout, styleAccent, r.Rule.Class) + " " + r.Rule.Text
 	if r.At != "" && r.At != r.Path {
-		line += " (decided at " + r.At + "/)"
+		line += paint(stdout, styleDim, " (decided at "+r.At+"/)")
 	}
 	if !r.Exists {
-		line += " (no such path; classified by name)"
+		line += paint(stdout, styleDim, " (no such path; classified by name)")
 	}
-	fmt.Println(line)
+	fmt.Fprintln(stdout, line)
 	return nil
 }
 
@@ -786,9 +836,9 @@ func relativeTo(dir, path string) (string, error) {
 
 // printPlan renders a plan as one header line and one labelled block per class.
 func printPlan(w io.Writer, r api.PlanReply) {
-	fmt.Fprintf(w, "%s → %s     %s\n", r.Root, r.On, gitSummary(r.Repos))
+	fmt.Fprintf(w, "%s %s %s     %s\n", paint(w, styleAccent, r.Root), paint(w, styleDim, "→"), r.On, paint(w, styleDim, gitSummary(r.Repos)))
 	const indent = "         " // width of the class label column
-	label := func(s string) string { return fmt.Sprintf("%-9s", s) }
+	label := func(s string) string { return paint(w, styleDim, s) + strings.Repeat(" ", max(0, 9-len(s))) }
 	counts := []string{
 		plural(r.Source.Files, "file", "files"),
 		plural(r.Local.Files, "path", "paths"),
@@ -817,7 +867,7 @@ func printPlan(w io.Writer, r api.PlanReply) {
 	}
 
 	if len(r.Cache) == 0 {
-		fmt.Fprintf(w, "%snone\n", label("cache"))
+		fmt.Fprintf(w, "%s%s\n", label("cache"), paint(w, styleDim, "none"))
 	}
 	rootWidth := 0
 	for _, cache := range r.Cache {
@@ -828,22 +878,22 @@ func printPlan(w io.Writer, r api.PlanReply) {
 		if i == 0 {
 			prefix = label("cache")
 		}
-		action := "starts empty"
+		action := paint(w, styleDim, "starts empty")
 		if cache.Rebuild != "" {
-			action = "rebuild: " + cache.Rebuild
+			action = paint(w, styleDim, "rebuild: ") + cache.Rebuild
 		}
 		if cache.KeyHash != "" {
 			key := cache.KeyHash
 			if len(key) > 11 {
 				key = key[:11] + "…"
 			}
-			action += "  key " + key
+			action += paint(w, styleDim, "  key "+key)
 		}
 		fmt.Fprintf(w, "%s%-*s  %s\n", prefix, rootWidth, cache.Root, action)
 	}
 
 	if r.Local.Files == 0 {
-		fmt.Fprintf(w, "%snone\n", label("local"))
+		fmt.Fprintf(w, "%s%s\n", label("local"), paint(w, styleDim, "none"))
 	} else {
 		list := strings.Join(r.Local.Paths, " · ")
 		if len(r.Local.Paths) < r.Local.Files {
@@ -855,12 +905,12 @@ func printPlan(w io.Writer, r api.PlanReply) {
 		fmt.Fprintf(w, "%s%s%s — stay here\n", label("local"), column(counts[1]), list)
 	}
 	if r.Hidden.Files == 0 {
-		fmt.Fprintf(w, "%snone\n", label("hidden"))
+		fmt.Fprintf(w, "%s%s\n", label("hidden"), paint(w, styleDim, "none"))
 	} else {
 		fmt.Fprintf(w, "%s%s\n", label("hidden"), counts[2])
 	}
 	for _, warning := range r.Warnings {
-		fmt.Fprintf(w, "%s%s\n", label("warn"), warning)
+		fmt.Fprintf(w, "%s%s\n", label("warn"), paint(w, styleYellow, warning))
 	}
 	fmt.Fprintf(w, "%s%s\n", label("lock"), r.Lock)
 }

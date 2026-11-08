@@ -14,6 +14,15 @@ On Linux, distribution FUSE confinement only allows mounts below `$HOME`,
 all. Keep state on the volume holding your repositories: `new` warns when they
 differ, since files are then copied instead of cloned.
 
+Human output is coloured on a terminal and plain everywhere else, so a pipe,
+a log or a redirect gets the text a script parses. `--color when` overrides
+the choice: `auto` (the default), `always` or `never`; `NO_COLOR` and
+`CLICOLOR_FORCE` are honoured. Colours are downsampled to the terminal's
+profile, so 16-colour terminals and pagers see no stray escapes. `diff -p` and
+`--binary` patches come out with the usual green additions, red deletions and
+cyan hunk headers, and every verb that prints a table aligns it by visible
+width.
+
 `serve -memory SIZE` (`OVNFS_MEMORY`, default `1G`) and `serve -blob-cache
 SIZE` (`OVNFS_BLOB_CACHE`, default `512M`) size the memory tiers described in
 [internals](internals.md#memory-tiers); `start` passes the environment on.

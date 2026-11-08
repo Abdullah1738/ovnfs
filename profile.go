@@ -145,6 +145,6 @@ func runProfile(c *cli, args []string) error {
 	if err := os.WriteFile(*out, data, 0o644); err != nil {
 		return fmt.Errorf("profile: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s profile (%s) to %s\n", reply.Kind, humanBytes(int64(reply.Bytes)), *out)
+	fmt.Fprintf(stderr, "%s %s profile (%s) to %s\n", paint(stderr, styleGreen, "wrote"), reply.Kind, humanBytes(int64(reply.Bytes)), paint(stderr, styleAccent, *out))
 	return nil
 }
