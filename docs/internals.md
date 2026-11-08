@@ -10,7 +10,9 @@ share one) and prints its status, whose `socket` is the admin socket.
 On it, frames are JSON objects behind a little-endian u32 length:
 
 1. the client sends `{"hello": {"client": "…"}}`;
-2. the daemon replies `{"welcome": {"version": 5, "ops": […], …}}`;
+2. the daemon replies `{"welcome": {"version": 5, "ops": […], "features": […], …}}`,
+   where `features` names optional request fields it honors (`api.Features`:
+   `new.base`, `diff.binary`);
 3. each request is `{"id": N, "<op>": {args}}`, answered by
    `{"id": N, "ok": reply}` or `{"id": N, "error": {"code", "message"}}`.
 
@@ -50,7 +52,12 @@ result count, file filters or reported line width.
 When omp finds the ovnfs binary, it tells its agents to open ovnfs checkouts
 instead of git worktrees or copies, and uses this protocol to give
 each isolated subagent its own checkout (`new` when it starts, `rm` when its
-changes are merged back). Its `grep` and `glob` tools learn the daemon's mount
+changes are merged back). The checkout's capture is the state the subagent
+started from, so omp takes no baseline of it: the subagent's patch is
+`diff {binary}`, and a branch commit reads its baseline from a second checkout
+on the same capture (`new {base}`). A capture holding nested repositories or
+submodules, or a daemon without those features, gets omp's own baseline
+instead. Its `grep` and `glob` tools learn the daemon's mount
 and admin socket from `ovnfs --json status` (nothing is read from the mount)
 and send `grep`/`glob` to the daemon for search paths below that mount,
 falling back to reading through the mount when it refuses.

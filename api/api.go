@@ -11,6 +11,11 @@ import "time"
 // Ops lists every operation the daemon serves, in CLI help order.
 var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "drop", "explain", "plan", "attach", "pull", "share", "mesh.setup", "mesh.join", "mesh.ls", "mesh.rm", "mesh.leave", "subscribe", "stop"}
 
+// Features names optional request fields this daemon honors, so clients can rely on
+// them without a new protocol generation: "new.base" (NewArgs.Base) and
+// "diff.binary" (DiffArgs.Binary).
+var Features = []string{"new.base", "diff.binary"}
+
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {
 	Name    string    `json:"name"`
@@ -70,11 +75,14 @@ type LsReply struct {
 	Snapshots []Snapshot `json:"snapshots"`
 }
 
-// NewArgs opens a checkout from a folder (any folder, repo or not) or from a snapshot.
+// NewArgs opens a checkout from a folder (any folder, repo or not), from a snapshot,
+// or on an existing capture (Checkout.Base) as it was taken: its files and the git
+// state checkouts opened on it started from, whatever the folder holds now.
 type NewArgs struct {
-	Dir      string   `json:"dir,omitempty"`      // absolute; exactly one of Dir and Snapshot
+	Dir      string   `json:"dir,omitempty"`      // absolute; exactly one of Dir, Snapshot and Base
 	Snapshot string   `json:"snapshot,omitempty"` // snapshot id
-	Rev      string   `json:"rev,omitempty"`      // commit or local branch; incompatible with Snapshot
+	Base     string   `json:"base,omitempty"`     // capture id; a capture of a linked work tree may keep no git state to start from
+	Rev      string   `json:"rev,omitempty"`      // commit or local branch; folder only
 	Take     []string `json:"take,omitempty"`     // "SRC:PATH" overrides of the starting tree; SRC is "." (folder), "" (index) or a revision
 	Name     string   `json:"name,omitempty"`     // default: derived from the folder name
 	Rules    []string `json:"rules,omitempty"`    // extra rule lines, highest precedence

@@ -108,9 +108,12 @@ content-defined chunks. Copy-up and hashing still process the whole changed
 file. The metadata of a small snapshot (about 15 changed files) lives in the
 registry state instead of a manifest file of its own. `fork`
 snapshots a checkout and opens a second one on that snapshot; parent and child
-diverge. `new --from SNAP` opens a checkout on any snapshot. `rm` removes a
-checkout and keeps its snapshots; `drop` releases one. Nothing replaces the
-content of a live folder: rollback means a new checkout from a snapshot.
+diverge. `new --from SNAP` opens a checkout on any snapshot, and
+`new --base CAPTURE` on a live checkout's base (`ls --json` shows it) as it was
+captured, with the git state that checkout started from, however the folder and
+the checkout have changed since. `rm` removes a checkout and keeps its
+snapshots; `drop` releases one. Nothing replaces the content of a live folder:
+rollback means a new checkout from a snapshot.
 
 `new` (and `run`) on a checkout's own folder forks that checkout: capturing it
 would make the daemon serve the new checkout by reading through its own mount,

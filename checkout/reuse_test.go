@@ -114,6 +114,49 @@ func TestFolderCreatesReuseUnchangedCapture(t *testing.T) {
 	}
 }
 
+// TestNewOnCaptureStartsAsCaptured opens a checkout on an earlier capture after
+// the folder moved on: it holds the captured files and the git state the
+// capture's first checkout started from, under its own name.
+func TestNewOnCaptureStartsAsCaptured(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if f.reg.watcher == nil {
+		t.Skip("no folder events on this platform")
+	}
+	dir := reuseRepo(t)
+	first := f.newCheckout(dir, "first").Checkout
+	head := f.checkoutHead("first")
+	f.put("first", "a.txt", "agent")
+	write(t, filepath.Join(dir, "a.txt"), "two")
+	gitRun(t, dir, "commit", "-qam", "later")
+
+	reply, err := f.reg.New(ctx, api.NewArgs{Base: first.Base, Name: "twin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Checkout.Base != first.Base || !reply.Checkout.Git {
+		t.Fatalf("twin = %+v, want a git checkout on %s", reply.Checkout, first.Base)
+	}
+	if got := f.read("twin", "a.txt"); got != "one" {
+		t.Fatalf("twin serves %q, want the captured file", got)
+	}
+	if got := f.checkoutHead("twin"); got != head {
+		t.Fatalf("twin HEAD %s, want %s", got, head)
+	}
+	if got := gitRun(t, f.t.TempDir(), "--git-dir", f.gitdir("twin"), "config", "ovnfs.checkout"); got != "twin" {
+		t.Fatalf("twin marker = %q", got)
+	}
+	if got := gitRun(t, f.t.TempDir(), "--git-dir", f.gitdir("twin"), "cat-file", "-t", "HEAD^{tree}"); got != "tree" {
+		t.Fatalf("twin cannot read its objects: %q", got)
+	}
+	if _, err := f.reg.New(ctx, api.NewArgs{Base: "b_missing"}); err == nil {
+		t.Fatal("a checkout on an unknown capture opened")
+	}
+	if _, err := f.reg.New(ctx, api.NewArgs{Base: first.Base, Dir: dir}); err == nil {
+		t.Fatal("a create naming both a folder and a capture opened")
+	}
+}
+
 // TestPreparedCheckoutsOutsideRepositories serves checkouts of a folder outside
 // any repository from prepared ones as well, with no git directory.
 func TestPreparedCheckoutsOutsideRepositories(t *testing.T) {

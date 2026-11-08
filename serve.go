@@ -267,7 +267,7 @@ func serve(args []string) error {
 	md.resume()
 	defer md.stop()
 	stopRequests := make(chan struct{}, 1)
-	welcome := admin.Welcome{Version: protocolVersion, Ops: api.Ops, Proto: *proto, Port: port, Mount: *mount, State: *state}
+	welcome := admin.Welcome{Version: protocolVersion, Ops: api.Ops, Features: api.Features, Proto: *proto, Port: port, Mount: *mount, State: *state}
 	handler := &opsHandler{reg: reg, shares: checkoutShares, links: lk, mesh: md, welcome: welcome, started: time.Now(), stop: func() {
 		select {
 		case stopRequests <- struct{}{}:

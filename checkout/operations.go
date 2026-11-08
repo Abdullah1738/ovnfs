@@ -43,13 +43,26 @@ type gitModule struct {
 	source.Repo
 }
 
-// New opens a checkout from any folder (captured and classified now) or from a snapshot.
+// New opens a checkout from any folder (captured and classified now), from a
+// snapshot, or on an existing capture as it was taken.
 func (r *Registry) New(ctx context.Context, args api.NewArgs) (api.NewReply, error) {
-	if (args.Dir == "") == (args.Snapshot == "") {
-		return api.NewReply{}, failure("invalid", "new needs exactly one of a folder or a snapshot")
+	sources := 0
+	for _, set := range []bool{args.Dir != "", args.Snapshot != "", args.Base != ""} {
+		if set {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return api.NewReply{}, failure("invalid", "new needs exactly one of a folder, a snapshot or a capture")
 	}
 	if err := checkContext(ctx); err != nil {
 		return api.NewReply{}, err
+	}
+	if args.Base != "" {
+		if args.Rev != "" || len(args.Take) != 0 || len(args.Rules) != 0 {
+			return api.NewReply{}, failure("invalid", "a checkout on a capture keeps its revision, takes and rules")
+		}
+		return r.newOnBase(args.Base, args.Name)
 	}
 	if args.Snapshot != "" {
 		if args.Rev != "" {

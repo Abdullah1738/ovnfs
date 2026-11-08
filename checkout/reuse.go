@@ -358,6 +358,44 @@ func pending(ch chan struct{}) bool {
 	}
 }
 
+// newOnBase opens checkout name (or one derived from the captured folder) on
+// capture id as it was taken: no layers, and the private git directory checkouts
+// opened on it then started from. A capture of a repository that kept none (see
+// gitTemplate) is refused.
+func (r *Registry) newOnBase(id, name string) (api.NewReply, error) {
+	r.mu.Lock()
+	b := r.bases[id]
+	if b != nil && pending(b.template) {
+		// Its template is being written; checkouts on it start from that.
+		r.retainLocked(b, nil)
+		r.mu.Unlock()
+		<-b.template
+		r.mu.Lock()
+		r.releaseLocked(b, nil)
+		if r.bases[id] != b {
+			b = nil
+		}
+	}
+	if b == nil || r.closed {
+		r.mu.Unlock()
+		return api.NewReply{}, failure("not_found", "no capture %s", id)
+	}
+	var template, config string
+	if b.view.Domains().Repo("") != nil {
+		template = r.templatePath(id)
+		data, err := os.ReadFile(filepath.Join(template, "config"))
+		if err != nil {
+			r.mu.Unlock()
+			if errors.Is(err, fs.ErrNotExist) {
+				return api.NewReply{}, failure("invalid", "capture %s keeps no git directory to start from", id)
+			}
+			return api.NewReply{}, coded(err)
+		}
+		config = string(data)
+	}
+	return r.openOnLocked(b, template, config, name, filepath.Base(b.view.Capture().Stats.Root), nil)
+}
+
 // openOnLocked opens checkout name (or one derived from fallback) on capture b,
 // whose checkouts copy the private git directory template (holding config): one
 // taken from f's pool when f is set and it holds one, else one prepared now outside
