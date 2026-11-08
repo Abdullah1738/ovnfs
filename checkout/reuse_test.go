@@ -27,11 +27,23 @@ func (f *fixture) checkoutHead(name string) string {
 	return gitRun(f.t, f.t.TempDir(), "--git-dir", f.gitdir(name), "rev-parse", "HEAD")
 }
 
+// reuseFolder returns the registry's record of the folder at dir, found by its
+// source root as creates resolve it (on macOS, temporary directories lie below
+// the /var symlink); nil for none. f.reg.mu is held.
+func (f *fixture) reuseFolder(dir string) *reuseFolder {
+	f.t.Helper()
+	root, err := f.reg.resolveRoot(dir)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return f.reg.folders[root]
+}
+
 // prepared counts the checkouts the folder at dir holds prepared.
 func (f *fixture) prepared(dir string) int {
 	f.reg.mu.RLock()
 	defer f.reg.mu.RUnlock()
-	if folder := f.reg.folders[dir]; folder != nil {
+	if folder := f.reuseFolder(dir); folder != nil {
 		return len(folder.pool)
 	}
 	return 0
@@ -41,7 +53,7 @@ func (f *fixture) prepared(dir string) int {
 func (f *fixture) poolFull(dir string) bool {
 	f.reg.mu.RLock()
 	defer f.reg.mu.RUnlock()
-	folder := f.reg.folders[dir]
+	folder := f.reuseFolder(dir)
 	return folder != nil && len(folder.pool) >= folder.poolSize
 }
 
