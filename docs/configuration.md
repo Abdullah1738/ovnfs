@@ -23,10 +23,10 @@ profile, so 16-colour terminals and pagers see no stray escapes. `diff -p` and
 cyan hunk headers, and every verb that prints a table aligns it by visible
 width.
 
-`serve -memory SIZE` (`OVNFS_MEMORY`, default `1G`) and `serve -blob-cache
+`serve --memory SIZE` (`OVNFS_MEMORY`, default `1G`) and `serve --blob-cache
 SIZE` (`OVNFS_BLOB_CACHE`, default `512M`) size the memory tiers described in
 [internals](internals.md#memory-tiers); `start` passes the environment on.
-`serve -atime` (`OVNFS_ATIME=1`) lets the mount update access times; by
+`serve --atime` (`OVNFS_ATIME=1`) lets the mount update access times; by
 default it is mounted `noatime`, since the macOS NFS client otherwise sends a
 SETATTR for every exec of a checkout binary. A restart applies the setting to
 the mount the previous daemon left in place without unmounting it.

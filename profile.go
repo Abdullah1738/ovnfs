@@ -112,21 +112,17 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// runProfile captures a runtime profile from the daemon and writes its pprof
+// profileCmd captures a runtime profile from the daemon and writes its pprof
 // bytes to FILE (-o) or stdout, so `ovnfs profile cpu > cpu.pb.gz` and
 // `go tool pprof cpu.pb.gz` both work. With --json the reply is printed raw.
-func runProfile(c *cli, args []string) error {
-	fs := c.flags("profile")
-	seconds := fs.Float64("seconds", 0, "sampling window in seconds (default 30, cpu/block/mutex only)")
-	out := fs.String("o", "", "write the profile to FILE instead of stdout")
-	pos, err := c.parse(fs, args, 0, 1)
-	if err != nil {
-		return err
-	}
-	a := api.ProfileArgs{Seconds: *seconds}
-	if len(pos) == 1 {
-		a.Kind = pos[0]
-	}
+type profileCmd struct {
+	Kind    string  `arg:"" optional:"" name:"KIND" help:"cpu, heap, allocs, goroutine, block, mutex or threadcreate (default cpu)"`
+	Seconds float64 `name:"seconds" help:"sampling window in seconds (default 30, cpu/block/mutex only)"`
+	Out     string  `name:"out" short:"o" help:"write the profile to FILE instead of stdout"`
+}
+
+func (cmd *profileCmd) Run(c *cli) error {
+	a := api.ProfileArgs{Seconds: cmd.Seconds, Kind: cmd.Kind}
 	reply, err := call[api.ProfileReply](c, "profile", a)
 	if err != nil {
 		return err
@@ -138,13 +134,13 @@ func runProfile(c *cli, args []string) error {
 	if err != nil {
 		return fmt.Errorf("profile: decoding reply: %w", err)
 	}
-	if *out == "" {
+	if cmd.Out == "" {
 		_, err = os.Stdout.Write(data)
 		return err
 	}
-	if err := os.WriteFile(*out, data, 0o644); err != nil {
+	if err := os.WriteFile(cmd.Out, data, 0o644); err != nil {
 		return fmt.Errorf("profile: %w", err)
 	}
-	fmt.Fprintf(stderr, "%s %s profile (%s) to %s\n", paint(stderr, styleGreen, "wrote"), reply.Kind, humanBytes(int64(reply.Bytes)), paint(stderr, styleAccent, *out))
+	fmt.Fprintf(stderr, "%s %s profile (%s) to %s\n", paint(stderr, styleGreen, "wrote"), reply.Kind, humanBytes(int64(reply.Bytes)), paint(stderr, styleAccent, cmd.Out))
 	return nil
 }

@@ -185,13 +185,13 @@ func tailLines(path string, n int) ([]string, error) {
 	return lines[max(0, len(lines)-n):], nil
 }
 
-// runStart makes sure the daemon runs, starting it in the background unless one
+// startCmd makes sure the daemon runs, starting it in the background unless one
 // already answers; --json prints its status (socket, mount, state) either way,
 // which is how embedders such as omp find the socket to call.
-func runStart(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("start"), args, 0, 0); err != nil {
-		return err
-	}
+type startCmd struct{}
+
+func (cmd *startCmd) Run(c *cli) error {
+	c.autostart = false
 	started := false
 	if !accepting(c.state) {
 		client, _, err := startDaemon(c.ctx, c.state, c.mount)
@@ -256,11 +256,11 @@ func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
 	}
 }
 
-// runStop asks the daemon to exit and waits until it has exited.
-func runStop(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("stop"), args, 0, 0); err != nil {
-		return err
-	}
+// stopCmd asks the daemon to exit and waits until it has exited.
+type stopCmd struct{}
+
+func (cmd *stopCmd) Run(c *cli) error {
+	c.autostart = false
 	if !accepting(c.state) {
 		fmt.Fprintln(stderr, paint(stderr, styleDim, "not running"))
 		return nil
@@ -276,17 +276,17 @@ func runStop(c *cli, args []string) error {
 	return nil
 }
 
-// runRestart replaces the running daemon with a fresh one spawned from this
+// restartCmd replaces the running daemon with a fresh one spawned from this
 // invocation's binary, which is how a rebuilt or upgraded ovnfs takes over. An
 // NFS or SMB mount stays, so processes inside it carry on once the new daemon
 // serves. It starts the daemon when none runs, and leaves the old one
 // untouched if it refuses to stop. The start lock is held throughout, so
 // clients that auto-start while the old daemon exits wait for the new one
 // instead of racing it for the state directory.
-func runRestart(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("restart"), args, 0, 0); err != nil {
-		return err
-	}
+type restartCmd struct{}
+
+func (cmd *restartCmd) Run(c *cli) error {
+	c.autostart = false
 	lock, err := lockDaemon(c.state)
 	if err != nil {
 		return err
@@ -324,11 +324,11 @@ func usage(u api.Usage, off string) string {
 	return humanBytes(u.Used) + " of " + humanBytes(u.Limit)
 }
 
-// runStatus prints the running daemon's identity and counts, or fails when none listens.
-func runStatus(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("status"), args, 0, 0); err != nil {
-		return err
-	}
+// statusCmd prints the running daemon's identity and counts, or fails when none listens.
+type statusCmd struct{}
+
+func (cmd *statusCmd) Run(c *cli) error {
+	c.autostart = false
 	if !accepting(c.state) {
 		// Under --json stdout carries only JSON; the exit status says it all.
 		out := io.Writer(stdout)

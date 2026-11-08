@@ -215,7 +215,7 @@ capture is released after 15 minutes.
 
 Written files start in memory, not in the upper: new and truncated files, and
 files of at most 1 MiB copied up for writing, share one budget across all
-checkouts (`-memory`). A file moves into its upper once it has been left
+checkouts (`--memory`). A file moves into its upper once it has been left
 untouched for 2 s, when it outgrows 1 MiB, when newer files need the budget
 (least recently used first), before a hard link, `chown` or lock, and before
 `snap`, `fork`, `diff` and a planned stop, which therefore cost one host create
@@ -223,8 +223,8 @@ per file written in the last 2 s; files deleted sooner never reach the disk.
 Directories, symlinks and whiteouts always live in the upper.
 
 Small store blobs (at most 1 MiB) are served from a second budget
-(`-blob-cache`) instead of their object files. `ovnfs status` shows both. A
-crash or `kill -9` loses the files still in memory; `-memory 0` writes every
+(`--blob-cache`) instead of their object files. `ovnfs status` shows both. A
+crash or `kill -9` loses the files still in memory; `--memory 0` writes every
 file to the upper as it happens.
 
 Node ids are outside both budgets: the daemon keeps every path it has handed

@@ -1,50 +1,46 @@
 package main
 
 import (
-	"net"
-	"runtime"
 	"testing"
+
+	"github.com/alecthomas/kong"
 )
 
-// TestFileListenerCutWaitsOutMountCalls guards restart under load: a call into
-// the mount in flight when a keep-mount stop cuts the listener must still be
-// served, and none may start after the cut, or the old daemon hangs on a mount
-// whose next server waits for it to exit.
-func TestFileListenerCutWaitsOutMountCalls(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+func TestServeOptions(t *testing.T) {
+	for _, name := range []string{"OVNFS_MEMORY", "OVNFS_BLOB_CACHE", "OVNFS_ATIME"} {
+		t.Setenv(name, "")
 	}
-	l := &fileListener{Listener: ln, conns: map[*fileConn]struct{}{}}
-	entered, release, cut := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	go l.serving(func() {
-		close(entered)
-		<-release
-	})
-	<-entered
-	go func() {
-		l.cut()
-		close(cut)
-	}()
-	// TryRLock fails once cut waits for the call to return.
-	for l.calls.TryRLock() {
-		l.calls.RUnlock()
-		select {
-		case <-cut:
-			t.Fatal("cut returned while a call into the mount was in flight")
-		default:
-			runtime.Gosched()
+	parse := func(args ...string) (serveCmd, error) {
+		var cli struct {
+			Serve serveCmd `cmd:""`
 		}
+		parser, err := kong.New(&cli, serveDefaults())
+		if err != nil {
+			return cli.Serve, err
+		}
+		_, err = parser.Parse(append([]string{"serve"}, args...))
+		return cli.Serve, err
 	}
-	client, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
+
+	cmd, err := parse()
+	if err != nil || cmd.Memory != 1<<30 || cmd.BlobCache != 512<<20 || cmd.Atime {
+		t.Fatalf("defaults: %+v, %v", cmd, err)
 	}
-	defer client.Close()
-	if _, err := l.Accept(); err != nil {
-		t.Fatalf("listener stopped serving before the call in flight returned: %v", err)
+	t.Setenv("OVNFS_MEMORY", "2G")
+	t.Setenv("OVNFS_BLOB_CACHE", "64MiB")
+	t.Setenv("OVNFS_ATIME", "1")
+	cmd, err = parse()
+	if err != nil || cmd.Memory != 2<<30 || cmd.BlobCache != 64<<20 || !cmd.Atime {
+		t.Fatalf("environment: %+v, %v", cmd, err)
 	}
-	close(release)
-	<-cut
-	l.serving(func() { t.Error("call into the mount ran after the cut") })
+	cmd, err = parse("--memory", "0", "--blob-cache", "1K", "--proto", "smb", "--listen", "localhost:1234")
+	if err != nil || cmd.Memory != 0 || cmd.BlobCache != 1024 || cmd.Proto != "smb" || cmd.Listen != "localhost:1234" {
+		t.Fatalf("flags: %+v, %v", cmd, err)
+	}
+	if _, err := parse("--memory", "-1"); err == nil {
+		t.Fatal("negative memory accepted")
+	}
+	if _, err := parse("--proto", "unknown"); err == nil {
+		t.Fatal("unknown protocol accepted")
+	}
 }

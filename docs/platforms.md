@@ -2,7 +2,7 @@
 
 One daemon serves every checkout as a folder of a single mount.
 
-| OS | default frontend | `serve -proto` alternatives | needs |
+| OS | default frontend | `serve --proto` alternatives | needs |
 | --- | --- | --- | --- |
 | macOS | NFSv3 | `smb` | nothing |
 | Linux | FUSE | `nfs`, `smb` (mounting them needs root) | `fusermount3` |
@@ -16,10 +16,10 @@ ids, so they survive renames and daemon restarts. Automatic mounts use NFSv3
 with client-local locks. On macOS the server listens on `nfs.sock` in the state
 directory, which only its user can open, and `mount_nfs` dials that socket
 (`port=` a path, netid `ticotsord`: undocumented, but in Apple's
-`mount_nfs.c`). When that mount fails, or `serve -listen` names a TCP address,
+`mount_nfs.c`). When that mount fails, or `serve --listen` names a TCP address,
 it serves `127.0.0.1` on a free port and mounts with `noresvport`. The macOS
 mount uses `locallocks,nobrowse,intr,rwsize=1048576`, `noatime` unless
-[`serve -atime`](configuration.md#where-the-daemon-lives), and normal
+[`serve --atime`](configuration.md#where-the-daemon-lives), and normal
 attribute caching (the client's default timeouts are 5 to 60 s).
 After creating or removing a checkout the daemon `statfs`es its own mount,
 making the client revalidate the export root so new checkouts show up
@@ -39,14 +39,14 @@ substantially slows cold Cargo builds on macOS.
 
 ## FUSE
 
-`serve -proto fuse` (the Linux default) mounts through `fusermount3`, with the
+`serve --proto fuse` (the Linux default) mounts through `fusermount3`, with the
 export's stable node ids as inode numbers and one-second entry and attribute
 timeouts. A mount left behind by a daemon that died without unmounting (`kill
 -9`, the OOM killer) is detached when the next one starts.
 
 ## SMB
 
-`serve -proto smb` serves the `ovnfs` share, to guests on macOS and Linux and
+`serve --proto smb` serves the `ovnfs` share, to guests on macOS and Linux and
 to one account on Windows (below), with Unix modes, executable bits, symlinks,
 byte-range locks and change notifications; macOS smbfs caches negative lookups
 for about two seconds.
@@ -101,7 +101,7 @@ Unix-ID owner `S-1-22-1-0`.
 
 ### WinFsp
 
-`serve -proto winfsp` mounts the drive through [WinFsp](https://winfsp.dev), a
+`serve --proto winfsp` mounts the drive through [WinFsp](https://winfsp.dev), a
 filesystem driver installed once per machine (installing needs an
 administrator; mounting does not), as the network volume `\\ovnfs\O`, with no
 SMB and no port. It is the Windows default where WinFsp is installed and

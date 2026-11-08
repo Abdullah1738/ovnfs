@@ -6,18 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strings"
 	"syscall"
-
-	"charm.land/lipgloss/v2"
 
 	"github.com/stencil-hq/ovnfs/manifest"
 )
@@ -82,48 +77,40 @@ const meshRemoved = `ovnfs mesh is deprecated and was removed: machines now conn
 HOST is any ssh destination (~/.ssh/config, ProxyJump and the like apply); it must accept a key without prompting.
 The old mesh state in <state>/mesh can be deleted.`
 
-// run resolves global options, then hands the verb its remaining arguments.
+// run resolves the global options, then parses and runs one verb.
 func run(args []string) error {
-	c := &cli{}
-	fs := c.flags("ovnfs")
-	if err := fs.Parse(args); err != nil && !errors.Is(err, flag.ErrHelp) {
-		return fmt.Errorf("%w; run 'ovnfs help'", err)
+	c := &cli{autostart: true}
+	args, err := splitGlobals(c, args)
+	if err != nil {
+		return err
 	}
 	if err := c.setColor(); err != nil {
 		return err
 	}
-	if fs.NArg() == 0 {
-		printUsage(stdout)
-		return nil
+	if len(args) == 0 {
+		return printHelp(c, nil)
 	}
-	verb, rest := fs.Arg(0), fs.Args()[1:]
-	switch verb {
-	case "help":
-		printUsage(stdout)
-		return nil
-	case "version":
-		// version reads no configuration, so it runs where none parses.
-		c.cmd, _ = lookupCommand(verb)
-		return c.cmd.run(c, rest)
-	case "mesh":
-		return errors.New(meshRemoved)
+	if args[0] == "help" {
+		return printHelp(c, args[1:])
 	}
-	if err := c.resolveDirs(); err != nil {
-		return err
-	}
-	if verb == "serve" {
-		// serve keeps its own flags and signal handling; resolved globals go first so its flags still win.
-		return serve(append([]string{"-state", c.state, "-mount", c.mount}, rest...))
-	}
-	cmd, ok := lookupCommand(verb)
-	if !ok {
-		return fmt.Errorf("unknown command %q; run 'ovnfs help'", verb)
+	// version and mesh read no configuration, so they run where none parses.
+	if verb := args[0]; verb != "version" && verb != "mesh" {
+		if err := c.resolveDirs(); err != nil {
+			return err
+		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	c.ctx, c.autostart, c.cmd = ctx, cmd.autostart, cmd
+	c.ctx = ctx
 	defer c.close()
-	return cmd.run(c, rest)
+	return runCLI(c, args)
+}
+
+// meshCmd answers the removed `ovnfs mesh` verb; it stays out of help.
+type meshCmd struct{}
+
+func (cmd *meshCmd) Run(c *cli) error {
+	return errors.New(meshRemoved)
 }
 
 // resolveDirs fills the state and mount folders --state and --mount left unset
@@ -151,56 +138,18 @@ type build struct {
 	Arch    string `json:"arch"`
 }
 
-// runVersion prints this binary's build on one line, or as JSON under --json.
-func runVersion(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("version"), args, 0, 0); err != nil {
-		return err
-	}
+// versionCmd prints this binary's build on one line, or as JSON under --json.
+type versionCmd struct{}
+
+func (cmd *versionCmd) Run(c *cli) error {
+	c.autostart = false
 	b := build{Version: "(devel)", Go: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH}
 	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
 		b.Version = bi.Main.Version
 	}
 	if c.json {
-		return json.NewEncoder(os.Stdout).Encode(b)
+		return json.NewEncoder(stdout).Encode(b)
 	}
-	fmt.Printf("ovnfs %s %s %s/%s\n", b.Version, b.Go, b.OS, b.Arch)
+	fmt.Fprintf(stdout, "ovnfs %s %s %s/%s\n", b.Version, b.Go, b.OS, b.Arch)
 	return nil
-}
-
-// printUsage lists every verb, grouped into the helpGroups sections, then the
-// global options.
-func printUsage(w io.Writer) {
-	fmt.Fprintf(w, "%s %s\n", paint(w, styleBold, "usage:"), "ovnfs [options] VERB [ARGS]")
-	rows := helpRows()
-	width := 0
-	for _, cmd := range rows {
-		width = max(width, lipgloss.Width(strings.TrimSpace(cmd.name+" "+cmd.args)))
-	}
-	for _, group := range helpGroups {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, paint(w, styleAccent.Bold(true), group))
-		for _, cmd := range rows {
-			if cmd.group != group {
-				continue
-			}
-			verb := paint(w, styleBold, cmd.name) + paintIf(w, cmd.args != "", styleDim, " "+cmd.args)
-			pad := strings.Repeat(" ", width-lipgloss.Width(strings.TrimSpace(cmd.name+" "+cmd.args))+2)
-			fmt.Fprintf(w, "  %s%s%s\n", verb, pad, cmd.desc)
-		}
-	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, paint(w, styleBold, "options (before the verb or among its arguments)"))
-	options := [][2]string{
-		{"--state DIR", "daemon state, env OVNFS_STATE, state in ~/.o2/ovnfs.yml (default " + defaultState + ")"},
-		{"--mount DIR", "checkout mount (a free drive letter on Windows), env OVNFS_MOUNT, mount in ~/.o2/ovnfs.yml (default " + defaultMount + ")"},
-		{"--json", "print the raw reply JSON"},
-		{"--color WHEN", "colour the output: auto on a terminal, always or never (NO_COLOR is honored)"},
-	}
-	owidth := 0
-	for _, o := range options {
-		owidth = max(owidth, len(o[0]))
-	}
-	for _, o := range options {
-		fmt.Fprintf(w, "  %s%s%s\n", paint(w, styleAccent, o[0]), strings.Repeat(" ", owidth-len(o[0])+2), o[1])
-	}
 }

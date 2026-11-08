@@ -74,7 +74,9 @@ ovnfs prune . --idle 7d        # remove those untouched for a week (--dry-run fi
 
 `ovnfs help` lists every verb, grouped by what they do and coloured on a
 terminal (`--color auto|always|never`, `NO_COLOR` honoured; a pipe gets plain
-text). Verbs start the daemon when none is running;
+text). Bash, zsh and fish completion come from the same grammar:
+`eval "$(ovnfs completion bash -c)"`, or `ovnfs completion zsh -c` for the
+shell to source. Verbs start the daemon when none is running;
 `start`, `stop`, `restart` and `status` manage it, `serve` runs it in the
 foreground. `restart` swaps in the daemon of the binary you run, e.g. after an
 upgrade, leaving an NFS or SMB mount and the shells inside it in place. `stop`

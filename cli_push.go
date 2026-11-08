@@ -12,22 +12,19 @@ import (
 	"github.com/stencil-hq/ovnfs/api"
 )
 
-// runPush has the machines checkouts are attached to fetch all the content
-// they still read from this one, drawing a progress bar when stderr is a
-// terminal, and fails when any attachment could not.
-func runPush(c *cli, args []string) error {
-	fs := c.flags("push")
-	var a api.PushArgs
-	fs.StringVar(&a.To, "to", "", "only the attachments to this host, as passed to attach")
-	pos, err := c.parse(fs, args, 0, 1)
-	if err != nil {
-		return err
-	}
-	if len(pos) == 1 {
-		a.Checkout = pos[0]
-	}
+// pushCmd has the machines checkouts are attached to fetch all the content they
+// still read from this one, drawing a progress bar when stderr is a terminal,
+// and fails when any attachment could not.
+type pushCmd struct {
+	Checkout string `arg:"" optional:"" name:"CHECKOUT" help:"only this checkout" completion-predictor:"checkout"`
+	To       string `name:"to" help:"only the attachments to this host, as passed to attach"`
+}
+
+func (cmd *pushCmd) Run(c *cli) error {
+	a := api.PushArgs{Checkout: cmd.Checkout, To: cmd.To}
 	var bar *pushBar
 	if isTerminal(os.Stderr) {
+		var err error
 		if bar, err = watchPush(c, a, os.Stderr); err != nil {
 			return err
 		}

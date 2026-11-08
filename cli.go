@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -27,153 +26,7 @@ type cli struct {
 	json      bool
 	color     string // --color: auto, always or never
 	autostart bool   // start the daemon when its socket does not accept connections
-	cmd       command
 	conn      *admin.Client
-}
-
-// command is one CLI verb: its usage, help line and implementation.
-type command struct {
-	name      string
-	args      string
-	desc      string
-	group     string // help section, one of helpGroups
-	autostart bool
-	run       func(c *cli, args []string) error
-}
-
-// Help sections, in the order `ovnfs help` prints them.
-const (
-	groupCheckouts = "checkouts"
-	groupInspect   = "inspect"
-	groupCleanup   = "clean up"
-	groupRemote    = "other machines"
-	groupDaemon    = "daemon"
-	groupBinary    = "ovnfs itself"
-)
-
-// helpGroups orders the sections of `ovnfs help`.
-var helpGroups = []string{groupCheckouts, groupInspect, groupCleanup, groupRemote, groupDaemon, groupBinary}
-
-// helpExtras are the verbs serve and help, which run before a resolved
-// configuration and so stay out of commands(); they still take a help row.
-var helpExtras = []command{
-	{name: "serve", args: "[-proto nfs|smb|fuse|winfsp] [-listen ADDR]", desc: "run the daemon in the foreground", group: groupDaemon},
-	{name: "help", desc: "show this help", group: groupBinary},
-}
-
-// commands returns the verb table, ordered by help section; a function so help
-// can refer to it without an init cycle.
-func commands() []command {
-	return []command{
-		{"ls", "[CHECKOUT|DIR] [--idle DUR] [--no-diff]", "list checkouts (of DIR: . or a path with /), or one checkout's snapshots", groupCheckouts, true, runLs},
-		{"new", "[DIR] [--name N] [--rev REV | --from SNAP] [--take SRC:PATH]... [--rule LINE]...", "open a checkout on a folder (default .), git revision, or snapshot", groupCheckouts, true, runNew},
-		{"run", "[DIR] [--rev REV] [--take SRC:PATH]... [--keep] [--on HOST] -- CMD...", "run a command in a disposable checkout (also --name, --rule, --remote-bin)", groupCheckouts, true, runRun},
-		{"fork", "CHECKOUT [--name N] [-m LABEL]", "snapshot a checkout and open a second checkout on it", groupCheckouts, true, runFork},
-		{"snap", "CHECKOUT [-m LABEL] [--wait]", "freeze a checkout's changes into a snapshot", groupCheckouts, true, runSnap},
-		{"diff", "CHECKOUT [SNAP] [-p|--patch] [--binary]", "list source changes since a snapshot (default: the base)", groupCheckouts, true, runDiff},
-		{"apply", "CHECKOUT [--dry-run] [--branch B]", "merge a checkout's source changes back into its folder", groupCheckouts, true, runApply},
-		{"grep", "PATTERN [DIR|CHECKOUT] [--glob GLOB] [-F] [-i] [-C N] [--max-count N]", "search contents in the daemon, bypassing the checkout mount", groupInspect, true, runGrep},
-		{"glob", "PATTERN [DIR|CHECKOUT] [--type file|dir|symlink] [--limit N] [--mtime]", "list matching paths in the daemon, bypassing the checkout mount", groupInspect, true, runGlob},
-		{"explain", "[DIR|CHECKOUT] PATH [--rule LINE]...", "show which class a path gets and which rule decided", groupInspect, true, runExplain},
-		{"plan", "[DIR|CHECKOUT] [--on cloud|peer] [--rule LINE]...", "show what a launch elsewhere would transfer, rebuild and leave", groupInspect, true, runPlan},
-		{"rm", "CHECKOUT [--sticky-snapshots]", "remove a checkout and its unused snapshots; --sticky-snapshots retains them", groupCleanup, true, runRm},
-		{"prune", "[DIR] [--idle DUR] [--no-diff] [--dry-run] [--sticky-snapshots]", "remove matching checkouts and unused snapshots; --sticky-snapshots retains them", groupCleanup, true, runPrune},
-		{"drop", "SNAP", "release a snapshot", groupCleanup, true, runDrop},
-		{"attach", "[DIR|CHECKOUT] --to HOST [--name N] [--remote-bin PATH]", "make a checkout appear on another machine over ssh; content moves on first read", groupRemote, true, runAttach},
-		{"send", "[DIR|CHECKOUT] HOST[:PATH] [--name N] [--remote-bin PATH]", "attach over ssh, first installing ovnfs there if missing; PATH there links to the checkout", groupRemote, true, runSend},
-		{"pull", "CHECKOUT [--from HOST] [--dry-run]", "merge attached remote source changes into the local checkout", groupRemote, true, runPull},
-		{"push", "[CHECKOUT] [--to HOST]", "have attached machines fetch all content they still read from this one, so they work without it", groupRemote, true, runPush},
-		{"share", "CHECKOUT [--rw]", "serve a checkout over remote-fs for a VM (vmon --remote-fs TAG:SOCK[:rw]) or a peer", groupRemote, true, runShare},
-		{"link", "", "pipe an attach session from ssh into this machine's daemon (run by attach)", groupRemote, true, runLink},
-		{"status", "", "show the running daemon", groupDaemon, false, runStatus},
-		{"start", "[--json]", "make sure the daemon runs (starting it in the background); --json prints its status and socket", groupDaemon, false, runStart},
-		{"stop", "", "stop the daemon", groupDaemon, false, runStop},
-		{"restart", "[--json]", "stop the daemon and start a new one from this binary; --json prints the new one's status", groupDaemon, false, runRestart},
-		{"subscribe", "", "stream daemon events as JSON lines until interrupted", groupDaemon, true, runSubscribe},
-		{"ctl", "OP ['JSON']", "send one raw admin request and print the raw reply", groupDaemon, true, runCtl},
-		{"profile", "[KIND] [--seconds D] [-o FILE]", "capture a runtime profile from the daemon (cpu, heap, allocs, goroutine, block, mutex, threadcreate)", groupDaemon, true, runProfile},
-		{"version", "[--json]", "print the version and toolchain this binary was built from", groupBinary, false, runVersion},
-		{"update", "", "replace this binary with the latest ovnfs, by go install if it built it, else from the latest release", groupBinary, false, runUpdate},
-	}
-}
-
-// lookupCommand finds a verb by name.
-func lookupCommand(name string) (command, bool) {
-	for _, cmd := range commands() {
-		if cmd.name == name {
-			return cmd, true
-		}
-	}
-	return command{}, false
-}
-
-// stringList is a repeatable string flag such as --rule.
-type stringList []string
-
-// String renders the collected values for flag defaults.
-func (s *stringList) String() string { return strings.Join(*s, ", ") }
-
-// Set appends one occurrence.
-func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
-
-// flags returns a quiet flag set that already accepts the global options.
-func (c *cli) flags(name string) *flag.FlagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&c.state, "state", c.state, "daemon state directory")
-	fs.StringVar(&c.mount, "mount", c.mount, "checkout mount directory")
-	fs.BoolVar(&c.json, "json", c.json, "print the raw reply JSON")
-	fs.StringVar(&c.color, "color", "auto", "colour the output: auto, always or never")
-	return fs
-}
-
-// parseInterspersed parses flags anywhere among positionals; everything after "--" is positional.
-func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
-	var pos []string
-	for {
-		if err := fs.Parse(args); err != nil {
-			return nil, err
-		}
-		rest := fs.Args()
-		if len(rest) == 0 {
-			return pos, nil
-		}
-		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
-			return append(pos, rest...), nil
-		}
-		pos = append(pos, rest[0])
-		args = rest[1:]
-	}
-}
-
-// parse reads the verb's flags and checks its positional count against the usage.
-func (c *cli) parse(fs *flag.FlagSet, args []string, minPos, maxPos int) ([]string, error) {
-	pos, err := parseInterspersed(fs, args)
-	if errors.Is(err, flag.ErrHelp) {
-		fmt.Fprintf(stdout, "%s ovnfs %s%s\n  %s\n", paint(stdout, styleBold, "usage:"),
-			paint(stdout, styleAccent, c.cmd.name), paintIf(stdout, c.cmd.args != "", styleDim, " "+c.cmd.args), c.cmd.desc)
-		return nil, exitCode(0)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w\n%s", c.cmd.name, err, c.usage())
-	}
-	if err := c.setColor(); err != nil {
-		return nil, err
-	}
-	if len(pos) < minPos || len(pos) > maxPos {
-		return nil, errors.New(c.usage())
-	}
-	return pos, nil
-}
-
-// usage is the one-line synopsis of the running verb.
-func (c *cli) usage() string {
-	return strings.TrimSpace("usage: ovnfs " + paint(stdout, styleAccent, c.cmd.name) + paintIf(stdout, c.cmd.args != "", styleDim, " "+c.cmd.args))
-}
-
-// helpRows is the `ovnfs help` table: every command plus the extras.
-func helpRows() []command {
-	return append(commands(), helpExtras...)
 }
 
 // call sends one operation and returns the raw reply, starting the daemon if allowed.
@@ -213,27 +66,29 @@ func decodeReply[T any](op string, raw json.RawMessage, err error) (T, error) {
 	return reply, nil
 }
 
-// runLs lists checkouts, those of a folder or picked by flags, or the snapshots
+// lsCmd lists checkouts, those of a folder or picked by flags, or the snapshots
 // of one checkout. A path spelling (".", "..", a slash) makes the argument a
 // folder, so a checkout named after a folder beside it stays reachable by name.
-func runLs(c *cli, args []string) error {
-	fs := c.flags("ls")
-	var a api.LsArgs
-	selectFlags(fs, &a.Select)
-	pos, err := c.parse(fs, args, 0, 1)
-	if err != nil {
-		return err
-	}
+type lsCmd struct {
+	Target string `arg:"" optional:"" name:"CHECKOUT|DIR" help:"checkout, or a folder (. or a path with /) whose checkouts to list" completion-predictor:"checkout"`
+	selectFlags
+}
+
+func (cmd *lsCmd) Run(c *cli) error {
+	a := api.LsArgs{Select: cmd.selectFlags.args()}
 	name := ""
-	if len(pos) == 1 && !pathArg(pos[0]) {
-		name = pos[0]
+	switch {
+	case cmd.Target != "" && !pathArg(cmd.Target):
+		name = cmd.Target
 		if a.Select != (api.Select{}) {
 			return fmt.Errorf("ls: --idle and --no-diff pick checkouts, not snapshots of %s", name)
 		}
-	} else if len(pos) == 1 {
-		if a.Dir, err = filepath.Abs(pos[0]); err != nil {
-			return fmt.Errorf("ls: resolving %s: %w", pos[0], err)
+	case cmd.Target != "":
+		dir, err := filepath.Abs(cmd.Target)
+		if err != nil {
+			return fmt.Errorf("ls: resolving %s: %w", cmd.Target, err)
 		}
+		a.Dir = dir
 	}
 	r, err := call[api.LsReply](c, "ls", a)
 	if err != nil || c.json {
@@ -313,21 +168,28 @@ func treeCell(w io.Writer, tree string) string {
 	return paint(w, styleDim, abbrev(tree, 12))
 }
 
-// selectFlags registers the flags ls and prune pick checkouts by (see api.Select).
-func selectFlags(fs *flag.FlagSet, sel *api.Select) {
-	fs.Var((*seconds)(&sel.Idle), "idle", "only checkouts untouched for this long: 90m, 12h, 7d, 2w")
-	fs.BoolVar(&sel.NoDiff, "no-diff", false, "only checkouts without source changes since their base (an empty diff)")
+// selectFlags are the options ls and prune pick checkouts by (see api.Select);
+// kong flattens the embedded struct into their flags.
+type selectFlags struct {
+	Idle   seconds `name:"idle" help:"only checkouts untouched for this long: 90m, 12h, 7d, 2w"`
+	NoDiff bool    `name:"no-diff" help:"only checkouts without source changes since their base (an empty diff)"`
 }
 
-// seconds is a duration flag held in seconds, as api fields are; besides Go
+// args converts the flags to api.Select.
+func (s selectFlags) args() api.Select {
+	return api.Select{Idle: float64(s.Idle), NoDiff: s.NoDiff}
+}
+
+// seconds is a duration option held in seconds, as api fields are; besides Go
 // durations (90m, 12h) it takes whole days and weeks (7d, 2w).
 type seconds float64
 
-// String renders the duration for flag defaults.
-func (s *seconds) String() string { return time.Duration(float64(*s) * float64(time.Second)).String() }
+// String renders the duration for help text.
+func (s seconds) String() string { return time.Duration(float64(s) * float64(time.Second)).String() }
 
-// Set parses one duration.
-func (s *seconds) Set(v string) error {
+// UnmarshalText parses one duration, as kong hands a flag's value over.
+func (s *seconds) UnmarshalText(text []byte) error {
+	v := string(text)
 	d, err := time.ParseDuration(v)
 	for suffix, unit := range map[string]time.Duration{"d": 24 * time.Hour, "w": 7 * 24 * time.Hour} {
 		if n, ok := strings.CutSuffix(v, suffix); ok {
@@ -343,24 +205,25 @@ func (s *seconds) Set(v string) error {
 	return nil
 }
 
-// runPrune removes the checkouts a folder and flags pick and prints their names.
-func runPrune(c *cli, args []string) error {
-	fs := c.flags("prune")
-	var a api.PruneArgs
-	selectFlags(fs, &a.Select)
-	fs.BoolVar(&a.StickySnapshots, "sticky-snapshots", false, "retain snapshots of removed checkouts")
-	fs.BoolVar(&a.DryRun, "dry-run", false, "print what would be removed; remove nothing")
-	pos, err := c.parse(fs, args, 0, 1)
-	if err != nil {
-		return err
-	}
-	if len(pos) == 1 {
-		if a.Dir, err = filepath.Abs(pos[0]); err != nil {
-			return fmt.Errorf("prune: resolving %s: %w", pos[0], err)
+// pruneCmd removes the checkouts a folder and flags pick and prints their names.
+type pruneCmd struct {
+	Target          string `arg:"" optional:"" name:"DIR" help:"folder whose checkouts to remove"`
+	StickySnapshots bool   `name:"sticky-snapshots" help:"retain snapshots of removed checkouts"`
+	DryRun          bool   `name:"dry-run" help:"print what would be removed; remove nothing"`
+	selectFlags
+}
+
+func (cmd *pruneCmd) Run(c *cli) error {
+	a := api.PruneArgs{Select: cmd.selectFlags.args(), StickySnapshots: cmd.StickySnapshots, DryRun: cmd.DryRun}
+	if cmd.Target != "" {
+		dir, err := filepath.Abs(cmd.Target)
+		if err != nil {
+			return fmt.Errorf("prune: resolving %s: %w", cmd.Target, err)
 		}
+		a.Dir = dir
 	}
 	if a.Select == (api.Select{}) {
-		return fmt.Errorf("prune: pick checkouts by DIR, --idle or --no-diff\n%s", c.usage())
+		return errors.New("prune: pick checkouts by DIR, --idle or --no-diff")
 	}
 	r, err := call[api.PruneReply](c, "prune", a)
 	if err != nil || c.json {
@@ -382,41 +245,38 @@ func runPrune(c *cli, args []string) error {
 	return nil
 }
 
-// runNew opens a checkout on a folder, a snapshot or a capture and prints its path.
-func runNew(c *cli, args []string) error {
-	fs := c.flags("new")
-	var a api.NewArgs
-	fs.StringVar(&a.Name, "name", "", "checkout name")
-	fs.StringVar(&a.Snapshot, "from", "", "open on this snapshot instead of a folder")
-	fs.StringVar(&a.Base, "base", "", "open on this capture (a checkout's base) as it was taken, instead of a folder")
-	fs.StringVar(&a.Rev, "rev", "", "start at this git commit or local branch; keep ignored files")
-	fs.Var((*stringList)(&a.Take), "take", "replace source path from working tree (.), index (empty), or revision (repeatable)")
-	fs.Var((*stringList)(&a.Rules), "rule", "extra rule line (repeatable)")
-	pos, err := c.parse(fs, args, 0, 1)
-	if err != nil {
-		return err
-	}
-	if a.Snapshot != "" && a.Base != "" {
-		return fmt.Errorf("new: give either --from SNAP or --base CAPTURE, not both")
-	}
-	if a.Snapshot != "" || a.Base != "" {
+// newCmd opens a checkout on a folder, a snapshot or a capture and prints its path.
+type newCmd struct {
+	Dir      string   `arg:"" optional:"" name:"DIR" help:"folder to open the checkout on (default .)"`
+	Name     string   `name:"name" help:"checkout name (default: the folder's name)"`
+	Snapshot string   `name:"from" help:"open on this snapshot instead of a folder" completion-predictor:"snapshot"`
+	Base     string   `name:"base" help:"open on this capture (a checkout's base) as it was taken, instead of a folder"`
+	Rev      string   `name:"rev" help:"start at this git commit or local branch; keep ignored files"`
+	Take     []string `name:"take" sep:"none" help:"replace source path from working tree (.), index (empty), or revision (repeatable)"`
+	Rules    []string `name:"rule" sep:"none" help:"extra rule line (repeatable)"`
+}
+
+func (cmd *newCmd) Run(c *cli) error {
+	a := api.NewArgs{Name: cmd.Name, Snapshot: cmd.Snapshot, Base: cmd.Base, Rev: cmd.Rev, Take: cmd.Take, Rules: cmd.Rules}
+	switch {
+	case a.Snapshot != "" && a.Base != "":
+		return errors.New("new: give either --from SNAP or --base CAPTURE, not both")
+	case a.Snapshot != "" || a.Base != "":
 		if a.Rev != "" {
-			return fmt.Errorf("new: --rev needs a folder")
+			return errors.New("new: --rev needs a folder")
 		}
 		if len(a.Take) != 0 {
-			return fmt.Errorf("new: --take needs a folder")
+			return errors.New("new: --take needs a folder")
 		}
-		if len(pos) != 0 {
-			return fmt.Errorf("new: give either DIR, --from SNAP or --base CAPTURE")
+		if cmd.Dir != "" {
+			return errors.New("new: give either DIR, --from SNAP or --base CAPTURE")
 		}
-	} else {
-		dir := "."
-		if len(pos) == 1 {
-			dir = pos[0]
+	default:
+		dir, err := filepath.Abs(orDefault(cmd.Dir, "."))
+		if err != nil {
+			return fmt.Errorf("new: resolving %s: %w", orDefault(cmd.Dir, "."), err)
 		}
-		if a.Dir, err = filepath.Abs(dir); err != nil {
-			return fmt.Errorf("new: resolving %s: %w", dir, err)
-		}
+		a.Dir = dir
 	}
 	r, err := call[api.NewReply](c, "new", a)
 	if err != nil || c.json {
@@ -451,17 +311,15 @@ func runNew(c *cli, args []string) error {
 	return nil
 }
 
-// runFork snapshots a checkout, opens a child on it and prints the child's path.
-func runFork(c *cli, args []string) error {
-	fs := c.flags("fork")
-	var a api.ForkArgs
-	fs.StringVar(&a.Name, "name", "", "child checkout name")
-	fs.StringVar(&a.Label, "m", "", "snapshot label")
-	pos, err := c.parse(fs, args, 1, 1)
-	if err != nil {
-		return err
-	}
-	a.Checkout = pos[0]
+// forkCmd snapshots a checkout, opens a child on it and prints the child's path.
+type forkCmd struct {
+	Checkout string `arg:"" name:"CHECKOUT" help:"checkout to fork" completion-predictor:"checkout"`
+	Name     string `name:"name" help:"child checkout name (default: <checkout>-<n>)"`
+	Label    string `name:"label" short:"m" help:"snapshot label"`
+}
+
+func (cmd *forkCmd) Run(c *cli) error {
+	a := api.ForkArgs{Checkout: cmd.Checkout, Name: cmd.Name, Label: cmd.Label}
 	r, err := call[api.ForkReply](c, "fork", a)
 	if err != nil || c.json {
 		return err
@@ -472,17 +330,15 @@ func runFork(c *cli, args []string) error {
 	return nil
 }
 
-// runSnap freezes a checkout into a snapshot and prints its id.
-func runSnap(c *cli, args []string) error {
-	fs := c.flags("snap")
-	var a api.SnapArgs
-	fs.StringVar(&a.Label, "m", "", "snapshot label")
-	fs.BoolVar(&a.Wait, "wait", false, "wait until the tree id is known")
-	pos, err := c.parse(fs, args, 1, 1)
-	if err != nil {
-		return err
-	}
-	a.Checkout = pos[0]
+// snapCmd freezes a checkout into a snapshot and prints its id.
+type snapCmd struct {
+	Checkout string `arg:"" name:"CHECKOUT" help:"checkout to snapshot" completion-predictor:"checkout"`
+	Label    string `name:"label" short:"m" help:"snapshot label"`
+	Wait     bool   `name:"wait" help:"wait until the tree id is known"`
+}
+
+func (cmd *snapCmd) Run(c *cli) error {
+	a := api.SnapArgs{Checkout: cmd.Checkout, Label: cmd.Label, Wait: cmd.Wait}
 	r, err := call[api.SnapReply](c, "snap", a)
 	if err != nil || c.json {
 		return err
@@ -497,21 +353,16 @@ func runSnap(c *cli, args []string) error {
 	return nil
 }
 
-// runDiff prints a checkout's changed source paths and, on request, the patch.
-func runDiff(c *cli, args []string) error {
-	fs := c.flags("diff")
-	var a api.DiffArgs
-	fs.BoolVar(&a.Patch, "p", false, "print a unified diff")
-	fs.BoolVar(&a.Patch, "patch", false, "print a unified diff")
-	fs.BoolVar(&a.Binary, "binary", false, "print the patch as git diff --binary does, for git apply")
-	pos, err := c.parse(fs, args, 1, 2)
-	if err != nil {
-		return err
-	}
-	a.Checkout = pos[0]
-	if len(pos) == 2 {
-		a.From = pos[1]
-	}
+// diffCmd prints a checkout's changed source paths and, on request, the patch.
+type diffCmd struct {
+	Checkout string `arg:"" name:"CHECKOUT" help:"checkout to diff" completion-predictor:"checkout"`
+	Snapshot string `arg:"" optional:"" name:"SNAP" help:"snapshot to compare against (default: the base)" completion-predictor:"snapshot"`
+	Patch    bool   `name:"patch" short:"p" help:"print a unified diff"`
+	Binary   bool   `name:"binary" help:"print the patch as git diff --binary does, for git apply"`
+}
+
+func (cmd *diffCmd) Run(c *cli) error {
+	a := api.DiffArgs{Checkout: cmd.Checkout, From: cmd.Snapshot, Patch: cmd.Patch, Binary: cmd.Binary}
 	r, err := call[api.DiffReply](c, "diff", a)
 	if err != nil || c.json {
 		return err
@@ -528,17 +379,15 @@ func runDiff(c *cli, args []string) error {
 	return nil
 }
 
-// runApply merges a checkout back into its source and fails when conflicts were left.
-func runApply(c *cli, args []string) error {
-	fs := c.flags("apply")
-	var a api.ApplyArgs
-	fs.BoolVar(&a.DryRun, "dry-run", false, "report without writing")
-	fs.StringVar(&a.Branch, "branch", "", "fetch commits as this branch, or fast-forward it and its index if checked out")
-	pos, err := c.parse(fs, args, 1, 1)
-	if err != nil {
-		return err
-	}
-	a.Checkout = pos[0]
+// applyCmd merges a checkout back into its source and fails when conflicts were left.
+type applyCmd struct {
+	Checkout string `arg:"" name:"CHECKOUT" help:"checkout to merge back" completion-predictor:"checkout"`
+	DryRun   bool   `name:"dry-run" help:"report without writing"`
+	Branch   string `name:"branch" help:"fetch commits as this branch, or fast-forward it and its index if checked out"`
+}
+
+func (cmd *applyCmd) Run(c *cli) error {
+	a := api.ApplyArgs{Checkout: cmd.Checkout, DryRun: cmd.DryRun, Branch: cmd.Branch}
 	r, err := call[api.ApplyReply](c, "apply", a)
 	if err != nil {
 		return err
@@ -546,17 +395,15 @@ func runApply(c *cli, args []string) error {
 	return printMerge(c, r, a.DryRun, "ovnfs apply "+a.Checkout)
 }
 
-// runPull merges one attached remote checkout's source changes into the local checkout.
-func runPull(c *cli, args []string) error {
-	fs := c.flags("pull")
-	var a api.PullArgs
-	fs.StringVar(&a.From, "from", "", "host passed to attach; optional with one attachment")
-	fs.BoolVar(&a.DryRun, "dry-run", false, "report without writing")
-	pos, err := c.parse(fs, args, 1, 1)
-	if err != nil {
-		return err
-	}
-	a.Checkout = pos[0]
+// pullCmd merges one attached remote checkout's source changes into the local checkout.
+type pullCmd struct {
+	Checkout string `arg:"" name:"CHECKOUT" help:"checkout to pull into" completion-predictor:"checkout"`
+	From     string `name:"from" help:"host passed to attach; optional with one attachment"`
+	DryRun   bool   `name:"dry-run" help:"report without writing"`
+}
+
+func (cmd *pullCmd) Run(c *cli) error {
+	a := api.PullArgs{Checkout: cmd.Checkout, From: cmd.From, DryRun: cmd.DryRun}
 	r, err := call[api.PullReply](c, "pull", a)
 	if err != nil {
 		return err
@@ -617,46 +464,35 @@ func printMerge(c *cli, r api.ApplyReply, dryRun bool, again string) error {
 	return exitCode(1)
 }
 
-// runRm removes a checkout.
-func runRm(c *cli, args []string) error {
-	fs := c.flags("rm")
-	var a api.RmArgs
-	fs.BoolVar(&a.StickySnapshots, "sticky-snapshots", false, "retain snapshots of the removed checkout")
-	pos, err := c.parse(fs, args, 1, 1)
-	if err != nil {
-		return err
-	}
-	a.Checkout = pos[0]
-	_, err = call[json.RawMessage](c, "rm", a)
+// rmCmd removes a checkout.
+type rmCmd struct {
+	Checkout        string `arg:"" name:"CHECKOUT" help:"checkout to remove" completion-predictor:"checkout"`
+	StickySnapshots bool   `name:"sticky-snapshots" help:"retain snapshots of the removed checkout"`
+}
+
+func (cmd *rmCmd) Run(c *cli) error {
+	_, err := call[json.RawMessage](c, "rm", api.RmArgs{Checkout: cmd.Checkout, StickySnapshots: cmd.StickySnapshots})
 	return err
 }
 
-// runAttach offers a folder or checkout to another machine and prints where it appeared.
-func runAttach(c *cli, args []string) error {
-	fs := c.flags("attach")
-	to := fs.String("to", "", "ssh destination of the remote machine")
-	name := fs.String("name", "", "checkout name on the remote machine")
-	bin := fs.String("remote-bin", "", "path of ovnfs on the remote machine (default: ovnfs on its PATH)")
-	pos, err := c.parse(fs, args, 0, 1)
+// attachCmd offers a folder or checkout to another machine and prints where it appeared.
+type attachCmd struct {
+	Target    string `arg:"" optional:"" name:"DIR|CHECKOUT" help:"folder or checkout to attach (default .)" completion-predictor:"checkout"`
+	To        string `name:"to" required:"" help:"ssh destination of the remote machine"`
+	Name      string `name:"name" help:"checkout name on the remote machine"`
+	RemoteBin string `name:"remote-bin" help:"path of ovnfs on the remote machine (default: ovnfs on its PATH)"`
+}
+
+func (cmd *attachCmd) Run(c *cli) error {
+	dir, checkoutName, err := resolveTarget(orDefault(cmd.Target, "."))
 	if err != nil {
 		return err
 	}
-	if *to == "" {
-		return fmt.Errorf("attach needs --to HOST")
-	}
-	target := "."
-	if len(pos) == 1 {
-		target = pos[0]
-	}
-	dir, checkoutName, err := resolveTarget(target)
-	if err != nil {
-		return err
-	}
-	reply, err := call[api.AttachReply](c, "attach", api.AttachArgs{Dir: dir, Checkout: checkoutName, To: *to, Name: *name, RemoteBin: *bin})
+	reply, err := call[api.AttachReply](c, "attach", api.AttachArgs{Dir: dir, Checkout: checkoutName, To: cmd.To, Name: cmd.Name, RemoteBin: cmd.RemoteBin})
 	if err != nil || c.json {
 		return err
 	}
-	printAttached(*to, reply.RemotePath, reply)
+	printAttached(cmd.To, reply.RemotePath, reply)
 	return nil
 }
 
@@ -669,12 +505,11 @@ func printAttached(host, path string, r api.AttachReply) {
 		paint(stderr, styleDim, "(content moves on first read; the link reconnects while this daemon runs)"))
 }
 
-// runLink pipes stdin and stdout to the daemon's link socket; attach runs it over ssh.
-// Nothing else may be written to stdout: it carries the link protocol.
-func runLink(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("link"), args, 0, 0); err != nil {
-		return err
-	}
+// linkCmd pipes stdin and stdout to the daemon's link socket; attach runs it over
+// ssh. Nothing else may be written to stdout: it carries the link protocol.
+type linkCmd struct{}
+
+func (cmd *linkCmd) Run(c *cli) error {
 	if _, err := c.client(); err != nil {
 		return err
 	}
@@ -693,15 +528,14 @@ func runLink(c *cli, args []string) error {
 	return err
 }
 
-// runShare prints the remote-fs socket of a checkout, starting its share if needed.
-func runShare(c *cli, args []string) error {
-	fs := c.flags("share")
-	rw := fs.Bool("rw", false, "let the client write")
-	pos, err := c.parse(fs, args, 1, 1)
-	if err != nil {
-		return err
-	}
-	reply, err := call[api.ShareReply](c, "share", api.ShareArgs{Checkout: pos[0], Writable: *rw})
+// shareCmd prints the remote-fs socket of a checkout, starting its share if needed.
+type shareCmd struct {
+	Checkout  string `arg:"" name:"CHECKOUT" help:"checkout to share" completion-predictor:"checkout"`
+	ReadWrite bool   `name:"rw" help:"let the client write"`
+}
+
+func (cmd *shareCmd) Run(c *cli) error {
+	reply, err := call[api.ShareReply](c, "share", api.ShareArgs{Checkout: cmd.Checkout, Writable: cmd.ReadWrite})
 	if err != nil || c.json {
 		return err
 	}
@@ -714,29 +548,30 @@ func runShare(c *cli, args []string) error {
 	return nil
 }
 
-// runDrop releases a snapshot.
-func runDrop(c *cli, args []string) error {
-	pos, err := c.parse(c.flags("drop"), args, 1, 1)
-	if err != nil {
-		return err
-	}
-	_, err = call[json.RawMessage](c, "drop", api.DropArgs{Snapshot: pos[0]})
+// dropCmd releases a snapshot.
+type dropCmd struct {
+	Snapshot string `arg:"" name:"SNAP" help:"snapshot to release" completion-predictor:"snapshot"`
+}
+
+func (cmd *dropCmd) Run(c *cli) error {
+	_, err := call[json.RawMessage](c, "drop", api.DropArgs{Snapshot: cmd.Snapshot})
 	return err
 }
 
-// runExplain prints the class of one path and the rule that decided it.
-func runExplain(c *cli, args []string) error {
-	fs := c.flags("explain")
-	var a api.ExplainArgs
-	fs.Var((*stringList)(&a.Rules), "rule", "extra rule line (repeatable)")
-	pos, err := c.parse(fs, args, 1, 2)
-	if err != nil {
-		return err
+// explainCmd prints the class of one path and the rule that decided it.
+type explainCmd struct {
+	First  string   `arg:"" name:"DIR|CHECKOUT|PATH" help:"a path, or the folder or checkout it belongs to"`
+	Second string   `arg:"" optional:"" name:"PATH" help:"path, when the first argument named the folder or checkout"`
+	Rules  []string `name:"rule" sep:"none" help:"extra rule line (repeatable)"`
+}
+
+func (cmd *explainCmd) Run(c *cli) error {
+	a := api.ExplainArgs{Rules: cmd.Rules}
+	target, path := "", cmd.First
+	if cmd.Second != "" {
+		target, path = cmd.First, cmd.Second
 	}
-	target, path := "", pos[0]
-	if len(pos) == 2 {
-		target, path = pos[0], pos[1]
-	}
+	var err error
 	if a.Dir, a.Checkout, err = resolveTarget(target); err != nil {
 		return fmt.Errorf("explain: %w", err)
 	}
@@ -759,21 +594,17 @@ func runExplain(c *cli, args []string) error {
 	return nil
 }
 
-// runPlan prints how a launch elsewhere would recreate a folder or checkout.
-func runPlan(c *cli, args []string) error {
-	fs := c.flags("plan")
-	a := api.PlanArgs{On: "cloud"}
-	fs.StringVar(&a.On, "on", a.On, "cloud or peer")
-	fs.Var((*stringList)(&a.Rules), "rule", "extra rule line (repeatable)")
-	pos, err := c.parse(fs, args, 0, 1)
-	if err != nil {
-		return err
-	}
-	target := ""
-	if len(pos) == 1 {
-		target = pos[0]
-	}
-	if a.Dir, a.Checkout, err = resolveTarget(target); err != nil {
+// planCmd prints how a launch elsewhere would recreate a folder or checkout.
+type planCmd struct {
+	Target string   `arg:"" optional:"" name:"DIR|CHECKOUT" help:"folder or checkout to plan (default .)" completion-predictor:"checkout"`
+	On     string   `name:"on" default:"cloud" enum:"cloud,peer" help:"where the launch would run"`
+	Rules  []string `name:"rule" sep:"none" help:"extra rule line (repeatable)"`
+}
+
+func (cmd *planCmd) Run(c *cli) error {
+	a := api.PlanArgs{On: cmd.On, Rules: cmd.Rules}
+	var err error
+	if a.Dir, a.Checkout, err = resolveTarget(cmd.Target); err != nil {
 		return fmt.Errorf("plan: %w", err)
 	}
 	r, err := call[api.PlanReply](c, "plan", a)

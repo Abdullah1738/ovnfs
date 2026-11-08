@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/alecthomas/kong"
+
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/source"
 )
@@ -26,43 +28,61 @@ type runOptions struct {
 	command   []string
 }
 
-// parseRun requires an explicit separator so command flags never reach ovnfs's parser.
-func parseRun(c *cli, args []string) (runOptions, error) {
-	var o runOptions
-	fs := c.flags("run")
-	fs.StringVar(&o.new.Name, "name", "", "checkout name")
-	fs.StringVar(&o.new.Rev, "rev", "", "start at this git commit or local branch")
-	fs.Var((*stringList)(&o.new.Take), "take", "SRC:PATH override of the starting tree (repeatable)")
-	fs.Var((*stringList)(&o.new.Rules), "rule", "extra rule line (repeatable)")
-	fs.BoolVar(&o.keep, "keep", false, "keep the checkout after the command exits")
-	fs.StringVar(&o.on, "on", "", "run on this ssh destination, keeping both checkouts")
-	fs.StringVar(&o.remoteBin, "remote-bin", "", "path of ovnfs on the remote machine")
-	before := args
-	separator := slices.Index(args, "--")
-	if separator >= 0 {
-		before, o.command = args[:separator], args[separator+1:]
-	}
-	pos, err := c.parse(fs, before, 0, 1)
-	if err != nil {
-		return o, err
-	}
-	if separator < 0 || len(o.command) == 0 {
-		return o, errors.New(c.usage())
-	}
-	dir := "."
-	if len(pos) == 1 {
-		dir = pos[0]
-	}
-	o.new.Dir, err = filepath.Abs(dir)
-	return o, err
+// runFlags are shared by the visible command grammar and the prefix parser.
+type runFlags struct {
+	Name      string   `name:"name" help:"checkout name"`
+	Rev       string   `name:"rev" help:"start at this git commit or local branch"`
+	Take      []string `name:"take" sep:"none" help:"SRC:PATH override of the starting tree (repeatable)"`
+	Rules     []string `name:"rule" sep:"none" help:"extra rule line (repeatable)"`
+	Keep      bool     `name:"keep" help:"keep the checkout after the command exits"`
+	On        string   `name:"on" help:"run on this ssh destination, keeping both checkouts"`
+	RemoteBin string   `name:"remote-bin" help:"path of ovnfs on the remote machine"`
 }
 
-// runRun opens an isolated checkout, runs a command there, and closes or retains the lane.
-func runRun(c *cli, args []string) error {
-	o, err := parseRun(c, args)
+type runCmd struct {
+	runFlags
+	Args    []string `arg:"" optional:"" passthrough:"" name:"DIR -- CMD ..." help:"optional folder, then -- and the command with its arguments"`
+	options runOptions
+}
+
+// AfterApply parses only the prefix before --. The passthrough positional keeps
+// kong from interpreting child arguments, including flags and further separators.
+func (r *runCmd) AfterApply(ctx *kong.Context) error {
+	args := ctx.Args[1:]
+	separator := slices.Index(args, "--")
+	if separator < 0 || separator == len(args)-1 {
+		return errors.New("run requires -- followed by a command")
+	}
+	var prefix struct {
+		runFlags
+		Dir string `arg:"" optional:"" name:"DIR" help:"folder to open the checkout on (default .)"`
+	}
+	parser, err := kong.New(&prefix, kong.Name("ovnfs run"))
 	if err != nil {
 		return err
 	}
+	if _, err = parser.Parse(args[:separator]); err != nil {
+		return err
+	}
+	dir := prefix.Dir
+	if dir == "" {
+		dir = "."
+	}
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	r.options = runOptions{
+		new:  api.NewArgs{Dir: dir, Name: prefix.Name, Rev: prefix.Rev, Take: prefix.Take, Rules: prefix.Rules},
+		keep: prefix.Keep, on: prefix.On, remoteBin: prefix.RemoteBin,
+		command: args[separator+1:],
+	}
+	return nil
+}
+
+// Run opens an isolated checkout, runs a command there, and closes or retains the lane.
+func (run *runCmd) Run(c *cli) error {
+	o := run.options
 	// A run's stdout belongs exclusively to its command, even under --json.
 	c.json = false
 	signals := make(chan os.Signal, 2)

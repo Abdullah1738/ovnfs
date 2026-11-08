@@ -12,6 +12,27 @@ with WinFsp installed it also mounts real WinFsp drives. The git engines under
 They are written from git's documentation and observed behaviour, never from
 git's or another implementation's source.
 
+## CLI
+
+The command line is a [kong](https://github.com/alecthomas/kong) grammar: one
+struct per verb — the root in [`grammar.go`](../grammar.go), each verb's flags
+and help beside its implementation, all in struct tags. Help sections are kong
+groups, git-style flags take `short:` tags, and values like `--idle 7d` parse
+through `encoding.TextUnmarshaler`. [`ui.go`](../ui.go) colours the output, and
+`colorHelp` renders kong's help in the same palette.
+
+[kong-completion](https://github.com/jotaen/kong-completion) generates
+initialization code for bash, zsh and fish (`ovnfs completion bash -c`): verbs,
+a verb's own flags and their enums come from the grammar, checkout and snapshot
+names from a daemon that is already running (completion never starts one, see
+`predictCheckouts`). The global options stay out of the grammar, so they are
+listed in help but not completed.
+
+`run` and `serve` are commands in the same grammar. `splitGlobals` pulls the
+global options (`--state`, `--mount`, `--json`, `--color`) out of the arguments
+before the `--` separator, so they work before the verb or among its arguments.
+The separator preserves the arguments of a command launched by `run`.
+
 ## CI and releases
 
 [`ci.yml`](../.github/workflows/ci.yml) runs on pushes to `main` and on pull

@@ -15,26 +15,27 @@ import (
 	"github.com/stencil-hq/ovnfs/source"
 )
 
-// runSend attaches a folder or checkout to a machine reached by ssh, preparing
+// sendCmd attaches a folder or checkout to a machine reached by ssh, preparing
 // that machine first: it installs ovnfs there from a release when it has none,
 // attaches over ssh, and points PATH there at the attached checkout.
-func runSend(c *cli, args []string) error {
-	fs := c.flags("send")
-	name := fs.String("name", "", "checkout name on the remote machine (default: the folder's name)")
-	bin := fs.String("remote-bin", "", "path of ovnfs on the remote machine (default: on its PATH, else ~/.local/bin/ovnfs, installed there when missing)")
-	pos, err := c.parse(fs, args, 1, 2)
-	if err != nil {
-		return err
-	}
-	target, dest := ".", pos[len(pos)-1]
-	if len(pos) == 2 {
-		target = pos[0]
+type sendCmd struct {
+	First     string `arg:"" name:"DIR|CHECKOUT|HOST" help:"folder or checkout to send, or the host to send the folder . to" completion-predictor:"checkout"`
+	Dest      string `arg:"" optional:"" name:"HOST[:PATH]" help:"ssh destination, and the path to link the checkout at, when the first argument named a folder or checkout"`
+	Name      string `name:"name" help:"checkout name on the remote machine (default: the folder's name)"`
+	RemoteBin string `name:"remote-bin" help:"path of ovnfs on the remote machine (default: on its PATH, else ~/.local/bin/ovnfs, installed there when missing)"`
+}
+
+func (cmd *sendCmd) Run(c *cli) error {
+	target, dest := ".", cmd.First
+	if cmd.Dest != "" {
+		target, dest = cmd.First, cmd.Dest
 	}
 	host, at, _ := strings.Cut(dest, ":")
 	if host == "" {
-		return errors.New(c.usage())
+		return errors.New("send: give a HOST[:PATH]")
 	}
-	a := api.AttachArgs{Name: *name}
+	a := api.AttachArgs{Name: cmd.Name}
+	var err error
 	if a.Dir, a.Checkout, err = resolveTarget(target); err != nil {
 		return err
 	}
@@ -45,7 +46,7 @@ func runSend(c *cli, args []string) error {
 		}
 		a.Name = runLaneName(root)
 	}
-	r, err := probe(host, *bin, at)
+	r, err := probe(host, cmd.RemoteBin, at)
 	if err != nil {
 		return err
 	}

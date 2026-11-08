@@ -77,7 +77,7 @@ const (
 // no NFS client mount, and a mapped drive has no access-time option.
 func mountServer(proto string, addr net.Addr, mount, user, password string, _ bool) error {
 	if proto != "smb" {
-		return fmt.Errorf("NFS mounts unsupported on Windows; use -proto smb")
+		return fmt.Errorf("NFS mounts unsupported on Windows; use --proto smb")
 	}
 	return mapDrive(filepath.VolumeName(mount), smbRemote, addr.(*net.TCPAddr).Port, user, password)
 }

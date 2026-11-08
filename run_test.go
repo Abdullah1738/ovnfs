@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/alecthomas/kong"
 )
 
 // TestRunRelativeDir checks root, nested and outside callers without prefix confusion.
@@ -53,17 +55,28 @@ func TestRunRelativeDirSymlink(t *testing.T) {
 	}
 }
 
+// parseRunCommand exercises the same kong command grammar without running a checkout.
+func parseRunCommand(args []string) (runOptions, error) {
+	var root struct {
+		Run runCmd `cmd:""`
+	}
+	parser, err := kong.New(&root)
+	if err != nil {
+		return runOptions{}, err
+	}
+	_, err = parser.Parse(append([]string{"run"}, args...))
+	return root.Run.options, err
+}
+
 // TestParseRun preserves command flags while forwarding all new options unchanged.
 func TestParseRun(t *testing.T) {
-	cmd, _ := lookupCommand("run")
-	c := &cli{cmd: cmd}
 	command := []string{"tool", "--name", "not-a-checkout", "--", "", "$HOME"}
-	args := []string{"folder", "--name", "lane", "--rev", "HEAD", "--take", ":staged", "--take", ".:dirty", "--rule", "cache out", "--keep", "--on", "user@host", "--remote-bin", "/with spaces/ovnfs", "--"}
-	o, err := parseRun(c, append(args, command...))
+	args := []string{"folder", "--name", "lane", "--rev", "HEAD", "--take", ":staged", "--take", ".:dirty,extra", "--rule", "cache out", "--keep", "--on", "user@host", "--remote-bin", "/with spaces/ovnfs", "--"}
+	o, err := parseRunCommand(append(args, command...))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(o.command, command) || !slices.Equal(o.new.Take, []string{":staged", ".:dirty"}) || !slices.Equal(o.new.Rules, []string{"cache out"}) {
+	if !slices.Equal(o.command, command) || !slices.Equal(o.new.Take, []string{":staged", ".:dirty,extra"}) || !slices.Equal(o.new.Rules, []string{"cache out"}) {
 		t.Fatalf("lost command or repeatable flags: %+v", o)
 	}
 	if o.new.Dir != filepath.Join(mustGetwd(t), "folder") || o.new.Name != "lane" || o.new.Rev != "HEAD" || !o.keep || o.on != "user@host" || o.remoteBin != "/with spaces/ovnfs" {
@@ -71,12 +84,29 @@ func TestParseRun(t *testing.T) {
 	}
 }
 
+func TestParseRunDefaultDir(t *testing.T) {
+	for _, args := range [][]string{
+		{"--", "tool", "--keep", ""},
+		{"--name", "lane", "--", "tool", "--keep", ""},
+	} {
+		o, err := parseRunCommand(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o.new.Dir != mustGetwd(t) || o.keep || !slices.Equal(o.command, []string{"tool", "--keep", ""}) {
+			t.Fatalf("unexpected options: %+v", o)
+		}
+		if len(args) > 4 && o.new.Name != "lane" {
+			t.Fatalf("lost name flag: %+v", o)
+		}
+	}
+}
+
 // TestParseRunMissingCommand rejects ambiguous or empty command lines before opening a checkout.
 func TestParseRunMissingCommand(t *testing.T) {
-	cmd, _ := lookupCommand("run")
-	for _, args := range [][]string{nil, {"--"}, {"folder", "--"}, {"echo"}, {"folder", "extra", "--", "echo"}} {
-		if _, err := parseRun(&cli{cmd: cmd}, args); err == nil {
-			t.Errorf("parse %q succeeded without one DIR and an explicit command", args)
+	for _, args := range [][]string{nil, {"--"}, {"folder", "--"}, {"echo"}, {"folder", "extra", "--", "echo"}, {"folder", "--bogus", "--", "echo"}} {
+		if _, err := parseRunCommand(args); err == nil {
+			t.Errorf("parse %q succeeded without valid run options and an explicit command", args)
 		}
 	}
 }

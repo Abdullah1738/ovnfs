@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"strconv"
@@ -10,73 +9,68 @@ import (
 	"github.com/stencil-hq/ovnfs/api"
 )
 
-// searchFlags adds the traversal options common to grep and glob.
-func searchFlags(fs *flag.FlagSet, a *api.SearchArgs) {
-	fs.StringVar(&a.Path, "path", "", "search this root-relative subpath")
-	fs.BoolVar(&a.Hidden, "hidden", false, "include dot-prefixed entries")
-	fs.BoolVar(&a.NoIgnore, "no-ignore", false, "do not honor .gitignore/.ignore/exclude files")
-	fs.BoolVar(&a.NodeModules, "node-modules", false, "descend into node_modules")
-	fs.IntVar(&a.Workers, "workers", 0, "walking goroutines (0: platform default)")
-	fs.IntVar(&a.MaxDepth, "max-depth", 0, "maximum entry depth, with root children at 1 (0: unlimited)")
+// searchFlags are the traversal options grep and glob share; kong flattens the
+// embedded struct into their flags.
+type searchFlags struct {
+	Path        string `name:"path" help:"search this root-relative subpath"`
+	Hidden      bool   `name:"hidden" help:"include dot-prefixed entries"`
+	NoIgnore    bool   `name:"no-ignore" help:"do not honor .gitignore/.ignore/exclude files"`
+	NodeModules bool   `name:"node-modules" help:"descend into node_modules"`
+	Workers     int    `name:"workers" help:"walking goroutines (0: platform default)"`
+	MaxDepth    int    `name:"max-depth" help:"maximum entry depth, with root children at 1 (0: unlimited)"`
 }
 
-// resolveSearchTarget resolves the optional root and normalizes its subpath.
-func resolveSearchTarget(a *api.SearchArgs, pos []string) error {
-	target := ""
-	if len(pos) == 2 {
-		target = pos[1]
-	}
+// searchArgs resolves target as the search root and normalizes the subpath.
+func (s searchFlags) searchArgs(target string) (api.SearchArgs, error) {
+	a := api.SearchArgs{Path: s.Path, Hidden: s.Hidden, NoIgnore: s.NoIgnore, NodeModules: s.NodeModules, Workers: s.Workers, MaxDepth: s.MaxDepth}
 	var err error
 	if a.Dir, a.Checkout, err = resolveTarget(target); err != nil {
-		return err
+		return a, err
 	}
 	if a.Path != "" {
 		a.Path, err = relativeTo(a.Dir, a.Path)
 	}
-	return err
+	return a, err
 }
 
-// runGrep searches file contents and prints matches, matching paths, or counts.
-func runGrep(c *cli, args []string) error {
-	fs := c.flags("grep")
-	var a api.GrepArgs
-	searchFlags(fs, &a.SearchArgs)
-	fs.BoolVar(&a.Literal, "F", false, "search PATTERN as literal text")
-	fs.BoolVar(&a.IgnoreCase, "i", false, "ignore case (Unicode simple folding)")
-	fs.BoolVar(&a.Multiline, "multiline", false, "let matches span lines")
-	fs.StringVar(&a.Glob, "glob", "", "search only files whose relative path matches GLOB, or under a matching directory")
-	fs.BoolVar(&a.Anchored, "anchored", false, "match slash-free globs at the root only")
-	fs.Func("exclude", "skip files and directories matching GLOB (repeatable; a leading / anchors to the root)", func(v string) error {
-		a.Exclude = append(a.Exclude, v)
-		return nil
-	})
-	fs.StringVar(&a.Type, "type", "", "search only files of TYPE (rust, ts, py, ... or an extension)")
-	fs.StringVar(&a.Mode, "mode", "content", "report content, filesWithMatches, or count")
-	before := fs.Int("B", -1, "context lines before each match (overrides -C)")
-	after := fs.Int("A", -1, "context lines after each match (overrides -C)")
-	around := fs.Int("C", 0, "context lines before and after each match unless -B or -A is set")
-	fs.IntVar(&a.MaxColumns, "max-columns", 0, "cut reported lines longer than N bytes (0: never)")
-	fs.IntVar(&a.Offset, "offset", 0, "skip the first N results")
-	fs.IntVar(&a.MaxCount, "max-count", 0, "return at most N results (0: all)")
-	fs.IntVar(&a.MaxCountPerFile, "max-count-per-file", 0, "keep at most N content matches per file (0: all)")
-	fs.Int64Var(&a.MaxFileSize, "max-file-size", 0, "search at most N leading bytes per file (0: 4 MiB)")
-	pos, err := c.parse(fs, args, 1, 2)
+// grepCmd searches file contents and prints matches, matching paths, or counts.
+type grepCmd struct {
+	Pattern         string   `arg:"" name:"PATTERN" help:"regular expression, or literal text with -F"`
+	Target          string   `arg:"" optional:"" name:"DIR|CHECKOUT" help:"folder or checkout to search (default .)" completion-predictor:"checkout"`
+	Literal         bool     `name:"literal" short:"F" help:"search PATTERN as literal text"`
+	IgnoreCase      bool     `name:"ignore-case" short:"i" help:"ignore case (Unicode simple folding)"`
+	Multiline       bool     `name:"multiline" help:"let matches span lines"`
+	Glob            string   `name:"glob" help:"search only files whose relative path matches GLOB, or under a matching directory"`
+	Anchored        bool     `name:"anchored" help:"match slash-free globs at the root only"`
+	Exclude         []string `name:"exclude" sep:"none" help:"skip files and directories matching GLOB (repeatable; a leading / anchors to the root)"`
+	Type            string   `name:"type" help:"search only files of TYPE (rust, ts, py, ... or an extension)"`
+	Mode            string   `name:"mode" default:"content" enum:"content,filesWithMatches,count" help:"report content, filesWithMatches, or count"`
+	Before          int      `name:"before" short:"B" default:"-1" help:"context lines before each match (overrides -C)"`
+	After           int      `name:"after" short:"A" default:"-1" help:"context lines after each match (overrides -C)"`
+	Around          int      `name:"context" short:"C" default:"0" help:"context lines before and after each match unless -B or -A is set"`
+	MaxColumns      int      `name:"max-columns" help:"cut reported lines longer than N bytes (0: never)"`
+	Offset          int      `name:"offset" help:"skip the first N results"`
+	MaxCount        int      `name:"max-count" help:"return at most N results (0: all)"`
+	MaxCountPerFile int      `name:"max-count-per-file" help:"keep at most N content matches per file (0: all)"`
+	MaxFileSize     int64    `name:"max-file-size" help:"search at most N leading bytes per file (0: 4 MiB)"`
+	searchFlags
+}
+
+func (cmd *grepCmd) Run(c *cli) error {
+	search, err := cmd.searchFlags.searchArgs(cmd.Target)
 	if err != nil {
-		return err
+		return fmt.Errorf("grep: %w", err)
 	}
-	switch a.Mode {
-	case "", "content", "filesWithMatches", "count":
-	default:
-		return fmt.Errorf("grep: -mode %q: want content, filesWithMatches, or count", a.Mode)
+	a := api.GrepArgs{
+		SearchArgs: search, Pattern: cmd.Pattern, Literal: cmd.Literal, IgnoreCase: cmd.IgnoreCase,
+		Multiline: cmd.Multiline, Glob: cmd.Glob, Anchored: cmd.Anchored, Exclude: cmd.Exclude,
+		Type: cmd.Type, Mode: cmd.Mode, MaxColumns: cmd.MaxColumns, Offset: cmd.Offset,
+		MaxCount: cmd.MaxCount, MaxCountPerFile: cmd.MaxCountPerFile, MaxFileSize: cmd.MaxFileSize,
 	}
 	// Retain gogrep's legacy rule: specifying either side replaces both -C sides.
-	a.Before, a.After = *around, *around
-	if *before >= 0 || *after >= 0 {
-		a.Before, a.After = max(0, *before), max(0, *after)
-	}
-	a.Pattern = pos[0]
-	if err := resolveSearchTarget(&a.SearchArgs, pos); err != nil {
-		return fmt.Errorf("grep: %w", err)
+	a.Before, a.After = cmd.Around, cmd.Around
+	if cmd.Before >= 0 || cmd.After >= 0 {
+		a.Before, a.After = max(0, cmd.Before), max(0, cmd.After)
 	}
 	r, err := call[api.GrepReply](c, "grep", a)
 	if err != nil || c.json {
@@ -122,27 +116,25 @@ func grepLine(w io.Writer, path string, line int, text string, match bool, patte
 	fmt.Fprintf(w, "%s%s%s%s%s\n", paint(w, styleAccent, path), paint(w, styleDim, sep), paint(w, num, strconv.Itoa(line)), paint(w, styleDim, sep), highlight(w, text, pattern))
 }
 
-// runGlob lists matching paths, marking directories with a trailing slash.
-func runGlob(c *cli, args []string) error {
-	fs := c.flags("glob")
-	var a api.GlobArgs
-	searchFlags(fs, &a.SearchArgs)
-	fs.BoolVar(&a.Anchored, "anchored", false, "match slash-free patterns at the root only")
-	fs.StringVar(&a.Type, "type", "", "keep only file, dir, or symlink entries")
-	fs.IntVar(&a.Limit, "limit", 0, "return at most N matches (0: all)")
-	fs.BoolVar(&a.SortByMtime, "mtime", false, "newest first, with size and mtime")
-	pos, err := c.parse(fs, args, 1, 2)
+// globCmd lists matching paths, marking directories with a trailing slash.
+type globCmd struct {
+	Pattern     string `arg:"" name:"PATTERN" help:"glob pattern"`
+	Target      string `arg:"" optional:"" name:"DIR|CHECKOUT" help:"folder or checkout to search (default .)" completion-predictor:"checkout"`
+	Anchored    bool   `name:"anchored" help:"match slash-free patterns at the root only"`
+	Type        string `name:"type" default:"" enum:"file,dir,symlink" help:"keep only file, dir, or symlink entries"`
+	Limit       int    `name:"limit" help:"return at most N matches (0: all)"`
+	SortByMtime bool   `name:"mtime" help:"newest first, with size and mtime"`
+	searchFlags
+}
+
+func (cmd *globCmd) Run(c *cli) error {
+	search, err := cmd.searchFlags.searchArgs(cmd.Target)
 	if err != nil {
-		return err
-	}
-	switch a.Type {
-	case "", "file", "dir", "symlink":
-	default:
-		return fmt.Errorf("glob: -type %q: want file, dir, or symlink", a.Type)
-	}
-	a.Pattern = pos[0]
-	if err := resolveSearchTarget(&a.SearchArgs, pos); err != nil {
 		return fmt.Errorf("glob: %w", err)
+	}
+	a := api.GlobArgs{
+		SearchArgs: search, Pattern: cmd.Pattern, Anchored: cmd.Anchored,
+		Type: cmd.Type, Limit: cmd.Limit, SortByMtime: cmd.SortByMtime,
 	}
 	r, err := call[api.GlobReply](c, "glob", a)
 	if err != nil || c.json {

@@ -2,39 +2,40 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
-// runCtl sends one raw operation with a JSON object argument and prints the raw reply.
-func runCtl(c *cli, args []string) error {
-	pos, err := c.parse(c.flags("ctl"), args, 1, 2)
-	if err != nil {
-		return err
-	}
-	if pos[0] == "subscribe" {
+// ctlCmd sends one raw operation with a JSON object argument and prints the raw reply.
+type ctlCmd struct {
+	Op     string `arg:"" name:"OP" help:"operation to send, one of api.Ops"`
+	Object string `arg:"" optional:"" name:"JSON" help:"arguments as a JSON object (default {})"`
+}
+
+func (cmd *ctlCmd) Run(c *cli) error {
+	if cmd.Op == "subscribe" {
 		return c.subscribe()
 	}
 	raw := json.RawMessage(`{}`)
-	if len(pos) == 2 {
-		raw = json.RawMessage(pos[1])
+	if cmd.Object != "" {
+		raw = json.RawMessage(cmd.Object)
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
-		return fmt.Errorf("invalid: arguments must be a JSON object")
+		return errors.New("invalid: arguments must be a JSON object")
 	}
-	reply, err := c.call(pos[0], raw)
+	reply, err := c.call(cmd.Op, raw)
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(reply))
+	fmt.Fprintln(stdout, string(reply))
 	return nil
 }
 
-// runSubscribe streams daemon events until interrupted.
-func runSubscribe(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("subscribe"), args, 0, 0); err != nil {
-		return err
-	}
+// subscribeCmd streams daemon events until interrupted.
+type subscribeCmd struct{}
+
+func (cmd *subscribeCmd) Run(c *cli) error {
 	return c.subscribe()
 }
 

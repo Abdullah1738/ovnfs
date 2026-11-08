@@ -111,7 +111,7 @@ for proto in $PROTOS; do
 	ov=$BENCH_DIR/overlay-$proto
 	proto_log=$logs/ovnfs-$proto.log
 	t0=$(now)
-	PATH=$shim:$PATH "$OVNFS" serve -proto "$proto" -state "$ov/state" -mount "$ov/tree" >"$proto_log" 2>&1 &
+	PATH=$shim:$PATH "$OVNFS" serve --proto "$proto" --state "$ov/state" --mount "$ov/tree" >"$proto_log" 2>&1 &
 	server=$!
 	for _ in $(seq 100); do
 		grep -q 'mounted at' "$proto_log" && break

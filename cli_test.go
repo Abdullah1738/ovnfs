@@ -1,8 +1,6 @@
 package main
 
 import (
-	"flag"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -79,57 +77,16 @@ func hasRow(out string, fields ...string) bool {
 	return false
 }
 
-// TestParseInterspersed checks that flags are found anywhere among positionals and "--" ends flag parsing.
-func TestParseInterspersed(t *testing.T) {
-	tests := []struct {
-		name     string
-		args     []string
-		pos      []string
-		checkout string
-		rules    []string
-		json     bool
-		err      bool
-	}{
-		{name: "flags after positional", args: []string{"app", "--name", "b"}, pos: []string{"app"}, checkout: "b"},
-		{name: "flags before positional", args: []string{"-name=b", "app"}, pos: []string{"app"}, checkout: "b"},
-		{name: "flags between positionals", args: []string{"app", "--json", "snap1", "--rule", "cache x", "--rule", "local y"}, pos: []string{"app", "snap1"}, json: true, rules: []string{"cache x", "local y"}},
-		{name: "double dash ends flags", args: []string{"app", "--", "--name", "x"}, pos: []string{"app", "--name", "x"}},
-		{name: "lone dash is positional", args: []string{"-", "--json"}, pos: []string{"-"}, json: true},
-		{name: "no args", args: nil, pos: nil},
-		{name: "unknown flag", args: []string{"app", "--nope"}, err: true},
-		{name: "missing value", args: []string{"app", "--name"}, err: true},
+// TestGlobalOptionsBeforeCommand checks that global options are applied without
+// consuming a child command's arguments after the separator.
+func TestGlobalOptionsBeforeCommand(t *testing.T) {
+	var c cli
+	args, err := splitGlobals(&c, []string{"run", "--state", "/tmp/state", "--json", "--", "echo", "--json"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := &cli{}
-			fs := c.flags("test")
-			var checkout string
-			var rules stringList
-			fs.StringVar(&checkout, "name", "", "")
-			fs.Var(&rules, "rule", "")
-			pos, err := parseInterspersed(fs, tt.args)
-			if tt.err {
-				if err == nil {
-					t.Fatalf("parse %q: want error, got positionals %q", tt.args, pos)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parse %q: %v", tt.args, err)
-			}
-			if !slices.Equal(pos, tt.pos) || checkout != tt.checkout || !slices.Equal(rules, tt.rules) || c.json != tt.json {
-				t.Fatalf("parse %q = pos %q name %q rules %q json %v; want %q %q %q %v", tt.args, pos, checkout, rules, c.json, tt.pos, tt.checkout, tt.rules, tt.json)
-			}
-		})
-	}
-}
-
-// TestParseInterspersedHelp keeps -h distinguishable so verbs can print their usage.
-func TestParseInterspersedHelp(t *testing.T) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if _, err := parseInterspersed(fs, []string{"app", "-h"}); err != flag.ErrHelp {
-		t.Fatalf("got %v, want flag.ErrHelp", err)
+	if c.state != "/tmp/state" || !c.json || !slices.Equal(args, []string{"run", "--", "echo", "--json"}) {
+		t.Fatalf("state=%q json=%v args=%q", c.state, c.json, args)
 	}
 }
 
@@ -230,9 +187,9 @@ func TestSecondsFlag(t *testing.T) {
 		{in: "", bad: true},
 	} {
 		var s seconds
-		err := s.Set(tt.in)
+		err := s.UnmarshalText([]byte(tt.in))
 		if (err != nil) != tt.bad || !tt.bad && float64(s) != tt.want {
-			t.Errorf("Set(%q) = %v, %v; want %v, error %v", tt.in, float64(s), err, tt.want, tt.bad)
+			t.Errorf("UnmarshalText(%q) = %v, %v; want %v, error %v", tt.in, float64(s), err, tt.want, tt.bad)
 		}
 	}
 }

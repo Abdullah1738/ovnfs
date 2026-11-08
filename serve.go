@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"math"
@@ -18,6 +17,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/alecthomas/kong"
 
 	"github.com/stencil-hq/ovnfs/admin"
 	"github.com/stencil-hq/ovnfs/api"
@@ -82,29 +83,28 @@ func (b *byteSize) Set(v string) error {
 	return nil
 }
 
-// sizeFlag registers a byteSize flag whose default an environment variable may override.
-func sizeFlag(flags *flag.FlagSet, name, env string, def int64, usage string) (*byteSize, error) {
-	b := byteSize(def)
-	if v := os.Getenv(env); v != "" {
-		if err := b.Set(v); err != nil {
-			return nil, fmt.Errorf("%s: %w", env, err)
-		}
-	}
-	flags.Var(&b, name, usage+", env "+env)
-	return &b, nil
+// UnmarshalText parses a kong size option.
+func (b *byteSize) UnmarshalText(text []byte) error {
+	return b.Set(string(text))
 }
 
-// boolFlag registers a bool flag, off unless an environment variable sets it
-// (strconv.ParseBool syntax).
-func boolFlag(flags *flag.FlagSet, name, env, usage string) (*bool, error) {
-	var def bool
-	if v := os.Getenv(env); v != "" {
-		var err error
-		if def, err = strconv.ParseBool(v); err != nil {
-			return nil, fmt.Errorf("%s: %w", env, err)
-		}
+// serveDefaults supplies the platform and environment defaults to kong.
+func serveDefaults() kong.Option {
+	return kong.Vars{
+		"default_proto":      defaultProto(),
+		"memory_default":     cmp.Or(os.Getenv("OVNFS_MEMORY"), "1G"),
+		"blob_cache_default": cmp.Or(os.Getenv("OVNFS_BLOB_CACHE"), "512M"),
+		"atime_default":      cmp.Or(os.Getenv("OVNFS_ATIME"), "false"),
 	}
-	return flags.Bool(name, def, usage+", env "+env), nil
+}
+
+// serveCmd configures the foreground daemon.
+type serveCmd struct {
+	Proto     string   `help:"File server protocol: nfs, smb, fuse or winfsp." default:"${default_proto}" enum:"nfs,smb,fuse,winfsp"`
+	Listen    string   `help:"File server address; defaults to a free local port or a Unix socket for NFS on macOS."`
+	Memory    byteSize `help:"Memory budget for small written files; 0 writes every file to disk." default:"${memory_default}"`
+	BlobCache byteSize `help:"Memory budget for small content-addressed blobs; 0 disables." default:"${blob_cache_default}"`
+	Atime     bool     `help:"Allow access time updates on the mount." default:"${atime_default}"`
 }
 
 // eventHub fans persisted events out to connected admin subscribers.
@@ -151,47 +151,25 @@ func (h *eventHub) events(ctx context.Context) <-chan admin.Event {
 	return ch
 }
 
-// serve opens the persistent export, attaches its native client, and handles shutdown.
-func serve(args []string) error {
-	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	state := flags.String("state", defaultState, "persistent state directory")
-	mount := flags.String("mount", defaultMount, "folder where checkouts appear")
-	proto := flags.String("proto", defaultProto(), "nfs, smb, fuse (Linux) or winfsp (Windows)")
-	address := flags.String("listen", "", "file server TCP address (nfs, smb); default 127.0.0.1 on a free port, or for NFS on macOS a Unix socket in the state directory")
-	memory, err := sizeFlag(flags, "memory", "OVNFS_MEMORY", 1<<30, "bytes of small written files kept in memory until they spill to disk; 0 writes every file to disk, surviving a crash")
-	if err != nil {
-		return err
-	}
-	blobCache, err := sizeFlag(flags, "blob-cache", "OVNFS_BLOB_CACHE", 512<<20, "bytes of small content-addressed blobs served from memory; 0 disables")
-	if err != nil {
-		return err
-	}
-	atime, err := boolFlag(flags, "atime", "OVNFS_ATIME", "let the mount update access times, which on macOS costs a SETATTR per exec of a checkout binary; off mounts noatime")
-	if err != nil {
-		return err
-	}
-	if err := flags.Parse(args); err != nil {
-		return fmt.Errorf("serve flags: %w", err)
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("serve flags: takes no positional arguments")
-	}
-	if *proto != "nfs" && *proto != "smb" && *proto != "fuse" && *proto != "winfsp" {
-		return fmt.Errorf("serve flags: unknown protocol %q", *proto)
+// Run opens the persistent export, attaches its native client, and handles shutdown.
+func (cmd *serveCmd) Run(c *cli) error {
+	proto := cmd.Proto
+	if proto == "" {
+		proto = defaultProto()
 	}
 	var mem *overlay.Memory
-	if *memory > 0 {
-		mem = overlay.NewMemory(int64(*memory), memoryFileMax, memoryIdle)
+	if cmd.Memory > 0 {
+		mem = overlay.NewMemory(int64(cmd.Memory), memoryFileMax, memoryIdle)
 	}
-	*state, err = filepath.Abs(*state)
+	state, err := filepath.Abs(c.state)
 	if err != nil {
 		return fmt.Errorf("state path: %w", err)
 	}
-	*mount, err = filepath.Abs(*mount)
+	mount, err := filepath.Abs(c.mount)
 	if err != nil {
 		return fmt.Errorf("mount path: %w", err)
 	}
-	if err = os.MkdirAll(*state, 0700); err != nil {
+	if err = os.MkdirAll(state, 0700); err != nil {
 		return fmt.Errorf("state directory: %w", err)
 	}
 	hub := &eventHub{}
@@ -204,12 +182,12 @@ func serve(args []string) error {
 	var checkoutShares *shares
 	userHome, _ := os.UserHomeDir()
 	lk := newLinks(hub.emit)
-	node, err := loadNode(*state)
+	node, err := loadNode(state)
 	if err != nil {
 		return fmt.Errorf("node id: %w", err)
 	}
-	reg, err := checkout.Open(checkout.Config{State: *state, Mount: *mount, UserHome: userHome, Node: node, Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
-		Memory: mem, BlobCache: int64(*blobCache),
+	reg, err := checkout.Open(checkout.Config{State: state, Mount: mount, UserHome: userHome, Node: node, Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
+		Memory: mem, BlobCache: int64(cmd.BlobCache),
 		Retire: func(name string) {
 			if checkoutShares != nil {
 				checkoutShares.Close(name)
@@ -231,8 +209,8 @@ func serve(args []string) error {
 					smbServer.Retire(name)
 				}
 			}
-			if l := files.Load(); l != nil && *proto == "nfs" {
-				l.serving(func() { refreshRoot(*mount) })
+			if l := files.Load(); l != nil && proto == "nfs" {
+				l.serving(func() { refreshRoot(mount) })
 			}
 		}})
 	if err != nil {
@@ -241,46 +219,46 @@ func serve(args []string) error {
 	defer reg.Close()
 	lk.reg = reg
 	defer lk.close()
-	e, err = export.New(export.NewRouter(reg), filepath.Join(*state, "nodes.log"), *state)
+	e, err = export.New(export.NewRouter(reg), filepath.Join(state, "nodes.log"), state)
 	if err != nil {
 		return fmt.Errorf("export: %w", err)
 	}
 	exported.Store(e)
 	defer e.Close()
-	if checkoutShares, err = newShares(*state, reg, e); err != nil {
+	if checkoutShares, err = newShares(state, reg, e); err != nil {
 		return fmt.Errorf("shares: %w", err)
 	}
 	defer checkoutShares.CloseAll()
 	served := make(chan error, 2)
 	port := 0
-	release := func(force bool) error { return unmount(*mount, force) }
-	if *proto == "fuse" || *proto == "winfsp" {
-		srv, mountErr := mountInProcess(*proto, e, *mount, *atime)
+	release := func(force bool) error { return unmount(mount, force) }
+	if proto == "fuse" || proto == "winfsp" {
+		srv, mountErr := mountInProcess(proto, e, mount, cmd.Atime)
 		if mountErr != nil {
 			return mountErr
 		}
 		release = func(bool) error { return srv.Unmount() }
-		go func() { srv.Wait(); served <- fmt.Errorf("%s mount at %s ended", *proto, *mount) }()
-		if err = reg.SetListen(*proto, 0); err != nil {
+		go func() { srv.Wait(); served <- fmt.Errorf("%s mount at %s ended", proto, mount) }()
+		if err = reg.SetListen(proto, 0); err != nil {
 			_ = release(true)
 			return fmt.Errorf("persist listen: %w", err)
 		}
 	} else {
 		var l *fileListener
-		if port, l, err = listenAndMount(reg, e, *proto, *address, *state, *mount, *atime, served, func(s *smb.Server) { smbServer = s }); err != nil {
+		if port, l, err = listenAndMount(reg, e, proto, cmd.Listen, state, mount, cmd.Atime, served, func(s *smb.Server) { smbServer = s }); err != nil {
 			return err
 		}
 		files.Store(l)
 		defer l.Close() // removes the NFS socket, once: a keep-mount cut already has
 	}
-	log.Printf("mounted at %s", *mount)
-	adminListener, err := admin.Listen(filepath.Join(*state, "admin.sock"))
+	log.Printf("mounted at %s", mount)
+	adminListener, err := admin.Listen(filepath.Join(state, "admin.sock"))
 	if err != nil {
 		_ = release(true)
 		return fmt.Errorf("admin listen: %w", err)
 	}
 	defer adminListener.Close()
-	linkListener, err := linkListen(*state)
+	linkListener, err := linkListen(state)
 	if err != nil {
 		_ = release(true)
 		return fmt.Errorf("link listen: %w", err)
@@ -288,7 +266,7 @@ func serve(args []string) error {
 	defer linkListener.Close()
 	go lk.listen(linkListener)
 	stops := make(chan stopRequest)
-	welcome := admin.Welcome{Version: protocolVersion, Ops: api.Ops, Features: api.Features, Proto: *proto, Port: port, Mount: *mount, State: *state}
+	welcome := admin.Welcome{Version: protocolVersion, Ops: api.Ops, Features: api.Features, Proto: proto, Port: port, Mount: mount, State: state}
 	handler := &opsHandler{reg: reg, shares: checkoutShares, links: lk, welcome: welcome, started: time.Now(), stop: func(ctx context.Context, a api.StopArgs) error {
 		done := make(chan error, 1)
 		select {
@@ -319,7 +297,7 @@ func serve(args []string) error {
 			// client "not found": it retries the cut connections instead, until
 			// the next daemon serves this port.
 			l.cut()
-			log.Printf("left %s mounted for the next daemon", *mount)
+			log.Printf("left %s mounted for the next daemon", mount)
 			req.done <- nil
 			return nil
 		}

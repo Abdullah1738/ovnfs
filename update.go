@@ -14,12 +14,12 @@ import (
 	"github.com/stencil-hq/ovnfs/internal/release"
 )
 
-// runUpdate replaces this binary with the latest ovnfs, then points out a
-// daemon still running the old one.
-func runUpdate(c *cli, args []string) error {
-	if _, err := c.parse(c.flags("update"), args, 0, 0); err != nil {
-		return err
-	}
+// updateCmd replaces this binary with the latest ovnfs, then points out a daemon
+// still running the old one.
+type updateCmd struct{}
+
+func (cmd *updateCmd) Run(c *cli) error {
+	c.autostart = false
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return errors.New("this binary carries no build info to update from")

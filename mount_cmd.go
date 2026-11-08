@@ -69,7 +69,7 @@ func mountCmd(proto string, addr net.Addr, dir, extra, share, user, password str
 }
 
 // atimeOption is the generic mount option for the access-time setting (serve
-// -atime). Off by default: with access times, the macOS NFS client sends a
+// --atime). Off by default: with access times, the macOS NFS client sends a
 // SETATTR for every exec of a checkout binary.
 func atimeOption(atime bool) string {
 	if atime {
