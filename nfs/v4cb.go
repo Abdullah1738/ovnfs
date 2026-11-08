@@ -35,7 +35,8 @@ type v4Callback struct {
 	addr  string // host:port
 	ident uint32
 
-	// calls serializes calls; xid and r belong to the call in progress.
+	// calls serializes calls (null, recall); xid and r belong to the call
+	// in progress.
 	calls sync.Mutex
 	xid   uint32
 	r     *bufio.Reader
@@ -101,7 +102,9 @@ func (cb *v4Callback) close() {
 
 // null probes the path with CB_NULL.
 func (cb *v4Callback) null() error {
-	_, err := cb.call(cb4Null, nil, nil)
+	cb.calls.Lock()
+	defer cb.calls.Unlock()
+	_, err := cb.call(cb4Null, nil)
 	return err
 }
 
@@ -110,10 +113,16 @@ var errCBSkipped = errors.New("callback no longer wanted")
 
 // recall sends CB_RECALL {stateid, truncate false, fh} of a delegation of
 // file in a CB_COMPOUND, if want, asked once the call's turn has come,
-// still wants it (errCBSkipped if not). A transport failure is an error;
-// the client's answer is the status.
-func (cb *v4Callback) recall(id v4StateID, file uint64, want func() bool) (status, error) {
-	body, err := cb.call(cb4Compound, want, func(e *encoder) {
+// still wants it (errCBSkipped if not). A transport failure or a malformed
+// reply is an error, which failed gets before the next call's turn comes,
+// so that call's want sees its effect; the client's answer is the status.
+func (cb *v4Callback) recall(id v4StateID, file uint64, want func() bool, failed func(error)) (status, error) {
+	cb.calls.Lock()
+	defer cb.calls.Unlock()
+	if !want() {
+		return 0, errCBSkipped
+	}
+	body, err := cb.call(cb4Compound, func(e *encoder) {
 		e.str("recall")
 		e.u32(0) // minorversion
 		e.u32(cb.ident)
@@ -123,20 +132,20 @@ func (cb *v4Callback) recall(id v4StateID, file uint64, want func() bool) (statu
 		e.bool(false)
 		e.fh(file)
 	})
-	if err != nil {
-		return 0, err
+	if err == nil {
+		d := decoder{buf: body}
+		if s := status(d.u32()); d.err == nil {
+			return s, nil
+		}
+		err = errors.New("short CB_COMPOUND reply")
 	}
-	d := decoder{buf: body}
-	s := status(d.u32())
-	if d.err != nil {
-		return 0, errors.New("short CB_COMPOUND reply")
-	}
-	return s, nil
+	failed(err)
+	return 0, err
 }
 
-// call makes one ONC RPC call, once want (if not nil) agrees when the
-// call's turn has come, and returns the reply's results. Calls go one at a
-// time over one connection, kept between calls.
+// call makes one ONC RPC call and returns the reply's results. The caller
+// holds calls: calls go one at a time over one connection, kept between
+// calls.
 //
 // Clients close idle callback connections (macOS after 300 s, Linux after
 // about 6 minutes), which the server learns only when a call on one fails.
@@ -144,12 +153,7 @@ func (cb *v4Callback) recall(id v4StateID, file uint64, want func() bool) (statu
 // again, once, on a new connection: CB_NULL and CB_RECALL are safe to
 // repeat. A timeout is not retried, as the client may be busy with the
 // call.
-func (cb *v4Callback) call(proc uint32, want func() bool, args func(*encoder)) ([]byte, error) {
-	cb.calls.Lock()
-	defer cb.calls.Unlock()
-	if want != nil && !want() {
-		return nil, errCBSkipped
-	}
+func (cb *v4Callback) call(proc uint32, args func(*encoder)) ([]byte, error) {
 	for retry := true; ; retry = false {
 		cb.mu.Lock()
 		closed, nc := cb.closed, cb.nc

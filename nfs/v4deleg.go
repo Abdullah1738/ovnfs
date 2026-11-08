@@ -1,9 +1,6 @@
 package nfs
 
-import (
-	"errors"
-	"time"
-)
+import "time"
 
 // NFSv4.0 read delegations (RFC 7530 section 10.4). A client holding a read
 // delegation of a file may serve its opens, attributes and data from its
@@ -311,27 +308,32 @@ func (st *v4State) recallLoop(d *v4Hold, c *v4Client, cb *v4Callback) {
 		}
 		return true
 	}
-	for attempt := 0; ; attempt++ {
-		s, err := cb.recall(id, d.file, want)
-		if errors.Is(err, errCBSkipped) {
-			return
-		}
+	// failed runs before the next call over the path, whose want then
+	// finds the path down.
+	failed := func(err error) {
 		st.mu.Lock()
+		defer st.unlock()
 		if st.holds[id.other] != d {
-			st.unlock()
 			return // returned meanwhile
 		}
-		if err != nil {
-			st.srv.logf("nfs: NFSv4 CB_RECALL of file %d failed, revoking: %v", d.file, err)
-			if c.cb == cb {
-				c.cbUp = false
-				c.cbDown = true
-			}
-			st.dropLocked(d)
-			st.unlock()
-			return
+		st.srv.logf("nfs: NFSv4 CB_RECALL of file %d failed, revoking: %v", d.file, err)
+		if c.cb == cb {
+			c.cbUp = false
+			c.cbDown = true
 		}
+		st.dropLocked(d)
+	}
+	for attempt := 0; ; attempt++ {
+		s, err := cb.recall(id, d.file, want, failed)
+		if err != nil {
+			return // skipped, or revoked by failed
+		}
+		st.mu.Lock()
+		held := st.holds[id.other] == d
 		st.unlock()
+		if !held {
+			return // returned meanwhile
+		}
 		// A client recalled before it has processed the OPEN reply
 		// granting the delegation does not know it yet and answers
 		// with an error (macOS: NFS4ERR_BAD_STATEID). Revoking then
