@@ -819,13 +819,25 @@ func (h *memHandle) Stat() (os.FileInfo, error) {
 	return h.m.info(path.Base(h.name)), nil
 }
 
-// Sync succeeds without I/O: memory files are not durable by design.
+// Sync spills the file into its upper and syncs it there, so data the caller
+// fsyncs survives a daemon crash or power loss, as on any filesystem. Files
+// nobody syncs keep the memory tier's speed. An unlinked file has no host
+// file; syncing it succeeds trivially.
 func (h *memHandle) Sync() error {
-	if d := h.rlock(); d != nil {
+	if d := h.lock(); d != nil {
 		return d.Sync()
 	}
-	defer h.fs.mu.RUnlock()
-	return h.check("sync", nil)
+	if err := h.check("sync", nil); err != nil || h.m.path == "" {
+		h.fs.mu.Unlock()
+		return err
+	}
+	err := h.fs.spill(h.m)
+	d := h.disk
+	h.fs.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return d.Sync()
 }
 
 // Lock spills the file so an advisory lock reaches a host descriptor.
