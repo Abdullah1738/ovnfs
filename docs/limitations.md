@@ -22,6 +22,9 @@
   cached blob's metadata; path-based stat is exact.
 - A link is one ssh session per checkout; cold reads of many files are bound by
   its throughput.
+- Sockets and FIFOs can be made in NFS and FUSE checkouts, not SMB or WinFsp
+  ones, and stay in the checkout: like a folder's own, they never reach
+  `diff`, `apply` or a snapshot's tree. Device nodes are refused.
 - NFSv3 locks are client-local. Explicit NFSv4 clients use byte-range locks
   held in the daemon's memory, lost when it restarts. SMB has no hard links
   and no durable handles.
