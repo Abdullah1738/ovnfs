@@ -173,6 +173,8 @@ lock. A starting daemon opens its admin socket before it loads its state, which
 takes minutes on a large state, and holds each hello until it has mounted: a
 client that arrives during the load waits for it, up to five minutes, rather
 than starting a second daemon. Shell completion gives up after a second.
+Daemons starting together take turns replacing a stale socket, so only one
+listens, and a client whose daemon fails its load quotes the daemon's log.
 Metadata uses `fsync(2)`, not `F_FULLFSYNC`: it survives server crashes, not
 power loss. `state.json` is synced after its rename, so a kernel crash during
 that sync can leave it empty on filesystems that do not order data before
