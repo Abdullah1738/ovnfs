@@ -252,7 +252,7 @@ func (s *Server) mknod3(d *decoder, res *encoder) status {
 		if d.err != nil {
 			return stInval
 		}
-		return stInval
+		return stBadType
 	}
 	if d.err != nil {
 		return stInval
