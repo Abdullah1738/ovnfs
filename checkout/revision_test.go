@@ -24,6 +24,46 @@ func revisionRepo(t *testing.T) string {
 	return dir
 }
 
+// TestNewRevisionSubmoduleIgnores leaves a submodule empty even when its captured
+// files include a directory ignored only by the superproject.
+func TestNewRevisionSubmoduleIgnores(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		name := "untracked"
+		if tracked {
+			name = "tracked"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			app := submoduleRepo(t)
+			sub := filepath.Join(app, "vendor", "sub")
+			write(t, filepath.Join(app, ".gitignore"), "__pycache__/\n")
+			gitRun(t, app, "add", ".gitignore")
+			gitRun(t, app, "commit", "-qm", "ignore caches")
+			write(t, filepath.Join(sub, "pkg/__pycache__/c.pyc"), "submodule cache\n")
+			if tracked {
+				gitRun(t, sub, "add", "pkg")
+				gitRun(t, sub, "commit", "-qm", "add submodule cache")
+				gitRun(t, app, "add", "vendor/sub")
+				gitRun(t, app, "commit", "-qm", "update submodule")
+			}
+			head := gitRun(t, sub, "rev-parse", "HEAD")
+			if _, err := f.reg.New(context.Background(), api.NewArgs{Dir: app, Name: "revision", Rev: "HEAD"}); err != nil {
+				t.Fatal(err)
+			}
+			exported := f.export("revision")
+			if entries, err := os.ReadDir(filepath.Join(exported, "vendor", "sub")); err != nil || len(entries) != 0 {
+				t.Fatalf("revision submodule = %v, %v; want an empty directory", entries, err)
+			}
+			if got := gitRun(t, exported, "submodule", "status"); got != "-"+head+" vendor/sub" {
+				t.Fatalf("submodule status = %q, want it uninitialized", got)
+			}
+			if diff, err := f.reg.Diff(context.Background(), api.DiffArgs{Checkout: "revision"}); err != nil || len(diff.Changes) != 0 {
+				t.Fatalf("initial revision diff = %+v, %v", diff, err)
+			}
+		})
+	}
+}
+
 func TestNewRevisionDirtyFolder(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

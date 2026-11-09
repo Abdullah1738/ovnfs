@@ -49,6 +49,22 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 	}
 	defer objects.Close()
 	files, info := treeFiles(revision.Entries, *res)
+	// Gitlinks start empty in revision checkouts. Their contents belong to the
+	// submodule and must not be judged by the superproject's ignore rules.
+	gitlinks := map[string]bool{}
+	for _, entry := range revision.Entries {
+		if entry.Type == "commit" {
+			gitlinks[entry.Path] = true
+		}
+	}
+	inSubmodule := func(p string) bool {
+		for ; p != "." && p != ""; p = path.Dir(p) {
+			if gitlinks[p] {
+				return true
+			}
+		}
+		return false
+	}
 	tracked := map[string]bool{}
 	for file := range files {
 		for p := file; p != "."; p = path.Dir(p) {
@@ -61,6 +77,9 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 	// checkout. Nonignored local/cache roots can contain ignored descendants;
 	// descend only those roots, never a retained ignored build directory.
 	keep := func(p string, class rules.Class) error {
+		if inSubmodule(p) {
+			return nil
+		}
 		return filepath.WalkDir(filepath.Join(res.Root, filepath.FromSlash(p)), func(host string, entry fs.DirEntry, walkErr error) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -76,6 +95,12 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 				return err
 			}
 			rel = filepath.ToSlash(rel)
+			if inSubmodule(rel) {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if !tracked[rel] && domains.Facts(view, rel, nil).Ignored() {
 				roots[rel] = class
 				if entry.IsDir() {
@@ -101,7 +126,7 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 		}
 	}
 	for p := range res.Files {
-		if !tracked[p] && domains.Facts(view, p, nil).Ignored() {
+		if !inSubmodule(p) && !tracked[p] && domains.Facts(view, p, nil).Ignored() {
 			roots[p] = rules.Local
 		}
 	}
@@ -109,6 +134,9 @@ func reviseCapture(ctx context.Context, c Config, res *source.Result, revision *
 	// its ancestor directories visible without retaining their other files.
 	dirs, parents := map[string]bool{}, map[string]bool{}
 	for p := range roots {
+		if inSubmodule(p) {
+			continue
+		}
 		dir := path.Dir(p)
 		if dir == "." {
 			continue
