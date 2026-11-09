@@ -736,7 +736,7 @@ func (f *FS) Mknod(name string, mode os.FileMode) error {
 	if err := f.ensureDir(parent(p)); err != nil {
 		return err
 	}
-	if err := makeNode(f.up(p), mode); err != nil {
+	if err := makeNode(f.up(p), f.stagingName(), mode); err != nil {
 		return err
 	}
 	if err := f.clearWhiteout(p); err != nil {
