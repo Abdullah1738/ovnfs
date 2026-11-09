@@ -717,6 +717,37 @@ func (f *FS) MkdirAll(name string, perm os.FileMode) error {
 	return nil
 }
 
+// Mknod creates a socket or FIFO in the writable upper.
+func (f *FS) Mknod(name string, mode os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := Clean(name)
+	if err := f.mutable("mknod", p); err != nil {
+		return err
+	}
+	if p == "" || reserved(p) {
+		return &fs.PathError{Op: "mknod", Path: name, Err: syscall.EPERM}
+	}
+	if _, _, err := f.lookup(p); err == nil {
+		return &fs.PathError{Op: "mknod", Path: name, Err: syscall.EEXIST}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := f.ensureDir(parent(p)); err != nil {
+		return err
+	}
+	if err := makeNode(f.up(p), mode); err != nil {
+		return err
+	}
+	if err := f.clearWhiteout(p); err != nil {
+		return err
+	}
+	if err := f.refresh(p); err != nil {
+		return err
+	}
+	return f.refresh(parent(p))
+}
+
 // Symlink creates a symlink without modifying any immutable source.
 func (f *FS) Symlink(target, link string) error {
 	f.mu.Lock()

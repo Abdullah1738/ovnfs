@@ -234,6 +234,11 @@ func (r *Router) MkdirAll(name string, perm os.FileMode) error {
 	return r.mutate("mkdir", name, func(f *overlay.FS, p string) error { return f.MkdirAll(p, perm) })
 }
 
+// Mknod creates a socket or FIFO below a checkout root.
+func (r *Router) Mknod(name string, mode os.FileMode) error {
+	return r.mutate("mknod", name, func(f *overlay.FS, p string) error { return f.Mknod(p, mode) })
+}
+
 // Remove removes a file or empty directory below a checkout's root.
 func (r *Router) Remove(name string) error {
 	return r.mutate("remove", name, func(f *overlay.FS, p string) error { return f.Remove(p) })

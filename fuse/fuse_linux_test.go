@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -517,6 +518,30 @@ func TestErrnoMapping(t *testing.T) {
 	} {
 		if got := errno(c.err); got != c.want {
 			t.Errorf("errno(%v) = %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
+// TestSpecialNodes checks bind and mkfifo through the actual FUSE mount.
+func TestSpecialNodes(t *testing.T) {
+	f := newFixture(t, nil)
+	sock := f.path("alpha/sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	fifo := f.path("alpha/fifo")
+	if err := unix.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		p    string
+		kind os.FileMode
+	}{{sock, os.ModeSocket}, {fifo, os.ModeNamedPipe}} {
+		info, err := os.Lstat(tc.p)
+		if err != nil || info.Mode()&os.ModeType != tc.kind {
+			t.Fatalf("%s: %v, %v", tc.p, info, err)
 		}
 	}
 }

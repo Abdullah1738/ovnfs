@@ -95,6 +95,21 @@ func (n *nodeFS) Link(oldname, newname string) error {
 	return nil
 }
 
+// Mknod creates a special node and records its node id.
+func (n *nodeFS) Mknod(name string, mode os.FileMode) error {
+	fs, ok := n.Filesystem.(interface {
+		Mknod(string, os.FileMode) error
+	})
+	if !ok {
+		return syscall.ENOTSUP
+	}
+	if err := fs.Mknod(name, mode); err != nil {
+		return err
+	}
+	n.nodes.created(overlay.Clean(name))
+	return nil
+}
+
 // MkdirAll creates a directory and notes the new entry for node ids.
 func (n *nodeFS) MkdirAll(name string, perm os.FileMode) error {
 	if err := n.Filesystem.MkdirAll(name, perm); err != nil {

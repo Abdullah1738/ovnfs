@@ -425,20 +425,28 @@ func (x *exportFS) utimens(p string, atime time.Time, aok bool, mtime time.Time,
 	return x.nodes.Chtimes(p, atime, mtime)
 }
 
-// Mknod creates regular files; other node types are unsupported by checkouts.
+// Mknod creates regular files, sockets and FIFOs.
 func (x *exportFS) Mknod(_ <-chan struct{}, in *gofuse.MknodIn, name string, out *gofuse.EntryOut) gofuse.Status {
-	if in.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		return gofuse.EPERM
-	}
 	p, st := x.child(in.NodeId, name)
 	if !st.Ok() {
 		return st
 	}
-	f, err := x.nodes.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode(in.Mode))
-	if err != nil {
-		return errno(err)
+	var err error
+	switch in.Mode & syscall.S_IFMT {
+	case syscall.S_IFREG:
+		var f billy.File
+		f, err = x.nodes.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode(in.Mode))
+		if err == nil {
+			err = f.Close()
+		}
+	case syscall.S_IFSOCK:
+		err = x.nodes.Mknod(p, fileMode(in.Mode)|os.ModeSocket)
+	case syscall.S_IFIFO:
+		err = x.nodes.Mknod(p, fileMode(in.Mode)|os.ModeNamedPipe)
+	default:
+		return gofuse.EPERM
 	}
-	if err := f.Close(); err != nil {
+	if err != nil {
 		return errno(err)
 	}
 	return x.created(p, in.Mode, &in.Caller, out)
