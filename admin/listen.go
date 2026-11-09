@@ -10,7 +10,14 @@ import (
 // Listen creates a private Unix socket at path, removing only a demonstrably
 // stale socket. It fails when path is not a socket, when a server already
 // answers there, or when the socket is replaced while its liveness is checked.
+// Listens on one path take turns on the lock file path+".lock": servers that
+// find the same stale socket would otherwise remove each other's new one.
 func Listen(path string) (net.Listener, error) {
+	lock, err := Lock(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
 	info, err := os.Lstat(path)
 	if err == nil {
 		if info.Mode()&os.ModeSocket == 0 {

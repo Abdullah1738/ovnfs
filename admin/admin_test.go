@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -267,6 +268,49 @@ func TestPeerSameUser(t *testing.T) {
 	if l, err := Listen(path); err == nil {
 		l.Close()
 		t.Fatal("replaced a listening socket")
+	}
+}
+
+// TestListenStaleRace starts servers together on one stale socket: exactly
+// one may listen, or a loser removes the winner's socket and both listen.
+func TestListenStaleRace(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ovn-race-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "sock")
+	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.SetUnlinkOnClose(false)
+	stale.Close()
+	// Each round's winner closes without unlinking: the next round's stale socket.
+	for range 200 {
+		start := make(chan struct{})
+		listeners := make(chan net.Listener, 8)
+		var wg sync.WaitGroup
+		for range cap(listeners) {
+			wg.Go(func() {
+				<-start
+				if l, err := Listen(path); err == nil {
+					listeners <- l
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(listeners)
+		won := 0
+		for l := range listeners {
+			won++
+			l.(*net.UnixListener).SetUnlinkOnClose(false)
+			l.Close()
+		}
+		if won != 1 {
+			t.Fatalf("%d servers listen on one socket, want 1", won)
+		}
 	}
 }
 

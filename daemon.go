@@ -97,7 +97,7 @@ func lockDaemon(state string) (*os.File, error) {
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return nil, fmt.Errorf("creating state %s: %w", state, err)
 	}
-	lock, err := lockStart(state)
+	lock, err := admin.Lock(filepath.Join(state, startLock))
 	if err != nil {
 		return nil, fmt.Errorf("waiting for other starts of %s: %w", state, err)
 	}

@@ -3,29 +3,11 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
-
-// lockStart waits for the state's start lock, serializing concurrent starts;
-// closing the returned file releases it.
-func lockStart(state string) (*os.File, error) {
-	f, err := os.OpenFile(filepath.Join(state, startLock), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	var overlapped windows.Overlapped
-	// Blocking: no LOCKFILE_FAIL_IMMEDIATELY.
-	if err := windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped); err != nil {
-		f.Close()
-		return nil, err
-	}
-	return f, nil
-}
 
 // detachedProcess starts the daemon on a console of its own that has no
 // window, in its own process group and, when the invoking job allows it,
