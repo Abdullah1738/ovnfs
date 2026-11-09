@@ -295,6 +295,11 @@ func (t *fold) apply(l *overlay.Layer) error {
 			}
 			t.dirs[p] = true
 		case overlay.KindFile, overlay.KindSymlink:
+			// A socket or FIFO has no content: like a source folder's, it
+			// stays out of the tree, hiding whatever p held before.
+			if _, ok := store.ModeOf(e.Info.Mode()); !ok {
+				return t.remove(p)
+			}
 			class, err := t.classify(p, e.Info)
 			if err != nil || class != rules.Source {
 				return err
