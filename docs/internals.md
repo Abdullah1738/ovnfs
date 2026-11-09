@@ -169,7 +169,10 @@ admin socket before its final flush, hash drain and state write, which can take
 a while under load; `stop` and `restart` wait for its process to exit, when the
 state lock is released, and `restart` holds the start lock throughout, so
 auto-starting clients wait for the new daemon rather than failing on the state
-lock.
+lock. A starting daemon opens its admin socket before it loads its state, which
+takes minutes on a large state, and holds each hello until it has mounted: a
+client that arrives during the load waits for it, up to five minutes, rather
+than starting a second daemon. Shell completion gives up after a second.
 Metadata uses `fsync(2)`, not `F_FULLFSYNC`: it survives server crashes, not
 power loss. `state.json` is synced after its rename, so a kernel crash during
 that sync can leave it empty on filesystems that do not order data before
