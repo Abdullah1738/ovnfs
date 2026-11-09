@@ -18,8 +18,16 @@ import (
 	"github.com/stencil-hq/ovnfs/api"
 )
 
-// daemonWait bounds how long start and stop wait for the socket to change state.
+// daemonWait bounds how long stop waits for the socket to change state.
 const daemonWait = 15 * time.Second
+
+// serveLoadWait bounds how long a client waits for a daemon to answer its
+// hello: a daemon answers once its state is loaded and mounted, which takes
+// minutes on a large state after a reboot.
+const serveLoadWait = 5 * time.Minute
+
+// loadNotice is how long a client waits before it says it is still waiting.
+const loadNotice = 5 * time.Second
 
 // adminProtocol is the client name sent in the admin hello.
 const adminProtocol = "ovnfs/1"
@@ -62,9 +70,9 @@ func (c *cli) client() (*admin.Client, error) {
 		c.conn = client
 		return client, nil
 	}
-	client, err := admin.Dial(socketPath(c.state), adminProtocol)
+	client, err := awaitDaemon(c.ctx, c.state, 0, nil)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to ovnfs at %s: %w", socketPath(c.state), err)
+		return nil, err
 	}
 	c.conn = client
 	return client, nil
@@ -106,7 +114,7 @@ func spawnDaemon(ctx context.Context, state, mount string) (*admin.Client, int, 
 		return nil, 0, fmt.Errorf("resolving mount %s: %w", mount, err)
 	}
 	if accepting(state) {
-		client, err := admin.Dial(socketPath(state), adminProtocol)
+		client, err := awaitDaemon(ctx, state, 0, nil)
 		return client, 0, err
 	}
 	log, err := os.OpenFile(logPath(state), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -128,25 +136,77 @@ func spawnDaemon(ctx context.Context, state, mount string) (*admin.Client, int, 
 	pid := cmd.Process.Pid
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	deadline := time.NewTimer(daemonWait)
-	defer deadline.Stop()
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		if client, err := admin.Dial(socketPath(state), adminProtocol); err == nil {
-			return client, pid, nil
+	client, err := awaitDaemon(ctx, state, pid, exited)
+	return client, pid, err
+}
+
+// awaitDaemon completes the admin hello on state's socket, waiting up to
+// serveLoadWait while the daemon loads its state, and saying so on stderr
+// after loadNotice. With exited nil the daemon is already listening, and a
+// failed dial ends the wait. Otherwise the daemon is the serve this client
+// started (pid): dials retry until its socket appears, and its exit ends the wait.
+func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error) (*admin.Client, error) {
+	name := "ovnfs"
+	if pid != 0 {
+		name = fmt.Sprintf("ovnfs serve (pid %d)", pid)
+	}
+	type dialed struct {
+		client *admin.Client
+		err    error
+	}
+	var result chan dialed
+	dial := func() {
+		result = make(chan dialed, 1)
+		go func(ch chan<- dialed) {
+			client, err := admin.Dial(socketPath(state), adminProtocol)
+			ch <- dialed{client, err}
+		}(result)
+	}
+	// abandon closes the connection of a dial still waiting for its welcome.
+	abandon := func() {
+		if result != nil {
+			go func(ch <-chan dialed) {
+				if r := <-ch; r.client != nil {
+					r.client.Close()
+				}
+			}(result)
 		}
+	}
+	deadline := time.NewTimer(serveLoadWait)
+	defer deadline.Stop()
+	notice := time.NewTimer(loadNotice)
+	defer notice.Stop()
+	retry := time.NewTicker(100 * time.Millisecond)
+	defer retry.Stop()
+	dial()
+	for {
 		select {
+		case r := <-result:
+			if r.err == nil {
+				return r.client, nil
+			}
+			if exited == nil {
+				return nil, fmt.Errorf("connecting to ovnfs at %s: %w", socketPath(state), r.err)
+			}
+			result = nil
+		case <-retry.C:
+			if result == nil {
+				dial()
+			}
 		case err := <-exited:
+			abandon()
 			if err == nil {
 				err = errors.New("exit status 0")
 			}
-			return nil, pid, fmt.Errorf("ovnfs serve (pid %d) exited before accepting connections (%v); %s", pid, err, logTail(state))
+			return nil, fmt.Errorf("%s exited before accepting connections (%v); %s", name, err, logTail(state))
 		case <-deadline.C:
-			return nil, pid, fmt.Errorf("ovnfs serve (pid %d) did not accept connections within %s; %s", pid, daemonWait, logTail(state))
+			abandon()
+			return nil, fmt.Errorf("%s did not answer within %s; %s", name, serveLoadWait, logTail(state))
 		case <-ctx.Done():
-			return nil, pid, fmt.Errorf("waiting for ovnfs serve (pid %d): %w", pid, ctx.Err())
-		case <-tick.C:
+			abandon()
+			return nil, fmt.Errorf("waiting for %s: %w", name, ctx.Err())
+		case <-notice.C:
+			fmt.Fprintf(stderr, "waiting for %s to load its state\n", name)
 		}
 	}
 }

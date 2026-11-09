@@ -112,21 +112,58 @@ func writeFrame(w io.Writer, value any) error {
 
 // Serve accepts authenticated local clients until the listener is closed.
 func Serve(l net.Listener, w Welcome, h Handler, events func(context.Context) <-chan Event) error {
+	s := NewServer()
+	s.Ready(w, h, events)
+	return s.Serve(l)
+}
+
+// Server answers admin clients for a daemon that can listen before it can
+// answer. Serve accepts each connection at once, so the socket shows a
+// starting daemon, and holds its hello until Ready supplies the welcome.
+type Server struct {
+	ready  chan struct{}
+	closed chan struct{}
+	w      Welcome
+	h      Handler
+	events func(context.Context) <-chan Event
+}
+
+// NewServer returns a server that holds every hello until Ready.
+func NewServer() *Server {
+	return &Server{ready: make(chan struct{}), closed: make(chan struct{})}
+}
+
+// Ready answers held and later hellos with w, and their requests with h. Call it once.
+func (s *Server) Ready(w Welcome, h Handler, events func(context.Context) <-chan Event) {
+	s.w, s.h, s.events = w, h, events
+	close(s.ready)
+}
+
+// Serve accepts clients on l until it is closed. A connection still waiting
+// for Ready then closes, so its client fails instead of waiting on.
+func (s *Server) Serve(l net.Listener) error {
+	defer close(s.closed)
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			return err
 		}
-		go serveConn(conn, w, h, events)
+		go s.serveConn(conn)
 	}
 }
 
 // serveConn owns a connection and cancels its requests on disconnect.
-func serveConn(conn net.Conn, w Welcome, h Handler, events func(context.Context) <-chan Event) {
+func (s *Server) serveConn(conn net.Conn) {
 	defer conn.Close()
 	if err := CheckPeer(conn); err != nil {
 		return
 	}
+	select {
+	case <-s.ready:
+	case <-s.closed:
+		return
+	}
+	w, h, events := s.w, s.h, s.events
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var mu sync.Mutex

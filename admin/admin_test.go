@@ -99,6 +99,73 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestServerHoldsHelloUntilReady accepts a client before the daemon can answer
+// it: the hello waits for Ready, and a listener closed before Ready fails the
+// waiting client instead of leaving it waiting.
+func TestServerHoldsHelloUntilReady(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ovn-admin-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	dial := func(path string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			c, err := Dial(path, "test")
+			if err == nil {
+				if c.Welcome().Version != 1 {
+					err = errors.New("missing welcome")
+				}
+				c.Close()
+			}
+			done <- err
+		}()
+		return done
+	}
+	listen := func(name string) (net.Listener, string) {
+		path := filepath.Join(dir, name)
+		l, err := Listen(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+		return l, path
+	}
+
+	l, path := listen("ready")
+	s := NewServer()
+	go s.Serve(l)
+	done := dial(path)
+	select {
+	case err := <-done:
+		t.Fatalf("hello answered before Ready: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	s.Ready(Welcome{Version: 1}, nil, nil)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("hello not answered after Ready")
+	}
+
+	l, path = listen("closed")
+	go NewServer().Serve(l)
+	done = dial(path)
+	time.Sleep(200 * time.Millisecond)
+	l.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("dial succeeded on a server that never became ready")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client still waiting after the listener closed")
+	}
+}
+
 // TestConcurrentOutOfOrder verifies a slow call cannot block a later fast reply.
 func TestConcurrentOutOfOrder(t *testing.T) {
 	started := make(chan struct{})
