@@ -55,16 +55,23 @@ func makeNode(name string, mode os.FileMode) error {
 			return &fs.PathError{Op: "mknod", Path: name, Err: err}
 		}
 	case os.ModeSocket:
+		// Bind under a short alias, then link the inode into place. This also
+		// handles a long final name without overwriting an existing entry.
+		parentTmp, err := os.MkdirTemp(filepath.Dir(name), ".ovnfs-node-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(parentTmp)
 		tmp, err := os.MkdirTemp("", "ovnfs-node-")
 		if err != nil {
 			return err
 		}
 		defer os.RemoveAll(tmp)
 		link := filepath.Join(tmp, "d")
-		if err := os.Symlink(filepath.Dir(name), link); err != nil {
+		if err := os.Symlink(parentTmp, link); err != nil {
 			return err
 		}
-		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(link, filepath.Base(name)), Net: "unix"})
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(link, "s"), Net: "unix"})
 		if err != nil {
 			return err
 		}
@@ -72,10 +79,14 @@ func makeNode(name string, mode os.FileMode) error {
 		if err := listener.Close(); err != nil {
 			return err
 		}
-		if err := os.Chmod(name, mode.Perm()); err != nil {
-			os.Remove(name)
+		node := filepath.Join(parentTmp, "s")
+		if err := os.Chmod(node, mode.Perm()); err != nil {
 			return err
 		}
+		if err := os.Link(node, name); err != nil {
+			return err
+		}
+
 	default:
 		return &fs.PathError{Op: "mknod", Path: name, Err: unix.EPERM}
 	}
