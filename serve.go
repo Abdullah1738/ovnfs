@@ -178,6 +178,19 @@ func (cmd *serveCmd) Run(c *cli) error {
 	if err = os.MkdirAll(state, 0700); err != nil {
 		return fmt.Errorf("state directory: %w", err)
 	}
+	// Claim the admin socket before the state loads, which takes minutes on
+	// a large state after a reboot: a client then finds this daemon and
+	// waits for its hello, instead of starting a second one.
+	adminListener, err := admin.Listen(filepath.Join(state, "admin.sock"))
+	if err != nil {
+		return fmt.Errorf("admin listen: %w", err)
+	}
+	defer adminListener.Close()
+	adminServer := admin.NewServer()
+	served := make(chan error, 2)
+	go func() {
+		served <- fmt.Errorf("admin serve: %w", adminServer.Serve(adminListener))
+	}()
 	hub := &eventHub{}
 	var e *export.Export
 	// Folder events may invalidate before the export exists; they are dropped then.
@@ -235,7 +248,6 @@ func (cmd *serveCmd) Run(c *cli) error {
 		return fmt.Errorf("shares: %w", err)
 	}
 	defer checkoutShares.CloseAll()
-	served := make(chan error, 2)
 	port := 0
 	release := func(force bool) error { return unmount(mount, force) }
 	if proto == "fuse" || proto == "winfsp" {
@@ -258,11 +270,8 @@ func (cmd *serveCmd) Run(c *cli) error {
 		defer l.Close() // removes the NFS socket, once: a keep-mount cut already has
 	}
 	log.Printf("mounted at %s", mount)
-	adminListener, err := admin.Listen(filepath.Join(state, "admin.sock"))
-	if err != nil {
-		_ = release(true)
-		return fmt.Errorf("admin listen: %w", err)
-	}
+	// Shutdown closes the socket first: stop waits for it to close, then for
+	// the process to exit, and the registry's final flush can be slow.
 	defer adminListener.Close()
 	linkListener, err := linkListen(state)
 	if err != nil {
@@ -282,9 +291,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 			return ctx.Err()
 		}
 	}}
-	go func() {
-		served <- fmt.Errorf("admin serve: %w", admin.Serve(adminListener, welcome, handler, hub.events))
-	}()
+	adminServer.Ready(welcome, handler, hub.events)
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)
