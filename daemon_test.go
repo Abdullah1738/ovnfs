@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,5 +50,34 @@ func TestStartWaitsForALoadingDaemon(t *testing.T) {
 	}
 	if client.Welcome().Version != 1 {
 		t.Fatal("missing welcome")
+	}
+}
+
+// TestClientQuotesLogOfAFailedLoad drops a held hello, as a daemon whose state
+// load fails does: a client that did not start it quotes the daemon log.
+func TestClientQuotesLogOfAFailedLoad(t *testing.T) {
+	state, err := os.MkdirTemp("", "ovnfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(state) })
+	if err := os.WriteFile(logPath(state), []byte("read state.json: unexpected end of JSON input\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := admin.Listen(socketPath(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go admin.NewServer().Serve(l)
+	time.AfterFunc(200*time.Millisecond, func() { l.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := awaitDaemon(ctx, state, 0, nil)
+	if err == nil {
+		client.Close()
+		t.Fatal("hello answered by a daemon that never loaded")
+	}
+	if !strings.Contains(err.Error(), "read state.json: unexpected end of JSON input") {
+		t.Fatalf("error without the daemon log: %v", err)
 	}
 }

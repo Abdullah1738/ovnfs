@@ -186,7 +186,14 @@ func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error
 				return r.client, nil
 			}
 			if exited == nil {
-				return nil, fmt.Errorf("connecting to ovnfs at %s: %w", socketPath(state), r.err)
+				err := fmt.Errorf("connecting to ovnfs at %s: %w", socketPath(state), r.err)
+				// Past the dial, the daemon accepted and then dropped the
+				// hello: it failed while loading, and its log says why.
+				var opErr *net.OpError
+				if !errors.As(r.err, &opErr) || opErr.Op != "dial" {
+					err = fmt.Errorf("%w; %s", err, logTail(state))
+				}
+				return nil, err
 			}
 			result = nil
 		case <-retry.C:
