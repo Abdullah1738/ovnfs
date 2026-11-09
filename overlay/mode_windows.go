@@ -219,3 +219,7 @@ func writeMode(name string, mode os.FileMode) error {
 	}
 	return nil
 }
+
+func makeNode(name string, mode os.FileMode) error {
+	return &fs.PathError{Op: "mknod", Path: name, Err: syscall.ENOTSUP}
+}

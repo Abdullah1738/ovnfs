@@ -217,13 +217,12 @@ func TestV3FailureBodies(t *testing.T) {
 	}
 }
 
-// TestV3MknodRefused checks MKNOD answers ACCES: the export makes no
-// special files.
+// TestV3MknodRefused checks a backend without special-node support.
 func TestV3MknodRefused(t *testing.T) {
 	fs := newTestFS(t)
 	c := v3server(t, fs)
 	st, d := c.v3call(v3Mknod, func(e *encoder) { dirop(e, 1, "fifo"); e.u32(uint32(typeFifo)); noSattr(e) })
-	if st != stAccess || len(d.buf) != 8 {
+	if st != stNotSupp || len(d.buf) != 8 {
 		t.Fatalf("MKNOD: %d with %d body bytes", st, len(d.buf))
 	}
 	if _, err := os.Lstat(fs.host("fifo")); !os.IsNotExist(err) {

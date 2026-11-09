@@ -1,6 +1,7 @@
 package nfs
 
 import (
+	"os"
 	"sync"
 )
 
@@ -167,8 +168,8 @@ func (x *v4compound) create() status {
 		return s
 	}
 	switch typ {
-	case typeDir, typeLnk:
-	case typeBlk, typeChr, typeSock, typeFifo:
+	case typeDir, typeLnk, typeSock, typeFifo:
+	case typeBlk, typeChr:
 		return stNotSupp
 	default:
 		return stBadType
@@ -197,6 +198,23 @@ func (x *v4compound) create() status {
 		var err error
 		if typ == typeLnk {
 			err = x.s.FS.Symlink(target, p)
+		} else if typ == typeSock || typ == typeFifo {
+			maker, ok := x.s.FS.(interface {
+				Mknod(string, os.FileMode) error
+			})
+			if !ok {
+				return stNotSupp
+			}
+			mode := os.FileMode(0o777)
+			if sa.mask.has(attr4Mode) {
+				mode = goMode(sa.mode)
+			}
+			if typ == typeSock {
+				mode |= os.ModeSocket
+			} else {
+				mode |= os.ModeNamedPipe
+			}
+			err = maker.Mknod(p, mode)
 		} else {
 			mode := goMode(0o777)
 			if sa.mask.has(attr4Mode) {

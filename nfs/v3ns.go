@@ -235,19 +235,59 @@ func (s *Server) symlink3(d *decoder, res *encoder) status {
 	return stOK
 }
 
-// mknod3 answers MKNOD (section 3.3.11) with ACCES: the backend cannot make
-// device nodes, sockets or FIFOs.
-func (s *Server) mknod3(d *decoder, _ *encoder) status {
+// mknod3 creates sockets and FIFOs; device nodes remain unsupported.
+func (s *Server) mknod3(d *decoder, res *encoder) status {
 	id, ok := d.fh(maxFH3)
-	d.str(maxPath3)
-	d.u32() // ftype3; its mknoddata3 is not needed
+	name := d.str(maxPath3)
+	typ := fileType(d.u32())
+	var sa sattr3
+	switch typ {
+	case typeSock, typeFifo:
+		sa = decodeSattr3(d)
+	case typeBlk, typeChr:
+		sa = decodeSattr3(d)
+		d.u32()
+		d.u32()
+	default:
+		if d.err != nil {
+			return stInval
+		}
+		return stInval
+	}
 	if d.err != nil {
 		return stInval
 	}
-	if _, st := s.path3(id, ok); st != stOK {
+	dir, _, st := s.dir3(id, ok, name, stExist)
+	if st != stOK {
 		return st
 	}
-	return stAccess
+	if typ != typeSock && typ != typeFifo {
+		return stAccess
+	}
+	maker, ok := s.FS.(interface {
+		Mknod(string, os.FileMode) error
+	})
+	if !ok {
+		return stNotSupp
+	}
+	mode := os.FileMode(0o666)
+	if sa.setMode {
+		mode = goMode(sa.mode) & os.ModePerm
+	}
+	if typ == typeSock {
+		mode |= os.ModeSocket
+	} else {
+		mode |= os.ModeNamedPipe
+	}
+	p := path.Join(dir, name)
+	if err := maker.Mknod(p, mode); err != nil {
+		return statusOf(err)
+	}
+	if st := s.apply3(p, &sa); st != stOK {
+		return st
+	}
+	s.created3(res, dir, p)
+	return stOK
 }
 
 // remove3 answers REMOVE (section 3.3.12).

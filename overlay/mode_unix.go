@@ -4,7 +4,9 @@ package overlay
 
 import (
 	"io/fs"
+	"net"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
@@ -40,6 +42,42 @@ func lchmod(name string, mode os.FileMode) error {
 	}
 	if err := unix.Fchmodat(unix.AT_FDCWD, name, bits, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return &fs.PathError{Op: "chmod", Path: name, Err: err}
+	}
+	return nil
+}
+
+// makeNode makes only data-free nodes. A short symlink path permits Unix
+// socket creation even when the upper's full path exceeds sockaddr_un's limit.
+func makeNode(name string, mode os.FileMode) error {
+	switch mode & os.ModeType {
+	case os.ModeNamedPipe:
+		if err := unix.Mkfifo(name, uint32(mode.Perm())); err != nil {
+			return &fs.PathError{Op: "mknod", Path: name, Err: err}
+		}
+	case os.ModeSocket:
+		tmp, err := os.MkdirTemp("", "ovnfs-node-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmp)
+		link := filepath.Join(tmp, "d")
+		if err := os.Symlink(filepath.Dir(name), link); err != nil {
+			return err
+		}
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(link, filepath.Base(name)), Net: "unix"})
+		if err != nil {
+			return err
+		}
+		listener.SetUnlinkOnClose(false)
+		if err := listener.Close(); err != nil {
+			return err
+		}
+		if err := os.Chmod(name, mode.Perm()); err != nil {
+			os.Remove(name)
+			return err
+		}
+	default:
+		return &fs.PathError{Op: "mknod", Path: name, Err: unix.EPERM}
 	}
 	return nil
 }
