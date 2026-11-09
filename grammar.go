@@ -8,12 +8,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kong"
 	kongcompletion "github.com/jotaen/kong-completion"
 	"github.com/posener/complete"
 
-	"github.com/stencil-hq/ovnfs/admin"
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/manifest"
 )
@@ -230,13 +230,19 @@ func predictSnapshots(c *cli) complete.Predictor {
 	})
 }
 
+// completeWait bounds how long completion waits for the daemon's hello, which a
+// daemon loading its state holds for minutes: a tab must not hang that long.
+const completeWait = time.Second
+
 // completeCall sends one operation to a daemon that is already listening, and
-// reports false for a daemon that is not.
+// reports false for a daemon that is not, or that is still loading its state.
 func (c *cli) completeCall(op string, args any) (json.RawMessage, bool) {
 	if !accepting(c.state) {
 		return nil, false
 	}
-	client, err := admin.Dial(socketPath(c.state), adminProtocol)
+	ctx, cancel := context.WithTimeout(context.Background(), completeWait)
+	defer cancel()
+	client, err := awaitDaemon(ctx, c.state, 0, nil)
 	if err != nil {
 		return nil, false
 	}
