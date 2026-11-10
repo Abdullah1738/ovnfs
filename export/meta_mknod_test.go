@@ -3,6 +3,7 @@ package export
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 
@@ -91,6 +92,56 @@ func TestSpecialCreationIdentityFault(t *testing.T) {
 			if !late && f.calls != 0 {
 				t.Fatal("fault reached special node creation")
 			}
+		})
+	}
+}
+
+func TestSpecialCreationThenAdmissionRefusal(t *testing.T) {
+	for _, mode := range []os.FileMode{os.ModeSocket, os.ModeNamedPipe} {
+		t.Run(mode.String(), func(t *testing.T) {
+			n := newMetadataTestFS(t)
+			defer n.nodes.close()
+			for _, p := range []string{"co/old", "pressure/entry"} {
+				d, _ := split(p)
+				if err := n.MkdirAll(d, 0755); err != nil {
+					t.Fatal(err)
+				}
+				file, err := n.Create(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+				n.nodes.id(p)
+			}
+			old := n.nodes.id("co/old")
+			blocked := filepath.Join(t.TempDir(), "blocked")
+			if err := os.WriteFile(blocked, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			n.Filesystem = &specialFS{Filesystem: n.Filesystem, after: func() {
+				n.nodes.mu.Lock()
+				defer n.nodes.mu.Unlock()
+				n.nodes.cacheLimit = 0
+				n.nodes.coldRoot = blocked
+			}}
+			if err := n.Mknod("co/new", mode|0600); err != nil {
+				t.Fatal(err)
+			}
+			if n.nodes.spillErr == nil {
+				t.Fatal("did not force a failed spill")
+			}
+			if err := n.IdentityError(); err != nil {
+				t.Fatal("failed spill poisoned existing identities:", err)
+			}
+			if id := n.nodes.id("co/new"); id != 0 {
+				t.Fatalf("refused identity: got %x", id)
+			}
+			if got := pathOf(t, n.nodes, old); got != "co/old" {
+				t.Fatal(got)
+			}
+			n.nodes.coldRoot = ""
 		})
 	}
 }
