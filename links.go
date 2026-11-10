@@ -43,8 +43,8 @@ type links struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	mu       sync.Mutex
-	sessions map[string]*peer.Session // link key → current inbound session
-	out      map[string]*outLink      // "<checkout>@<host>" → running outbound link
+	sessions map[string][]inLink // link key → inbound sessions, one per attached checkout, newest last
+	out      map[string]*outLink // "<checkout>@<host>" → running outbound link
 	wg       sync.WaitGroup
 }
 
@@ -52,7 +52,7 @@ type links struct {
 // them); the registry is set once it is open.
 func newLinks(emit func(checkout.Event)) *links {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &links{emit: emit, ctx: ctx, cancel: cancel, sessions: map[string]*peer.Session{}, out: map[string]*outLink{}}
+	return &links{emit: emit, ctx: ctx, cancel: cancel, sessions: map[string][]inLink{}, out: map[string]*outLink{}}
 }
 
 // fetch serves checkout.Config.Fetch: it asks the session connected for key.
@@ -73,10 +73,20 @@ func (l *links) search(ctx context.Context, key string, q grep.Query, wants []ba
 	return s.Search(ctx, q, peerWants(wants))
 }
 
-// session returns the inbound session connected for key.
+// inLink is the inbound session a checkout here is attached through.
+type inLink struct {
+	checkout string
+	s        *peer.Session
+}
+
+// session returns the newest inbound session connected for key. Checkouts of
+// one folder each hold their own; any of them serves that folder's content.
 func (l *links) session(key string) (*peer.Session, error) {
 	l.mu.Lock()
-	s := l.sessions[key]
+	var s *peer.Session
+	if ss := l.sessions[key]; len(ss) > 0 {
+		s = ss[len(ss)-1].s
+	}
 	l.mu.Unlock()
 	if s == nil {
 		_, src, _ := strings.Cut(key, " ")
@@ -130,9 +140,16 @@ func (l *links) inbound(conn io.ReadWriteCloser) {
 		return
 	}
 	key := checkout.LinkKey(offer.Node, offer.Source)
+	// A checkout attached again replaces its own session, stale by now; other
+	// checkouts of the same folder keep theirs.
 	l.mu.Lock()
-	old := l.sessions[key]
-	l.sessions[key] = s
+	ss := l.sessions[key]
+	var old *peer.Session
+	if i := slices.IndexFunc(ss, func(in inLink) bool { return in.checkout == h.Name }); i >= 0 {
+		old = ss[i].s
+		ss = slices.Delete(ss, i, i+1)
+	}
+	l.sessions[key] = append(ss, inLink{checkout: h.Name, s: s})
 	l.mu.Unlock()
 	if old != nil {
 		old.Close()
@@ -153,7 +170,9 @@ func (l *links) inbound(conn io.ReadWriteCloser) {
 	}
 	s.Close()
 	l.mu.Lock()
-	if l.sessions[key] == s {
+	if ss := slices.DeleteFunc(l.sessions[key], func(in inLink) bool { return in.s == s }); len(ss) > 0 {
+		l.sessions[key] = ss
+	} else {
 		delete(l.sessions, key)
 	}
 	l.mu.Unlock()
@@ -320,8 +339,10 @@ func (l *links) captureDir(ctx context.Context, dir string) (string, error) {
 func (l *links) close() {
 	l.cancel()
 	l.mu.Lock()
-	for _, s := range l.sessions {
-		s.Close()
+	for _, ss := range l.sessions {
+		for _, in := range ss {
+			in.s.Close()
+		}
 	}
 	l.mu.Unlock()
 	l.wg.Wait()

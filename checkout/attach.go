@@ -25,7 +25,8 @@ import (
 // Node returns this daemon's node id (Config.Node).
 func (r *Registry) Node() string { return r.node }
 
-// LinkKey names the link a remote base reads through: one per source daemon and folder.
+// LinkKey names the links a remote base reads through: those of the checkouts
+// attached from one folder of one source daemon.
 func LinkKey(node, source string) string { return node + " " + source }
 
 // Store returns the object store remote reads are cached in.
