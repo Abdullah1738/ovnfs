@@ -287,6 +287,20 @@ func (l *links) attached(name, host string) []*outLink {
 	return found
 }
 
+// detach cancels every outbound link of the named checkout and drops them
+// from the map, so rm does not leave ssh sessions reconnecting until the
+// daemon stops.
+func (l *links) detach(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, o := range l.out {
+		if o.checkout == name {
+			o.cancel()
+			delete(l.out, key)
+		}
+	}
+}
+
 // captureDir opens (or refreshes) the checkout that stands for a folder being attached:
 // a clean checkout of the same folder is replaced so the offer shows the folder as it is now.
 func (l *links) captureDir(ctx context.Context, dir string) (string, error) {
