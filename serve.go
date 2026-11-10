@@ -208,6 +208,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 	reg, err := checkout.Open(checkout.Config{State: state, Mount: mount, UserHome: userHome, Node: node, Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
 		Memory: mem, BlobCache: int64(cmd.BlobCache), GitRemotes: cmd.GitRemotes,
 		Retire: func(name string) {
+			lk.detach(name)
 			if checkoutShares != nil {
 				checkoutShares.Close(name)
 			}

@@ -38,9 +38,10 @@ credentials, an unpushed commit) reports a fault and keeps reading over the
 link. Commits stay in the mirror across restarts and for later attaches; delete
 `mirror.git` to reclaim its space.
 
-The link reconnects with backoff while the source daemon runs. Without it,
-cached content stays readable and uncached reads fail with EIO; [push](#push)
-first to cache all of it. A slow download
+The link reconnects with backoff while the source daemon runs. Removing the
+checkout on the source (`ovnfs rm`) ends its outbound links, so they do not
+keep reconnecting. Without the link, cached content stays readable and uncached
+reads fail with EIO; [push](#push) first to cache all of it. A slow download
 for an open does not hold the overlay's namespace lock: unrelated reads and
 writes can proceed. Re-attaching the same snapshot reuses the remote checkout.
 A newer snapshot updates the same

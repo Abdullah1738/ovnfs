@@ -8,6 +8,7 @@ import (
 
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/checkout"
+	"github.com/stencil-hq/ovnfs/peer"
 )
 
 func TestPullSelectsAttachment(t *testing.T) {
@@ -84,5 +85,38 @@ func TestPushReportsEachAttachment(t *testing.T) {
 	var he *checkout.Error
 	if !errors.As(err, &he) || he.Code != "not_found" || !strings.Contains(he.Message, "checkout app is not attached to c") {
 		t.Fatalf("push to no attachment = %v", err)
+	}
+}
+
+// TestDetachCancelsOutboundLinks: rm's Retire hook calls detach, which
+// cancels every outbound link of that checkout and leaves the others alone.
+func TestDetachCancelsOutboundLinks(t *testing.T) {
+	l := newLinks(nil)
+	defer l.cancel()
+	appA := newOutLink(l.ctx, "app", "a", "ovnfs", peer.Offer{}, nil)
+	appB := newOutLink(l.ctx, "app", "b", "ovnfs", peer.Offer{}, nil)
+	webA := newOutLink(l.ctx, "web", "a", "ovnfs", peer.Offer{}, nil)
+	l.out["app@a"] = appA
+	l.out["app@b"] = appB
+	l.out["web@a"] = webA
+
+	l.detach("app")
+
+	if appA.ctx.Err() == nil || appB.ctx.Err() == nil {
+		t.Fatal("detach did not cancel app's outbound links")
+	}
+	if webA.ctx.Err() != nil {
+		t.Fatal("detach cancelled a different checkout's link")
+	}
+	if got := l.attached("app", ""); len(got) != 0 {
+		t.Fatalf("attached(app) after detach = %d, want 0", len(got))
+	}
+	if got := l.attached("web", ""); len(got) != 1 || got[0] != webA {
+		t.Fatalf("attached(web) after detach = %v, want web@a", got)
+	}
+
+	l.detach("app") // idempotent
+	if got := l.attached("web", ""); len(got) != 1 {
+		t.Fatalf("second detach of app touched web: %v", got)
 	}
 }
