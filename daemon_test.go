@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/stencil-hq/ovnfs/api"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +16,13 @@ import (
 
 // TestMain answers a spawned `serve` by exiting, so a startDaemon that spawns
 // one fails instead of running the tests again in a child process.
+var testServeFixture func()
+
 func TestMain(m *testing.M) {
+	if os.Getenv("OVNFS_TEST_RECEIPT_HOLDER") != "" && testServeFixture != nil {
+		testServeFixture()
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		os.Exit(3)
 	}
@@ -72,12 +81,49 @@ func TestClientQuotesLogOfAFailedLoad(t *testing.T) {
 	time.AfterFunc(200*time.Millisecond, func() { l.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client, err := awaitDaemon(ctx, state, 0, nil)
+	client, err := awaitDaemon(ctx, state, filepath.Join(state, "mnt"), 0, nil)
 	if err == nil {
 		client.Close()
 		t.Fatal("hello answered by a daemon that never loaded")
 	}
 	if !strings.Contains(err.Error(), "read state.json: unexpected end of JSON input") {
 		t.Fatalf("error without the daemon log: %v", err)
+	}
+}
+
+type restartRefusal struct{}
+
+func (restartRefusal) Call(_ context.Context, op string, _ json.RawMessage) (any, error) {
+	if op == "status" {
+		return api.Status{PID: os.Getpid()}, nil
+	}
+	if op == "stop" {
+		return nil, &admin.RemoteError{Code: "test", Message: "planned stop reached"}
+	}
+	return nil, fmt.Errorf("unexpected operation %s", op)
+}
+
+func TestRestartStopsDaemonAfterDelayedHello(t *testing.T) {
+	state, err := os.MkdirTemp("", "ovnfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(state) })
+	l, err := admin.Listen(socketPath(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	srv := admin.NewServer()
+	go srv.Serve(l)
+	time.AfterFunc(1200*time.Millisecond, func() {
+		srv.Ready(admin.Welcome{Version: 1, Ops: []string{"status", "stop"}, Features: []string{"stop.keep_mount"}}, restartRefusal{}, nil)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c := &cli{ctx: ctx, state: state, mount: filepath.Join(state, "mnt")}
+	defer c.close()
+	if err := (&restartCmd{}).Run(c); err == nil || !strings.Contains(err.Error(), "planned stop reached") {
+		t.Fatalf("restart skipped delayed daemon's planned stop: %v", err)
 	}
 }

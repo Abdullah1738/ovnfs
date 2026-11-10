@@ -140,7 +140,7 @@ type Registry struct {
 	mounts       []string // config.Mount and its resolved spelling; see underMount
 	store        *store.Store
 	node         string
-	stateLock    *os.File
+	stateLock    *stateLease
 	checkouts    map[string]*checkoutRecord
 	snapshots    map[string]*snapRecord
 	lineage      map[string]*snapRecord

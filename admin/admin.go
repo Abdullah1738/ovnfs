@@ -348,10 +348,18 @@ type Client struct {
 
 // Dial connects and completes hello/welcome negotiation.
 func Dial(path, client string) (*Client, error) {
-	conn, err := net.Dial("unix", path)
+	return DialContext(context.Background(), path, client)
+}
+
+// DialContext bounds both connecting and hello/welcome negotiation, including
+// a listener whose process is stopped or has stopped reading requests.
+func DialContext(ctx context.Context, path, client string) (*Client, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
 		return nil, err
 	}
+	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancel()
 	if err = writeFrame(conn, map[string]any{"hello": map[string]string{"client": client}}); err != nil {
 		conn.Close()
 		return nil, err
@@ -367,6 +375,10 @@ func Dial(path, client string) (*Client, error) {
 		}
 	}
 	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		conn.Close()
 		return nil, err
 	}

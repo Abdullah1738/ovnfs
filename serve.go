@@ -103,6 +103,8 @@ func serveDefaults(conf manifest.Daemon) kong.Option {
 
 // serveCmd configures the foreground daemon.
 type serveCmd struct {
+	StarterFD  int      `name:"starter-fd" hidden:"" help:"Inherited startup lease descriptor."`
+	StarterPID int      `name:"starter-pid" hidden:"" help:"Internal parent holding the start lock."`
 	Proto      string   `help:"File server protocol: nfs, smb, fuse or winfsp." default:"${default_proto}" enum:"nfs,smb,fuse,winfsp"`
 	Listen     string   `help:"File server address; defaults to a free local port or a Unix socket for NFS on macOS."`
 	Memory     byteSize `help:"Memory budget for small written files; 0 writes every file to disk." default:"${memory_default}"`
@@ -178,6 +180,26 @@ func (cmd *serveCmd) Run(c *cli) error {
 	if err = os.MkdirAll(state, 0700); err != nil {
 		return fmt.Errorf("state directory: %w", err)
 	}
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	startLease, err := inheritedStartLease(cmd.StarterFD, state)
+	if err != nil {
+		return err
+	}
+	if startLease == nil && !borrowStart(cmd.StarterPID) {
+		startLease, err = lockDaemon(ctx, state)
+		if err != nil {
+			return err
+		}
+	}
+	if startLease != nil {
+		defer startLease.Close()
+	}
+	if err := finishRecovery(ctx, state, mount); err != nil {
+		return err
+	}
 	// Claim the admin socket before the state loads, which takes minutes on
 	// a large state after a reboot: a client then finds this daemon and
 	// waits for its hello, instead of starting a second one.
@@ -191,6 +213,13 @@ func (cmd *serveCmd) Run(c *cli) error {
 	go func() {
 		served <- fmt.Errorf("admin serve: %w", adminServer.Serve(adminListener))
 	}()
+	// Before this listener exists, the inherited descriptor protects against
+	// parent cancellation. Afterward every start attaches and waits for hello;
+	// the normal waiting parent still holds its copy until readiness.
+	if startLease != nil {
+		startLease.Close()
+		startLease = nil
+	}
 	hub := &eventHub{}
 	var e *export.Export
 	// Folder events may invalidate before the export exists; they are dropped then.
@@ -205,6 +234,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 	if err != nil {
 		return fmt.Errorf("node id: %w", err)
 	}
+	log.Printf("startup pid %d parent %d: opening registry", os.Getpid(), os.Getppid())
 	reg, err := checkout.Open(checkout.Config{State: state, Mount: mount, UserHome: userHome, Node: node, Emit: hub.emit, Fetch: lk.fetch, Search: lk.search,
 		Memory: mem, BlobCache: int64(cmd.BlobCache), GitRemotes: cmd.GitRemotes,
 		Retire: func(name string) {
@@ -238,6 +268,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 	defer reg.Close()
 	lk.reg = reg
 	defer lk.close()
+	log.Printf("startup pid %d: loading export", os.Getpid())
 	e, err = export.New(export.NewRouter(reg), filepath.Join(state, "nodes.log"), state)
 	if err != nil {
 		return fmt.Errorf("export: %w", err)
@@ -249,7 +280,7 @@ func (cmd *serveCmd) Run(c *cli) error {
 	}
 	defer checkoutShares.CloseAll()
 	port := 0
-	release := func(force bool) error { return unmount(mount, force) }
+	release := func(force bool) error { return releaseMount(state, mount, force) }
 	if proto == "fuse" || proto == "winfsp" {
 		srv, mountErr := mountInProcess(proto, e, mount, cmd.Atime)
 		if mountErr != nil {
@@ -291,7 +322,11 @@ func (cmd *serveCmd) Run(c *cli) error {
 			return ctx.Err()
 		}
 	}}
+	if err := checkout.MarkServing(state); err != nil {
+		return fmt.Errorf("mark serving: %w", err)
+	}
 	adminServer.Ready(welcome, handler, hub.events)
+	log.Printf("startup pid %d: admin ready", os.Getpid())
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)
@@ -303,7 +338,9 @@ func (cmd *serveCmd) Run(c *cli) error {
 			_ = release(true)
 			return err
 		case req = <-stops:
-		case <-sigs:
+		case sig := <-sigs:
+			log.Printf("shutdown pid %d: signal %s", os.Getpid(), sig)
+			req.keepMount = sig == syscall.SIGTERM
 		}
 		if l := files.Load(); req.keepMount && l != nil {
 			// Cut before the export closes, which would answer the kernel
@@ -311,7 +348,9 @@ func (cmd *serveCmd) Run(c *cli) error {
 			// the next daemon serves this port.
 			l.cut()
 			log.Printf("left %s mounted for the next daemon", mount)
-			req.done <- nil
+			if req.done != nil {
+				req.done <- nil
+			}
 			return nil
 		}
 		if err = release(force); err != nil {
