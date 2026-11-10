@@ -10,12 +10,13 @@ import "time"
 // Ops lists every operation the daemon serves, in CLI help order.
 var Ops = []string{"status", "ls", "new", "fork", "snap", "diff", "grep", "glob", "apply", "rm", "prune", "drop", "explain", "plan", "profile", "attach", "pull", "push", "share", "subscribe", "stop"}
 
-// Features names optional request fields this daemon honors, so clients can rely on
+// Features names optional request fields and behaviors this daemon honors, so clients can rely on
 // them without a new protocol generation: "new.base" (NewArgs.Base),
 // "diff.binary" (DiffArgs.Binary), "ls.select" (LsArgs.Select),
 // "rm.sticky_snapshots" and "prune.sticky_snapshots", and
-// "stop.keep_mount" (StopArgs.KeepMount).
-var Features = []string{"new.base", "diff.binary", "ls.select", "rm.sticky_snapshots", "prune.sticky_snapshots", "stop.keep_mount"}
+// "stop.keep_mount" (StopArgs.KeepMount), and "stop.keep_mount_receipts"
+// (reconciles completed unmount receipts before leaving the mount).
+var Features = []string{"new.base", "diff.binary", "ls.select", "rm.sticky_snapshots", "prune.sticky_snapshots", "stop.keep_mount", "stop.keep_mount_receipts"}
 
 // Checkout is an isolated, copy-on-write copy of a source folder that an agent works in.
 type Checkout struct {

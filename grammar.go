@@ -14,6 +14,7 @@ import (
 	kongcompletion "github.com/jotaen/kong-completion"
 	"github.com/posener/complete"
 
+	"github.com/stencil-hq/ovnfs/admin"
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/manifest"
 )
@@ -242,7 +243,7 @@ func (c *cli) completeCall(op string, args any) (json.RawMessage, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), completeWait)
 	defer cancel()
-	client, err := awaitDaemon(ctx, c.state, 0, nil)
+	client, err := admin.DialContext(ctx, socketPath(c.state), adminProtocol)
 	if err != nil {
 		return nil, false
 	}
