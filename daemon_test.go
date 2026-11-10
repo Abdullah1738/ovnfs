@@ -117,7 +117,7 @@ func TestRestartStopsDaemonAfterDelayedHello(t *testing.T) {
 	srv := admin.NewServer()
 	go srv.Serve(l)
 	time.AfterFunc(1200*time.Millisecond, func() {
-		srv.Ready(admin.Welcome{Version: 1, Ops: []string{"status", "stop"}, Features: []string{"stop.keep_mount"}}, restartRefusal{}, nil)
+		srv.Ready(admin.Welcome{Version: 1, Ops: []string{"status", "stop"}, Features: []string{"stop.keep_mount", "stop.keep_mount_receipts"}}, restartRefusal{}, nil)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -1,12 +1,16 @@
 #!/usr/bin/python3
 import collections, errno, json, os, pathlib, subprocess, threading, time
 
+from restart_measurements import mount_omission_phase
+
 import argparse
 parser=argparse.ArgumentParser(description='macOS NFS restart measurement; creates only private state, never the configured daemon')
 parser.add_argument('--binary',required=True)
 parser.add_argument('--output',required=True)
 parser.add_argument('--pause-seconds',type=int,default=0)
 parser.add_argument('--runs',type=int,default=5)
+parser.add_argument('--refuse-stop',action='store_true',help='Before every restart, pin a checkout cwd and require a busy stop refusal')
+parser.add_argument('--restart-binary',help='Optional older restart client, to exercise daemon-side handoff reconciliation')
 options=parser.parse_args()
 ROOT=pathlib.Path(options.output).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
@@ -15,11 +19,26 @@ RUN.mkdir()
 STATE,MOUNT,SOURCE=[RUN/x for x in ('state','mount','source')]
 SOURCE.mkdir()
 BIN=str(pathlib.Path(options.binary).resolve())
+RESTART_BIN=str(pathlib.Path(options.restart_binary).resolve()) if options.restart_binary else BIN
+violations=[]
+mount_omissions=[]
+stop_windows=[]
 ENV = dict(os.environ, OVNFS_STATE=str(STATE), OVNFS_MOUNT=str(MOUNT))
 LOG = open(RUN / 'samples.jsonl', 'a', buffering=1)
 mutex = threading.Lock()
 def emit(**kw):
-    with mutex: LOG.write(json.dumps(dict(t=time.monotonic(), wall=time.time(), **kw)) + '\n')
+    with mutex:
+        event=dict(t=time.monotonic(), wall=time.time(), **kw)
+        LOG.write(json.dumps(event) + '\n')
+        kind=kw.get('kind')
+        if kw.get('ok') is False:
+            violations.append(str(kind)+' sample failed')
+        if kind=='mount' and not kw.get('value'):
+            mount_omissions.append((event['begin'],event['t']))
+        if kind in ('setup','restart','parallel-new','cleanup-stop') and kw.get('rc')!=0:
+            violations.append(str(kind)+' command failed')
+        if str(kind).endswith('timeout') or kind in ('could-not-pause-startup','pause-too-late'):
+            violations.append(str(kind))
 def ov(*args, timeout=40):
     return subprocess.run([BIN, '--state', str(STATE), '--mount', str(MOUNT), *args], env=ENV, text=True, capture_output=True, timeout=timeout)
 def git(*args, cwd=SOURCE):
@@ -82,8 +101,24 @@ for t in threads: t.start()
 time.sleep(1)
 for n in range(1,options.runs+1):
     round_no=n
+    if options.refuse_stop:
+        holder=subprocess.Popen(['/bin/cat'],cwd=CHECKOUT,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        precondition_begin=time.monotonic()
+        try:
+            refused=ov('stop')
+            try: receipt=json.loads((STATE/'unmount.json').read_text())
+            except (OSError,ValueError): receipt={}
+            emit(kind='refused-stop',run=n,rc=refused.returncode,err=refused.stderr,receipt=receipt)
+            if refused.returncode==0 or receipt.get('phase')!='failed':
+                violations.append('busy stop was not refused with a completed failed receipt')
+        finally:
+            holder.stdin.close()
+            holder.wait(timeout=5)
+            precondition_end=time.monotonic()
+            stop_windows.append((precondition_begin,precondition_end))
+            emit(kind='stop-precondition',run=n,begin=precondition_begin,duration=precondition_end-precondition_begin)
     start=time.monotonic()
-    p=subprocess.Popen([BIN,'--state',str(STATE),'--mount',str(MOUNT),'restart'],env=ENV,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    p=subprocess.Popen([RESTART_BIN,'--state',str(STATE),'--mount',str(MOUNT),'restart'],env=ENV,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     children=[]
     if options.pause_seconds and n==1:
         import fcntl, signal
@@ -98,7 +133,7 @@ for n in range(1,options.runs+1):
             found=[]
             for childpid in children_buf[:max(0,count)]:
                 buf=ctypes.create_string_buffer(4096)
-                if proc.proc_pidpath(childpid,buf,len(buf))>0 and buf.value.decode()==BIN:
+                if proc.proc_pidpath(childpid,buf,len(buf))>0 and buf.value.decode()==RESTART_BIN:
                     found.append(childpid)
             if found:
                 candidate=found[0]
@@ -164,6 +199,10 @@ for n in range(1,options.runs+1):
             if child.returncode == 0:
                 assert (pathlib.Path(out.strip())/'probe.txt').read_text() == 'restart probe\n'
         except subprocess.TimeoutExpired: emit(kind='parallel-new-timeout',run=n,index=i,pid=child.pid)
+    if options.refuse_stop:
+        unexpected='recovery force-unmount' in (STATE/'serve.log').read_text()
+        emit(kind='retained-mount-handoff',run=n,ok=not unexpected)
+        if unexpected: violations.append('planned restart force-unmounted the retained mount')
     print('restart',n,'rc',p.returncode,'seconds',round(time.monotonic()-start,3),flush=True)
     time.sleep(max(2,options.pause_seconds + 1 - (time.monotonic()-start)) if options.pause_seconds and n==1 else 2)
 stop.set()
@@ -172,3 +211,12 @@ for t in threads: t.join(timeout=16)
 r=ov('stop',timeout=30)
 emit(kind='cleanup-stop',rc=r.returncode,out=r.stdout,err=r.stderr)
 print('finished',str(RUN),flush=True)
+
+# A refused explicit stop can hide its entry while umount quiesces it.
+# Preserve those samples separately; planned restarts must keep the entry.
+omission_phases=collections.Counter(mount_omission_phase(begin,end,stop_windows) for begin,end in mount_omissions)
+emit(kind='mount-omission-summary',precondition=omission_phases['precondition'],planned=omission_phases['planned'],boundary=omission_phases['boundary'])
+if omission_phases['planned']: violations.append('planned mount sample failed')
+if omission_phases['boundary']: violations.append('mount omission crossed a stop boundary; run inconclusive')
+if violations:
+    raise SystemExit('; '.join(sorted(set(violations))))

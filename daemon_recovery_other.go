@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 )
 
 func detachStaleMount(ctx context.Context, state, mount string) error {
@@ -19,3 +20,7 @@ func recoverySupported() bool { return false }
 func finishRecovery(context.Context, string, string) error { return nil }
 
 func releaseMount(_ string, mount string, force bool) error { return unmount(mount, force) }
+
+func lockLegacyHandoff(context.Context, string, string) (*os.File, error) { return nil, nil }
+
+func finishHandoff(context.Context, string, string) error { return nil }

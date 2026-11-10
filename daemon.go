@@ -452,7 +452,7 @@ func (cmd *restartCmd) Run(c *cli) error {
 			appendDaemonLog(c.state, fmt.Sprintf("restart requested by cli pid %d", os.Getpid()))
 			// Daemons that predate the feature reject unknown fields.
 			keep := slices.Contains(client.Welcome().Features, "stop.keep_mount")
-			if _, err := stopDaemon(c, api.StopArgs{KeepMount: keep}); err != nil {
+			if err := stopForRestart(c, keep); err != nil {
 				return err
 			}
 		}
@@ -560,4 +560,20 @@ func daemonPaths(state, mount string) (string, string, error) {
 		return "", "", fmt.Errorf("mount path: %w", err)
 	}
 	return state, mount, nil
+}
+
+func stopForRestart(c *cli, keep bool) error {
+	if keep && !slices.Contains(c.conn.Welcome().Features, "stop.keep_mount_receipts") {
+		// Older daemons cannot reconcile at their own cut. Exclude competing
+		// stop helpers until that holder has left the mount for its successor.
+		lease, err := lockLegacyHandoff(c.ctx, c.state, c.mount)
+		if err != nil {
+			return err
+		}
+		if lease != nil {
+			defer lease.Close()
+		}
+	}
+	_, err := stopDaemon(c, api.StopArgs{KeepMount: keep})
+	return err
 }

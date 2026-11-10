@@ -67,6 +67,14 @@ func lockUnmount(ctx context.Context, state string) (*os.File, error) {
 }
 
 func finishRecovery(ctx context.Context, state, mount string) error {
+	return reconcileUnmount(ctx, state, mount, false)
+}
+
+func finishHandoff(ctx context.Context, state, mount string) error {
+	return reconcileUnmount(ctx, state, mount, true)
+}
+
+func reconcileUnmount(ctx context.Context, state, mount string, handoff bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	lease, err := lockUnmount(ctx, state)
@@ -74,10 +82,18 @@ func finishRecovery(ctx context.Context, state, mount string) error {
 		return err
 	}
 	defer lease.Close()
-	return finishRecoveryLocked(ctx, state, mount)
+	return reconcileUnmountLocked(ctx, state, mount, handoff)
 }
 
 func finishRecoveryLocked(ctx context.Context, state, mount string) error {
+	return reconcileUnmountLocked(ctx, state, mount, false)
+}
+
+func finishHandoffLocked(ctx context.Context, state, mount string) error {
+	return reconcileUnmountLocked(ctx, state, mount, true)
+}
+
+func reconcileUnmountLocked(ctx context.Context, state, mount string, handoff bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -124,6 +140,9 @@ func finishRecoveryLocked(ctx context.Context, state, mount string) error {
 	} else if held {
 		r.Phase = "done"
 		return saveUnmount(state, r)
+	}
+	if handoff {
+		return fmt.Errorf("daemon exited before keep-mount handoff")
 	}
 	// The recorded process is gone (or the pid has been reused), so no old
 	// unmount can remove a replacement's mount later. Retry only our own mount.
@@ -221,4 +240,25 @@ func releaseMount(state, mount string, force bool) error {
 		return nil
 	}
 	return trackedUnmountLocked(ctx, state, mount, force)
+}
+
+func lockLegacyHandoff(ctx context.Context, state, mount string) (*os.File, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	lease, err := lockUnmount(ctx, state)
+	if err != nil {
+		return nil, err
+	}
+	if _, held, err := checkout.StateHolder(state); err != nil || !held {
+		lease.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("daemon exited before keep-mount handoff")
+	}
+	if err := finishHandoffLocked(ctx, state, mount); err != nil {
+		lease.Close()
+		return nil, err
+	}
+	return lease, nil
 }

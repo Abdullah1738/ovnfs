@@ -343,6 +343,16 @@ func (cmd *serveCmd) Run(c *cli) error {
 			req.keepMount = sig == syscall.SIGTERM
 		}
 		if l := files.Load(); req.keepMount && l != nil {
+			// Reconcile while the registry still proves a live holder, including
+			// requests from older clients and TERM's canceled request context.
+			if err = finishHandoff(context.Background(), state, mount); err != nil {
+				err = fmt.Errorf("keep mount: %w", err)
+				log.Print(err)
+				if req.done != nil {
+					req.done <- err
+				}
+				continue
+			}
 			// Cut before the export closes, which would answer the kernel
 			// client "not found": it retries the cut connections instead, until
 			// the next daemon serves this port.
