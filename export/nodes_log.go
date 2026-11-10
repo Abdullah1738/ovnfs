@@ -60,6 +60,18 @@ func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*
 	if err != nil {
 		return nil, err
 	}
+	// The registry owns the state lock before opening the export. No other
+	// daemon can use this log or its disposable indexes; distinct logs use
+	// distinct directories. Reclaim indexes abandoned by a crashed instance.
+	t.coldParent = name + ".cache"
+	if err = os.RemoveAll(t.coldParent); err != nil {
+		t.log.Close()
+		return nil, err
+	}
+	if err = os.MkdirAll(t.coldParent, 0700); err != nil {
+		t.log.Close()
+		return nil, err
+	}
 	t.stop = make(chan struct{})
 	t.done = make(chan struct{})
 	go t.syncLoop()
@@ -380,6 +392,11 @@ func (t *nodeTable) close() error {
 				t.logErr = err
 			}
 		}
+		if t.coldRoot != "" {
+			if err := os.RemoveAll(t.coldRoot); err != nil {
+				t.cacheFailure(err)
+			}
+		}
 	})
-	return t.logErr
+	return errors.Join(t.logErr, t.cacheErr)
 }
