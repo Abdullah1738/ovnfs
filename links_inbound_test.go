@@ -3,14 +3,11 @@ package main
 import (
 	"context"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/checkout"
-	"github.com/stencil-hq/ovnfs/overlay"
 	"github.com/stencil-hq/ovnfs/peer"
 )
 
@@ -59,29 +56,9 @@ func pipeLink(t *testing.T, host *links, offer peer.Offer, blobs peer.Blobs) *pi
 // reads of that folder go through whichever is up, and a checkout connecting
 // again replaces only its own stale session.
 func TestCheckoutsOfOneFolderKeepTheirLinks(t *testing.T) {
-	open := func(c checkout.Config) *checkout.Registry {
-		root := t.TempDir()
-		c.State, c.Mount = filepath.Join(root, "state"), filepath.Join(root, "mount")
-		c.Memory, c.BlobCache = overlay.NewMemory(64<<20, 1<<20, 0), 64<<20
-		reg, err := checkout.Open(c)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { reg.Close() })
-		return reg
-	}
-	src := open(checkout.Config{Node: "n_src"})
-	host := newLinks(nil)
-	host.reg = open(checkout.Config{Fetch: host.fetch, Search: host.search})
-	t.Cleanup(host.close)
-
+	dir := linkFolder(t, map[string]string{"one.txt": "one", "two.txt": "two"})
+	src, host := openLinks(t, "n_src").reg, openLinks(t, "n_host")
 	ctx := context.Background()
-	dir := t.TempDir()
-	for name, data := range map[string]string{"one.txt": "one", "two.txt": "two"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
 	attach := func(name string) *pipedLink {
 		if _, err := src.New(ctx, api.NewArgs{Dir: dir, Name: name}); err != nil {
 			t.Fatal(err)

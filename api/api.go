@@ -254,7 +254,7 @@ type ExplainReply struct {
 // AttachArgs makes a checkout (or a folder, captured now) appear on another machine.
 // Names, sizes and modes are there at once; content moves on first read and
 // stays cached there. The link is `ssh To RemoteBin link`, reconnected until
-// this daemon stops.
+// the checkout is removed or this daemon stops.
 type AttachArgs struct {
 	Checkout  string `json:"checkout,omitempty"` // exactly one of Checkout and Dir
 	Dir       string `json:"dir,omitempty"`

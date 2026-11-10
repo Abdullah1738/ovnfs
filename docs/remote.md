@@ -38,9 +38,12 @@ credentials, an unpushed commit) reports a fault and keeps reading over the
 link. Commits stay in the mirror across restarts and for later attaches; delete
 `mirror.git` to reclaim its space.
 
-The link reconnects with backoff while the source daemon runs. Removing the
-checkout on the source (`ovnfs rm`) ends its outbound links, so they do not
-keep reconnecting. Without the link, cached content stays readable and uncached
+The link reconnects with backoff while the source daemon runs and the checkout
+is there: removing the checkout on the source, with `rm` or `prune`, ends its
+links and leaves the remote checkout in place. Attaching a folder again
+captures it again under the same checkout name, and the links that checkout
+already has stay up, so a folder attached to several machines keeps one to
+each. Without the link, cached content stays readable and uncached
 reads fail with EIO; [push](#push) first to cache all of it. A slow download
 for an open does not hold the overlay's namespace lock: unrelated reads and
 writes can proceed. Re-attaching the same snapshot reuses the remote checkout.

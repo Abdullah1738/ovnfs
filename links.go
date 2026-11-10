@@ -38,21 +38,27 @@ const nodeFile = "node_id"
 // (one ssh session per attached checkout and machine, reconnected until
 // stopped), and inbound sessions other machines opened to attach checkouts here.
 type links struct {
-	reg      *checkout.Registry
-	emit     func(checkout.Event) // admin events, such as push progress; nil drops them
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	sessions map[string][]inLink // link key → inbound sessions, one per attached checkout, newest last
-	out      map[string]*outLink // "<checkout>@<host>" → running outbound link
-	wg       sync.WaitGroup
+	reg       *checkout.Registry
+	emit      func(checkout.Event) // admin events, such as push progress; nil drops them
+	dial      dialer               // sshOpen, except in tests
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	sessions  map[string][]inLink   // link key → inbound sessions, one per attached checkout, newest last
+	out       map[string]*outLink   // "<checkout>@<host>" → running outbound link
+	offering  map[*outLink]struct{} // links whose attach is still making its offer: detach reaches them too
+	replacing map[string]int        // checkout → captureDir calls replacing it: detach leaves its links to them
+	wg        sync.WaitGroup
 }
+
+// dialer opens the stream of one outbound link session to bin on host.
+type dialer func(ctx context.Context, host, bin string) (io.ReadWriteCloser, error)
 
 // newLinks prepares an idle link manager publishing events to emit (nil drops
 // them); the registry is set once it is open.
 func newLinks(emit func(checkout.Event)) *links {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &links{emit: emit, ctx: ctx, cancel: cancel, sessions: map[string][]inLink{}, out: map[string]*outLink{}}
+	return &links{emit: emit, dial: sshOpen, ctx: ctx, cancel: cancel, sessions: map[string][]inLink{}, out: map[string]*outLink{}, offering: map[*outLink]struct{}{}, replacing: map[string]int{}}
 }
 
 // fetch serves checkout.Config.Fetch: it asks the session connected for key.
@@ -194,16 +200,28 @@ func (l *links) attach(ctx context.Context, args api.AttachArgs) (api.AttachRepl
 			return api.AttachReply{}, err
 		}
 	}
+	// Known to detach before the offer is made: a checkout removed in between
+	// would otherwise gain a link that nothing ends.
+	o := l.newOutLink(name, args.To, cmp.Or(args.RemoteBin, "ovnfs"))
+	l.mu.Lock()
+	l.offering[o] = struct{}{}
+	l.mu.Unlock()
 	offer, blobs, snap, err := l.reg.Offer(ctx, name, args.Name)
-	if err != nil {
-		return api.AttachReply{}, err
-	}
 	key := name + "@" + args.To
 	l.mu.Lock()
-	if old := l.out[key]; old != nil {
-		old.cancel()
+	delete(l.offering, o)
+	if err == nil {
+		err = context.Cause(o.ctx)
 	}
-	o := newOutLink(l.ctx, name, args.To, cmp.Or(args.RemoteBin, "ovnfs"), offer, blobs)
+	if err != nil {
+		l.mu.Unlock()
+		o.cancel(nil)
+		return api.AttachReply{}, err
+	}
+	o.offer, o.blobs = offer, blobs
+	if old := l.out[key]; old != nil {
+		old.cancel(&checkout.Error{Code: "unavailable", Message: fmt.Sprintf("checkout %s was attached to %s again", name, args.To)})
+	}
 	l.out[key] = o
 	l.mu.Unlock()
 	l.wg.Go(func() {
@@ -219,8 +237,10 @@ func (l *links) attach(ctx context.Context, args api.AttachArgs) (api.AttachRepl
 		return api.AttachReply{Checkout: name, Snapshot: snap, Host: a.Host, RemoteCheckout: a.Checkout, RemotePath: a.Path}, nil
 	case err := <-o.failed:
 		return api.AttachReply{}, &checkout.Error{Code: "unavailable", Message: err.Error()}
+	case <-o.ctx.Done():
+		return api.AttachReply{}, context.Cause(o.ctx)
 	case <-ctx.Done():
-		o.cancel()
+		o.cancel(nil)
 		return api.AttachReply{}, ctx.Err()
 	}
 }
@@ -306,22 +326,58 @@ func (l *links) attached(name, host string) []*outLink {
 	return found
 }
 
-// detach cancels every outbound link of the named checkout and drops them
-// from the map, so rm does not leave ssh sessions reconnecting until the
-// daemon stops.
+// detach ends every outbound link of the named checkout, those still making
+// their offer included. The registry's Retire hook calls it, so a removed
+// checkout does not leave ssh sessions reconnecting until the daemon stops; a
+// checkout captureDir is replacing keeps its links (see replace).
 func (l *links) detach(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.replacing[name] > 0 {
+		return
+	}
+	for o := range l.offering {
+		if o.checkout == name {
+			o.cancel(errRemoved(name))
+		}
+	}
 	for key, o := range l.out {
 		if o.checkout == name {
-			o.cancel()
+			o.cancel(errRemoved(name))
 			delete(l.out, key)
+		}
+	}
+}
+
+// errRemoved is why the links of a removed checkout ended; an attach still
+// waiting on one returns it.
+func errRemoved(name string) error {
+	return &checkout.Error{Code: "not_found", Message: fmt.Sprintf("checkout %s was removed", name)}
+}
+
+// replace keeps the named checkout's links while captureDir replaces it, so
+// they pass to the checkout that takes its name. The returned func ends that:
+// when no checkout has the name by then, its links end as rm ends them.
+func (l *links) replace(name string) (done func()) {
+	l.mu.Lock()
+	l.replacing[name]++
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		if l.replacing[name]--; l.replacing[name] == 0 {
+			delete(l.replacing, name)
+		}
+		l.mu.Unlock()
+		if _, live := l.reg.Gen(name); !live {
+			l.detach(name)
 		}
 	}
 }
 
 // captureDir opens (or refreshes) the checkout that stands for a folder being attached:
 // a clean checkout of the same folder is replaced so the offer shows the folder as it is now.
+// The replacement keeps the links of the checkout whose name it takes: a folder
+// attached to several machines keeps its link to each.
 func (l *links) captureDir(ctx context.Context, dir string) (string, error) {
 	root, err := source.Resolve(dir)
 	if err != nil {
@@ -338,6 +394,7 @@ func (l *links) captureDir(ctx context.Context, dir string) (string, error) {
 		if h.Dirty {
 			return "", &checkout.Error{Code: "exists", Message: fmt.Sprintf("checkout %s of %s has unsnapshotted changes; attach it by name instead", h.Name, root)}
 		}
+		defer l.replace(h.Name)() // held until the replacement is open
 		if err := l.reg.Rm(ctx, api.RmArgs{Checkout: h.Name}); err != nil {
 			return "", err
 		}
@@ -367,7 +424,8 @@ type outLink struct {
 	mu       sync.Mutex
 	active   *peer.Remote // nil while disconnected
 	ctx      context.Context
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc // ends the link; an attach still waiting on it returns the cause
+	dial     dialer
 	checkout string // the local checkout offered
 	to       string // ssh destination
 	bin      string // ovnfs on the machine
@@ -378,10 +436,10 @@ type outLink struct {
 }
 
 // newOutLink prepares a link offering the checkout name to the machine to,
-// whose ovnfs is bin; run starts it.
-func newOutLink(parent context.Context, name, to, bin string, offer peer.Offer, blobs peer.Blobs) *outLink {
-	ctx, cancel := context.WithCancel(parent)
-	return &outLink{ctx: ctx, cancel: cancel, checkout: name, to: to, bin: bin, offer: offer, blobs: blobs, accepted: make(chan peer.Accepted, 1), failed: make(chan error, 1)}
+// whose ovnfs is bin; attach sets what it offers and run starts it.
+func (l *links) newOutLink(name, to, bin string) *outLink {
+	ctx, cancel := context.WithCancelCause(l.ctx)
+	return &outLink{ctx: ctx, cancel: cancel, dial: l.dial, checkout: name, to: to, bin: bin, accepted: make(chan peer.Accepted, 1), failed: make(chan error, 1)}
 }
 
 // remote is the connected session's handle, nil while the link is down.
@@ -450,7 +508,7 @@ func (o *outLink) run() {
 
 // session opens one connection to the machine and serves the offer over it.
 func (o *outLink) session(accepted func(peer.Accepted)) error {
-	conn, err := sshOpen(o.ctx, o.to, o.bin)
+	conn, err := o.dial(o.ctx, o.to, o.bin)
 	if err != nil {
 		return err
 	}
