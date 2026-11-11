@@ -17,7 +17,6 @@ import (
 
 	"github.com/stencil-hq/ovnfs/admin"
 	"github.com/stencil-hq/ovnfs/api"
-	"github.com/stencil-hq/ovnfs/checkout"
 )
 
 // daemonWait bounds how long stop waits for the socket to change state.
@@ -26,7 +25,7 @@ const daemonWait = 15 * time.Second
 // serveLoadWait bounds how long a client waits for a daemon to answer its
 // hello: a daemon answers once its state is loaded and mounted, which takes
 // minutes on a large state after a reboot.
-const serveLoadWait = 30 * time.Minute
+const serveLoadWait = 300 * time.Second
 
 // loadNotice is how long a client waits before it says it is still waiting.
 const loadNotice = 5 * time.Second
@@ -58,6 +57,7 @@ func accepting(state string) bool {
 
 // client returns the daemon connection, auto-starting the daemon when the verb allows it.
 func (c *cli) client() (*admin.Client, error) {
+	c.startupContext()
 	if c.conn != nil {
 		return c.conn, nil
 	}
@@ -84,29 +84,51 @@ func (c *cli) client() (*admin.Client, error) {
 // completes a handshake. Starts on one state directory take turns; the pid is 0
 // when an earlier start's daemon answers instead.
 func startDaemon(ctx context.Context, state, mount string) (*admin.Client, int, error) {
+	ctx, cancel := watchStartupProgress(ctx, state)
+	defer cancel()
 	state, mount, err := daemonPaths(state, mount)
 	if err != nil {
 		return nil, 0, err
+	}
+	if lease, err := fastStartLease(state); err == nil && lease != nil {
+		client, dialErr := dialDaemon(ctx, state)
+		lease.Close()
+		if dialErr == nil {
+			return client, 0, nil
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, 0, startupDeadline(state, ctx.Err())
 	}
 	lock, err := lockDaemon(ctx, state)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer lock.Close()
-	return spawnDaemon(ctx, state, mount, lock)
+	client, pid, spawnErr := spawnDaemon(ctx, state, mount, lock)
+	releaseStartupLease(lock, state, pid, spawnErr)
+	return client, pid, spawnErr
 }
 
 // lockDaemon creates the state directory and waits for its start lock, held
 // by startDaemon and restart while they change the daemon; closing the
 // returned file releases it.
 func lockDaemon(ctx context.Context, state string) (*os.File, error) {
-	ctx, cancel := context.WithTimeout(ctx, serveLoadWait)
+	ctx, cancel := watchStartupProgress(ctx, state)
 	defer cancel()
 	if err := os.MkdirAll(state, 0o700); err != nil {
-		return nil, fmt.Errorf("creating state %s: %w", state, err)
+		return nil, fmt.Errorf("can't read state: %s: %w", state, err)
 	}
 	lock, err := lockStart(ctx, state)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			pid, held, _ := daemonHolder(context.Background(), state)
+			if held {
+				return nil, fmt.Errorf("%w: %w", unresponsiveDaemon(state, pid), err)
+			}
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return nil, fmt.Errorf("can't read state: %s: %w", state, err)
+		}
 		return nil, fmt.Errorf("waiting for other starts of %s: %w", state, err)
 	}
 	return lock, nil
@@ -134,6 +156,9 @@ func spawnDaemon(ctx context.Context, state, mount string, lock *os.File) (*admi
 			return spawnDaemon(ctx, state, mount, lock)
 		}
 		return client, 0, err
+	}
+	if err := checkSavedPort(state); err != nil {
+		return nil, 0, err
 	}
 	if err := finishRecovery(ctx, state, mount); err != nil {
 		return nil, 0, err
@@ -163,9 +188,6 @@ func spawnDaemon(ctx context.Context, state, mount string, lock *os.File) (*admi
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait(); close(exited) }()
 	client, err := awaitDaemonLocked(ctx, state, mount, pid, exited)
-	if err != nil {
-		failedStart(cmd, exited)
-	}
 	if errors.Is(err, errDaemonRecovered) {
 		return spawnDaemon(ctx, state, mount, lock)
 	}
@@ -178,14 +200,16 @@ func spawnDaemon(ctx context.Context, state, mount string, lock *os.File) (*admi
 // failed dial ends the wait. Otherwise the daemon is the serve this client
 // started (pid): dials retry until its socket appears, and its exit ends the wait.
 func awaitDaemon(ctx context.Context, state, mount string, pid int, exited <-chan error) (*admin.Client, error) {
-	return awaitDaemonWait(ctx, state, mount, pid, exited, false)
+	return awaitDaemonWait(ctx, state, mount, pid, exited)
 }
 
 func awaitDaemonLocked(ctx context.Context, state, mount string, pid int, exited <-chan error) (*admin.Client, error) {
-	return awaitDaemonWait(ctx, state, mount, pid, exited, true)
+	return awaitDaemonWait(ctx, state, mount, pid, exited)
 }
 
-func awaitDaemonWait(ctx context.Context, state, mount string, pid int, exited <-chan error, allowRecovery bool) (*admin.Client, error) {
+func awaitDaemonWait(ctx context.Context, state, mount string, pid int, exited <-chan error) (*admin.Client, error) {
+	ctx, stopWait := watchStartupProgress(ctx, state)
+	defer stopWait()
 	dialCtx, cancelDial := context.WithCancel(ctx)
 	defer cancelDial()
 	_, initiallyHeld, holderErr := daemonHolder(ctx, state)
@@ -219,8 +243,6 @@ func awaitDaemonWait(ctx context.Context, state, mount string, pid int, exited <
 			}(result)
 		}
 	}
-	deadline := time.NewTimer(serveLoadWait)
-	defer deadline.Stop()
 	notice := time.NewTimer(loadNotice)
 	defer notice.Stop()
 	retry := time.NewTicker(100 * time.Millisecond)
@@ -246,18 +268,12 @@ func awaitDaemonWait(ctx context.Context, state, mount string, pid int, exited <
 		case <-retry.C:
 			if time.Since(lastHealth) >= time.Second {
 				lastHealth = time.Now()
-				holder, held, err := daemonHolder(ctx, state)
+				_, held, err := daemonHolder(ctx, state)
 				if err != nil {
 					abandon()
 					return nil, err
 				}
-				if allowRecovery && recoverySupported() && held && holder > 0 && checkout.Serving(state, holder) && daemonStopped(ctx, holder) {
-					abandon()
-					if err := recoverDaemon(ctx, state, mount, holder); err != nil {
-						return nil, err
-					}
-					return nil, errDaemonRecovered
-				}
+
 				if initiallyHeld && !held && !accepting(state) && exited == nil {
 					abandon()
 					return nil, fmt.Errorf("daemon exited while loading; %s", logTail(state))
@@ -272,24 +288,24 @@ func awaitDaemonWait(ctx context.Context, state, mount string, pid int, exited <
 				err = errors.New("exit status 0")
 			}
 			return nil, fmt.Errorf("%s exited before accepting connections (%v); %s", name, err, logTail(state))
-		case <-deadline.C:
-			abandon()
-			holder, held, err := daemonHolder(ctx, state)
-			if err != nil {
-				return nil, err
-			}
-			if allowRecovery && recoverySupported() && held && holder > 0 {
-				if err := recoverDaemon(ctx, state, mount, holder); err != nil {
-					return nil, err
-				}
-				return nil, errDaemonRecovered
-			}
-			return nil, fmt.Errorf("%s did not answer within %s; %s", name, serveLoadWait, logTail(state))
+
 		case <-ctx.Done():
 			abandon()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, startupDeadline(state, ctx.Err())
+			}
 			return nil, fmt.Errorf("waiting for %s: %w", name, ctx.Err())
 		case <-notice.C:
-			fmt.Fprintf(stderr, "waiting for %s to load its state\n", name)
+			holder, _, _ := daemonHolder(ctx, state)
+			p, ready, probeErr := probeLoading(ctx, state)
+			if probeErr == nil && !ready {
+				holder = p.PID
+				fmt.Fprintf(stderr, "daemon %d starting, waiting (loading %d/%d)\n", holder, p.Completed, p.Total)
+			} else if holder > 0 {
+				fmt.Fprintf(stderr, "daemon %d starting, waiting\n", holder)
+			} else {
+				fmt.Fprintf(stderr, "daemon starting, waiting at %s\n", state)
+			}
 		}
 	}
 }
@@ -334,6 +350,7 @@ func tailLines(path string, n int) ([]string, error) {
 type startCmd struct{}
 
 func (cmd *startCmd) Run(c *cli) error {
+	c.startupContext()
 	c.autostart = false
 	client, pid, err := startDaemon(c.ctx, c.state, c.mount)
 	if err != nil {
@@ -377,7 +394,11 @@ func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
 	noticed := false
 	for {
 		up := accepting(c.state)
-		if !up && (st.PID == 0 || !processAlive(st.PID)) {
+		_, held, holderErr := daemonHolder(c.ctx, c.state)
+		if holderErr != nil {
+			return nil, holderErr
+		}
+		if !up && !held {
 			return raw, nil
 		}
 		if time.Now().After(deadline) {
@@ -427,6 +448,10 @@ func (cmd *stopCmd) Run(c *cli) error {
 type restartCmd struct{}
 
 func (cmd *restartCmd) Run(c *cli) error {
+	c.startupContext()
+	ctx, cancel := watchStartupProgress(c.ctx, c.state)
+	defer cancel()
+	c.ctx = ctx
 	state, mount, err := daemonPaths(c.state, c.mount)
 	if err != nil {
 		return err
@@ -437,7 +462,9 @@ func (cmd *restartCmd) Run(c *cli) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	startedPID := 0
+	var startupErr error
+	defer func() { releaseStartupLease(lock, c.state, startedPID, startupErr) }()
 	_, held, err := daemonHolder(c.ctx, c.state)
 	if err != nil {
 		return err
@@ -458,6 +485,7 @@ func (cmd *restartCmd) Run(c *cli) error {
 		}
 	}
 	client, pid, err := spawnDaemon(c.ctx, c.state, c.mount, lock)
+	startedPID, startupErr = pid, err
 	if err != nil {
 		return err
 	}
@@ -491,6 +519,17 @@ type statusCmd struct{}
 
 func (cmd *statusCmd) Run(c *cli) error {
 	c.autostart = false
+	p, ready, probeErr := probeLoading(c.ctx, c.state)
+	if probeErr == nil && !ready {
+		if c.json {
+			if err := json.NewEncoder(stdout).Encode(map[string]any{"pid": p.PID, "state": c.state, "status": "loading", "completed": p.Completed, "total": p.Total}); err != nil {
+				return err
+			}
+			return exitCode(1)
+		}
+		fmt.Fprintf(stdout, "starting/restarting (pid %d), loading %d/%d\n", p.PID, p.Completed, p.Total)
+		return exitCode(1)
+	}
 	client, dialErr := dialDaemon(c.ctx, c.state)
 	if dialErr != nil {
 		pid, held, err := daemonHolder(c.ctx, c.state)
@@ -499,11 +538,18 @@ func (cmd *statusCmd) Run(c *cli) error {
 		}
 		if held || accepting(c.state) {
 			if pid > 0 {
-				fmt.Fprintf(stderr, "ovnfs starting or unresponsive (pid %d, state lock held at %s)\n", pid, c.state)
+				fmt.Fprintf(stderr, "ovnfs starting or unresponsive (pid %d, state lock or saved port held at %s)\n", pid, c.state)
 			} else {
 				fmt.Fprintf(stderr, "ovnfs starting or unresponsive at %s; owner PID unavailable\n", c.state)
 			}
 			return exitCode(1)
+		}
+		if err := checkSavedPort(c.state); err != nil {
+			return err
+		}
+		var op *net.OpError
+		if errors.As(dialErr, &op) && errors.Is(dialErr, os.ErrPermission) {
+			return fmt.Errorf("can't read state: %s: %w", c.state, dialErr)
 		}
 		// Under --json stdout carries only JSON; the exit status says it all.
 		out := io.Writer(stdout)

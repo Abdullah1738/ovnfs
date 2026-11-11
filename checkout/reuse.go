@@ -443,7 +443,7 @@ func (r *Registry) openOnLocked(b *baseRecord, template gitTemplate, name, fallb
 		r.mu.Unlock()
 		return api.NewReply{}, r.abandonCheckout(name, h, b, err)
 	}
-	delete(r.reserved, name)
+	// Keep the name pending until the coalesced state commit is durable.
 	r.checkouts[name] = h
 	r.moveRootLocked()
 	seq := r.requestCommitLocked()
@@ -462,6 +462,11 @@ func (r *Registry) openOnLocked(b *baseRecord, template gitTemplate, name, fallb
 		r.mu.Unlock()
 		return api.NewReply{}, r.abandonCheckout(name, h, b, err)
 	}
+	r.mu.Lock()
+	if r.checkouts[name] == h {
+		delete(r.reserved, name)
+	}
+	r.mu.Unlock()
 	r.created(reply.Checkout)
 	return reply, nil
 }

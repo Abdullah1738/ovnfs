@@ -86,3 +86,27 @@ func signalDaemon(pid int, force bool) error {
 	}
 	return p.Kill()
 }
+
+func fastStartLease(state string) (*os.File, error) {
+	f, err := os.Open(filepath.Join(state, startLock))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var overlapped windows.Overlapped
+	err = windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)
+	if err != nil {
+		f.Close()
+		if err == windows.ERROR_LOCK_VIOLATION {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+// Process discovery in pendingStartupHolder preserves exclusion after the
+// CLI process exits; a goroutine retaining a handle would not survive it.
+func releaseStartupLease(lease *os.File, _ string, _ int, _ error) { lease.Close() }

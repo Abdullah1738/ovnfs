@@ -67,3 +67,27 @@ func signalDaemon(pid int, force bool) error {
 	}
 	return syscall.Kill(pid, sig)
 }
+
+// A speculative hello must hold the same exclusion as restart, but a healthy
+// reader can take it through a read-only descriptor without changing state.
+func fastStartLease(state string) (*os.File, error) {
+	f, err := os.Open(filepath.Join(state, startLock))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+func releaseStartupLease(lease *os.File, _ string, _ int, _ error) { lease.Close() }
+
+func pendingStartupHolder(context.Context, string) (int, bool, error) { return 0, false, nil }

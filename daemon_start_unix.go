@@ -46,5 +46,4 @@ func inheritedStartLease(fd int, state string) (*os.File, error) {
 	return f, nil
 }
 
-func borrowStart(int) bool                { return false }
-func failedStart(*exec.Cmd, <-chan error) {}
+func borrowStart(int) bool { return false }

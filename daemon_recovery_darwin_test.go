@@ -39,7 +39,7 @@ func init() {
 	}
 }
 
-func TestStoppedHolderWithUnmountLeaseReachesRecovery(t *testing.T) {
+func TestStoppedHolderWithUnmountLeaseIsNotReplaced(t *testing.T) {
 	state := t.TempDir()
 	exe, err := os.Executable()
 	if err != nil {
@@ -60,20 +60,21 @@ func TestStoppedHolderWithUnmountLeaseReachesRecovery(t *testing.T) {
 	if line, err := bufio.NewReader(out).ReadString('\n'); err != nil || line != "locked\n" {
 		t.Fatalf("holder: %q %v", line, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	client, _, err := startDaemon(ctx, state, filepath.Join(state, "mount"))
 	if client != nil {
 		client.Close()
 	}
-	// This test binary's replacement serve exits3; reaching it proves recovery
-	// passed the stopped holder's receipt lease instead of waiting until timeout.
-	if err == nil || !strings.Contains(err.Error(), "exit status 3") {
-		t.Fatalf("did not reach replacement: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "wedged?") {
+		t.Fatalf("missing bounded wait diagnostic: %v", err)
 	}
 	select {
 	case <-exited:
+		t.Fatal("startup killed a live holder")
 	default:
-		t.Fatal("original stopped holder survived recovery")
+	}
+	if !processAlive(holder.Process.Pid) {
+		t.Fatal("holder died")
 	}
 }

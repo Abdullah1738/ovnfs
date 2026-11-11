@@ -171,8 +171,12 @@ state lock is released, and `restart` holds the start lock throughout, so
 auto-starting clients wait for the new daemon rather than failing on the state
 lock. A starting daemon opens its admin socket before it loads its state, which
 takes minutes on a large state, and holds each hello until it has mounted: a
-client that arrives during the load waits for it, up to thirty minutes, rather
-than starting a second daemon. Shell completion gives up after a second.
+client that arrives during the load waits up to five minutes without loading progress (configurable with
+`--daemon-timeout`) rather than starting a second daemon. The additive `probe`
+handshake reports loading progress without exposing a partial registry; older
+hello clients still wait for full readiness. A timeout reports the holder and
+leaves it running. Increasing restored-record counts reset the idle budget,
+including for clients waiting on another starter's lock. Shell completion gives up after a second.
 Daemons starting together take turns replacing a stale socket, so only one
 listens, and a client whose daemon fails its load quotes the daemon's log.
 

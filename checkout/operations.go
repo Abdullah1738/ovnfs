@@ -509,7 +509,10 @@ func (r *Registry) pickNameLocked(name, hint string) (string, error) {
 		if !namePattern.MatchString(name) {
 			return "", failure("invalid", "invalid checkout name %q: use lowercase letters, digits, '.', '_' and '-'", name)
 		}
-		if taken(name) {
+		if r.reserved[name] {
+			return "", failure("busy", "checkout %s is being created or changed; retry when the operation finishes", name)
+		}
+		if r.checkouts[name] != nil {
 			return "", failure("exists", "checkout %s already exists", name)
 		}
 		return name, nil
@@ -1266,6 +1269,10 @@ func (r *Registry) remove(ctx context.Context, name string, picked time.Time, st
 	if r.closed {
 		r.mu.Unlock()
 		return false, failure("io", "registry is closed")
+	}
+	if r.reserved[name] {
+		r.mu.Unlock()
+		return false, failure("busy", "checkout %s has an operation in progress", name)
 	}
 	h := r.checkouts[name]
 	if h == nil {

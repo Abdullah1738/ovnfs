@@ -1,7 +1,10 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -45,5 +48,53 @@ func TestDaemonPathForms(t *testing.T) {
 				t.Fatal("normalized state does not match daemon argv")
 			}
 		})
+	}
+}
+
+func stateDirectoryAliases(t *testing.T, state string) map[string]string {
+	t.Helper()
+	rows := map[string]string{"exact": state, "trailing-separator": state + string(filepath.Separator), "dot": state + string(filepath.Separator) + ".", "parent": state + string(filepath.Separator) + "child" + string(filepath.Separator) + ".."}
+	if err := os.MkdirAll(filepath.Join(state, "child"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(filepath.Dir(state), "state-alias")
+	if err := os.Symlink(state, alias); err == nil {
+		rows["symlink"] = alias
+	} else {
+		t.Logf("directory alias unavailable: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		rows["case"] = strings.ToUpper(state)
+		rows["forward-separators"] = strings.ReplaceAll(state, `\`, `/`)
+		if strings.HasPrefix(state, `\\`) {
+			rows["extended-prefix"] = `\\?\UNC\` + strings.TrimPrefix(state, `\\`)
+		} else {
+			rows["extended-prefix"] = `\\?\` + state
+		}
+	}
+	return rows
+}
+
+func TestServesStateDirectoryIdentity(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state a")
+	if err := os.Mkdir(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for label, alias := range stateDirectoryAliases(t, state) {
+		t.Run(label, func(t *testing.T) {
+			if !servesState([]string{"ovnfs", "serve", "--state", state}, alias) {
+				t.Fatalf("same directory missed: %q and %q", state, alias)
+			}
+			if !servesState([]string{"ovnfs", "serve", "--state", alias}, state) {
+				t.Fatalf("reverse alias missed: %q and %q", alias, state)
+			}
+		})
+	}
+	other := t.TempDir()
+	if servesState([]string{"ovnfs", "serve", "--state", other}, state) {
+		t.Fatal("accepted different directory")
+	}
+	if servesState([]string{"ovnfs", "serve", "--state", state + "-missing"}, state) {
+		t.Fatal("accepted absent directory")
 	}
 }

@@ -20,13 +20,14 @@ import (
 
 // cli carries the resolved options and the lazily dialed daemon connection of one invocation.
 type cli struct {
-	ctx       context.Context
-	state     string
-	mount     string
-	json      bool
-	color     string // --color: auto, always or never
-	autostart bool   // start the daemon when its socket does not accept connections
-	conn      *admin.Client
+	ctx           context.Context
+	daemonTimeout time.Duration
+	state         string
+	mount         string
+	json          bool
+	color         string // --color: auto, always or never
+	autostart     bool   // start the daemon when its socket does not accept connections
+	conn          *admin.Client
 }
 
 // call sends one operation and returns the raw reply, starting the daemon if allowed.

@@ -121,11 +121,13 @@ func Serve(l net.Listener, w Welcome, h Handler, events func(context.Context) <-
 // answer. Serve accepts each connection at once, so the socket shows a
 // starting daemon, and holds its hello until Ready supplies the welcome.
 type Server struct {
-	ready  chan struct{}
-	closed chan struct{}
-	w      Welcome
-	h      Handler
-	events func(context.Context) <-chan Event
+	progressMu sync.Mutex
+	progress   Loading
+	ready      chan struct{}
+	closed     chan struct{}
+	w          Welcome
+	h          Handler
+	events     func(context.Context) <-chan Event
 }
 
 // NewServer returns a server that holds every hello until Ready.
@@ -158,6 +160,23 @@ func (s *Server) serveConn(conn net.Conn) {
 	if err := CheckPeer(conn); err != nil {
 		return
 	}
+	first, err := readFrame(conn)
+	if err != nil || len(first) != 1 {
+		return
+	}
+	if _, ok := first["probe"]; ok {
+		s.progressMu.Lock()
+		p := s.progress
+		s.progressMu.Unlock()
+		ready := false
+		select {
+		case <-s.ready:
+			ready = true
+		default:
+		}
+		_ = writeFrame(conn, map[string]any{"loading": p, "ready": ready})
+		return
+	}
 	select {
 	case <-s.ready:
 	case <-s.closed:
@@ -176,10 +195,6 @@ func (s *Server) serveConn(conn net.Conn) {
 			conn.Close()
 		}
 		return err
-	}
-	first, err := readFrame(conn)
-	if err != nil || len(first) != 1 {
-		return
 	}
 	hello, ok := first["hello"]
 	if !ok || !isObject(hello) {

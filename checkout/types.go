@@ -102,6 +102,8 @@ type Event struct {
 
 // Config connects persistent storage to the export and admin event stream.
 type Config struct {
+	// Loading reports restored records without exposing the partial registry.
+	Loading      func(completed, total int)
 	State, Mount string
 	UserHome     string // folder holding the user-wide ~/.o2/ovnfs.yml; "" ignores it
 	// Node is this daemon's stable node id, by which remote machines
