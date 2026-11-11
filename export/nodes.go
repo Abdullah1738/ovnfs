@@ -176,11 +176,16 @@ func (t *nodeTable) id(p string) (id uint64) {
 			if id, ok := t.leafID(p); ok {
 				return id
 			}
-			if id, ok := t.coldPathID(p); ok {
+			if id, ok := t.issuedID(p, false); ok {
 				return id
 			}
 			return 0
 		}
+	}
+	// Existing names need only their issued owner, even when the rest of the
+	// directory is cold. New allocations still recover all competing owners.
+	if id, ok := t.issuedID(p, true); ok {
+		return id
 	}
 	release, err := t.recoverPaths(p)
 	defer release()
@@ -211,7 +216,7 @@ func (t *nodeTable) lookup(p string) (uint64, bool) {
 	if id, ok := t.leafID(p); ok {
 		return id, true
 	}
-	return t.coldPathID(p)
+	return t.issuedID(p, false)
 }
 
 // leafID returns p's id if p is a leaf.
@@ -238,7 +243,7 @@ func (t *nodeTable) subtree(p string) []uint64 {
 			if id, ok := t.leafID(p); ok {
 				return []uint64{id}
 			}
-			if id, ok := t.coldPathID(p); ok {
+			if id, ok := t.issuedID(p, false); ok {
 				return []uint64{id}
 			}
 			return nil
@@ -405,7 +410,7 @@ func (t *nodeTable) remove(p string) {
 		t.drop(n)
 		return
 	}
-	id, ok := t.coldPathID(p)
+	id, ok := t.issuedID(p, false)
 	if !ok {
 		return
 	}

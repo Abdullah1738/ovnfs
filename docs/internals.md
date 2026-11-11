@@ -255,12 +255,13 @@ removes the instance. These files hold names only, never file contents, and are
 not part of the identity log. Status reports their bytes as `node index`
 (`node_index_bytes` in JSON), separately from the resident estimate and RSS.
 Rewalks restore one directory's issued owners with one index read, accounted
-against the same budget. Retained handles also batch when the owners fit the
-remaining budget; under pressure they binary-search a single owner and admit
-only that name, avoiding repeated reconstruction of wide cold directories.
-Consecutive distinct misses in one directory promote recovery to a batch even
-under pressure, so retained-handle rewalks still amortize index I/O. Index reads and replacement
-writes release the node mutex, retain operation state and revalidate the
+against the same budget. Retained handles and already-issued names batch when
+the owners fit the remaining budget; under pressure they binary-search a single
+owner and admit only that name, avoiding repeated reconstruction of wide cold
+directories. Consecutive distinct misses in one directory promote recovery to a
+batch even under pressure, so handle and name rewalks still amortize index I/O.
+Index reads and replacement writes release the node mutex, retain operation
+state and revalidate the
 namespace generation, ownership version and ancestor locations before eviction.
 NFSv4 prepares identity holds before its state transaction and releases them
 after unlocking; slow index I/O does not hold the global protocol state lock.

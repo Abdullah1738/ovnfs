@@ -485,25 +485,39 @@ func (t *nodeTable) readOwner(d *node, hash uint32) (string, bool) {
 	}
 }
 
-func (t *nodeTable) coldPathID(p string) (uint64, bool) {
+// issuedID finds an existing name without recovering unrelated cold owners.
+// Healthy ID requests admit partial results and batch dense rewalks; transient
+// callers leave admission and mutation preparation to their own operations.
+func (t *nodeTable) issuedID(p string, admit bool) (uint64, bool) {
 	dir, name := split(p)
 	for {
 		if n := t.find(p); n != nil {
+			if n.parent != nil {
+				t.touch(n.parent)
+			}
 			return n.id, true
 		}
 		if id, ok := t.leafID(p); ok {
+			t.touch(t.find(dir))
 			return id, true
 		}
 		d := t.find(dir)
-		if d == nil || d.dir == nil || !d.dir.cold {
+		if d == nil || d.dir == nil || !d.dir.cold || d.dir.coldLoaded {
 			return 0, false
 		}
-		owner, valid := t.readOwner(d, nameHash(name))
-		if n := t.find(p); n != nil {
-			return n.id, true
+		h := nameHash(name)
+		if admit && t.batchRecovery(d, h) {
+			if !t.loadCold(d) && t.cacheErr != nil {
+				return 0, false
+			}
+			continue
 		}
-		if id, ok := t.leafID(p); ok {
-			return id, true
+		owner, valid := t.readOwner(d, h)
+		if t.find(p) != nil {
+			continue
+		}
+		if _, ok := t.leafID(p); ok {
+			continue
 		}
 		if !valid {
 			if t.cacheErr != nil {
@@ -514,8 +528,10 @@ func (t *nodeTable) coldPathID(p string) (uint64, bool) {
 		if t.find(dir) != d {
 			continue
 		}
-		h := nameHash(name)
 		if owner == name && !t.takenExceptCold(d, h) {
+			if admit && t.spillErr == nil {
+				t.addLeaf(d, owner)
+			}
 			return derivedID(d.key, h), true
 		}
 		return 0, false
