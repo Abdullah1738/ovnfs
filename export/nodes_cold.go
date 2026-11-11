@@ -19,7 +19,12 @@ import (
 // Each file is a sorted array of 16-byte (hash, name length, offset) records,
 // followed by name bytes. Recovery reads at most one directory at a time.
 func (t *nodeTable) coldPath(d *node) string {
-	return filepath.Join(t.coldRoot, strconv.FormatUint(d.key, 10))
+	return coldIndexPath(t.coldRoot, d.key)
+}
+
+// Low key bits distribute consecutive directory keys across 256 shards.
+func coldIndexPath(root string, key uint64) string {
+	return filepath.Join(root, fmt.Sprintf("%02x", key&255), strconv.FormatUint(key, 10))
 }
 
 // readColdName searches the sorted index without allocating its other owners.
@@ -176,7 +181,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	}
 	gen, version, location := s.gen, s.version, nodeLocation(d)
 	resident := !s.cold || s.coldLoaded
-	root, key := t.coldRoot, d.key
+	target := t.coldPath(d)
 	s.indexing = &coldOperation{done: make(chan struct{})}
 	s.reading++
 	t.mu.Unlock()
@@ -184,7 +189,12 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	if t.indexIO != nil {
 		t.indexIO()
 	}
-	file, size, err := writeColdNames(root, names)
+	err = os.MkdirAll(filepath.Dir(target), 0700)
+	var file string
+	var size int64
+	if err == nil {
+		file, size, err = writeColdNames(filepath.Dir(target), names)
+	}
 	t.mu.Lock()
 	s.reading--
 	close(s.indexing.done)
@@ -205,7 +215,7 @@ func (t *nodeTable) spillNames(d *node) (bool, error) {
 	s.indexing = &coldOperation{done: make(chan struct{})}
 	s.reading++
 	t.mu.Unlock()
-	err = os.Rename(file, filepath.Join(root, strconv.FormatUint(key, 10)))
+	err = os.Rename(file, target)
 	if err != nil {
 		os.Remove(file)
 	}

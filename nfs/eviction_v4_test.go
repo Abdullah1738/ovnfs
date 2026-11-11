@@ -357,7 +357,7 @@ func TestV4EvictingExport(t *testing.T) {
 	// Released unlogged state must really leave memory. Corrupt its exact
 	// cold store only now; Path would succeed if the node were still pinned.
 	key := expireID >> 22 & ((1 << 30) - 1)
-	indexes, _ := filepath.Glob(filepath.Join(state, "nodes.log.cache", "instance-*", fmt.Sprint(key)))
+	indexes, _ := filepath.Glob(filepath.Join(state, "nodes.log.cache", "instance-*", fmt.Sprintf("%02x", key&255), fmt.Sprint(key)))
 	if len(indexes) != 1 {
 		t.Fatal(indexes)
 	}

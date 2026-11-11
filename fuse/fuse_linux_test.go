@@ -560,7 +560,7 @@ func TestIndexFaultBlocksTruncate(t *testing.T) {
 	nodes.ID("alpha/pressure/file")
 	nodes.ID("beta/d/file")
 	nodes.ID("beta/pressure/file")
-	files, err := filepath.Glob(filepath.Join(f.state, "nodes.log.cache", "instance-*", "*"))
+	files, err := filepath.Glob(filepath.Join(f.state, "nodes.log.cache", "instance-*", "*", "*"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("cold indexes: %v %v", files, err)
 	}

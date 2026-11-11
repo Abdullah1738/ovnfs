@@ -69,7 +69,7 @@ func Cold(t testing.TB, state string, id uint64, name string) {
 	}
 	key := id >> 22 & ((1 << 30) - 1)
 	hash := uint32(id & ((1 << 22) - 1))
-	files, _ := filepath.Glob(filepath.Join(state, "nodes.log.cache", "instance-*", fmt.Sprint(key)))
+	files, _ := filepath.Glob(filepath.Join(state, "nodes.log.cache", "instance-*", fmt.Sprintf("%02x", key&255), fmt.Sprint(key)))
 	if len(files) != 1 {
 		t.Fatalf("cold index for %x: %v", id, files)
 	}

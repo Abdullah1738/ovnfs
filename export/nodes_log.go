@@ -60,15 +60,10 @@ func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*
 	if err != nil {
 		return nil, err
 	}
-	// The registry owns the state lock before opening the export. No other
-	// daemon can use this log or its disposable indexes; distinct logs use
-	// distinct directories. Reclaim indexes abandoned by a crashed instance.
+	// The registry owns the state lock before opening the export. Distinct
+	// logs use distinct stores; no previous instance's owners are trusted.
 	t.coldParent = name + ".cache"
-	if err = os.RemoveAll(t.coldParent); err != nil {
-		t.log.Close()
-		return nil, err
-	}
-	if err = os.MkdirAll(t.coldParent, 0700); err != nil {
+	if err = t.openColdStore(); err != nil {
 		t.log.Close()
 		return nil, err
 	}
@@ -378,6 +373,9 @@ func (t *nodeTable) syncLoop() {
 // close stops the flush worker and makes every appended operation durable.
 func (t *nodeTable) close() error {
 	t.closeOnce.Do(func() {
+		if t.coldStop != nil {
+			close(t.coldStop) // reclamation never delays the next daemon
+		}
 		if t.stop != nil {
 			close(t.stop)
 			<-t.done
@@ -392,11 +390,12 @@ func (t *nodeTable) close() error {
 				t.logErr = err
 			}
 		}
-		if t.coldRoot != "" {
-			if err := os.RemoveAll(t.coldRoot); err != nil {
-				t.cacheFailure(err)
-			}
+		if t.coldParent == "" && t.coldRoot != "" {
+			// Tables without a log own a private temporary store, not state.
+			go os.RemoveAll(t.coldRoot)
 		}
+		// State-backed indexes stay in place until the next open detaches
+		// them. Neither deletion nor its completion holds up close.
 	})
 	return errors.Join(t.logErr, t.cacheErr)
 }

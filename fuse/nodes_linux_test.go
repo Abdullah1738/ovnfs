@@ -105,7 +105,7 @@ func TestLookupColdFaultInsideOperation(t *testing.T) {
 	e.SetNodeCache(0)
 	x.nodes.ID("co/a/file")
 	x.nodes.ID("co/b/file")
-	files, err := filepath.Glob(filepath.Join(state, "nodes.log.cache", "instance-*", "*"))
+	files, err := filepath.Glob(filepath.Join(state, "nodes.log.cache", "instance-*", "*", "*"))
 	if err != nil || len(files) == 0 {
 		t.Fatal(files, err)
 	}

@@ -249,10 +249,19 @@ The index lives in an instance directory below `STATE/nodes.log.cache`, on
 its state volume, rather than `$TMPDIR`: system temporary storage may be tmpfs
 and consume RAM, or be removed by temporary-file cleaners during a long run.
 Keep the state directory on a disk-backed filesystem to bound memory use. The
-registry's state lock excludes other daemons before startup reclaims abandoned
-instances; independent state directories have independent stores. Planned close
-removes the instance. These files hold names only, never file contents, and are
-not part of the identity log. Status reports their bytes as `node index`
+registry's state lock excludes other daemons before startup moves the previous
+cache tree into `nodes.log.cache.discard/store-*`. A fresh cache never
+reads previous owners. The move does not visit index files; a background worker
+reclaims detached trees in bounded batches and resumes abandoned cleanup on the
+next start. Close cancels that worker without waiting and leaves its instance
+for the next open. Cleanup errors leave garbage for a later start without
+faulting live owners. Independent logs have independent cache and discard trees.
+Owner files are sharded into 256 directories by the low eight bits of the
+logged directory key, so consecutive keys spread evenly. Each file and its
+replacement temporary file stay in the same shard; no index file stays open
+between operations. These files hold names only, never file contents, and are
+not part of the identity log. Status reports only the current instance's bytes
+as `node index`
 (`node_index_bytes` in JSON), separately from the resident estimate and RSS.
 Rewalks restore one directory's issued owners with one index read, accounted
 against the same budget. Retained handles and already-issued names batch when

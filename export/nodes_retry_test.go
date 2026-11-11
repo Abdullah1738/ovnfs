@@ -107,16 +107,21 @@ func TestColdStoreLifecycle(t *testing.T) {
 		t.Fatal(nt.coldRoot)
 	}
 	var size int64
-	entries, err := os.ReadDir(nt.coldRoot)
+	err := filepath.WalkDir(nt.coldRoot, func(path string, e os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !e.IsDir() {
+			info, err := e.Info()
+			if err != nil {
+				return err
+			}
+			size += info.Size()
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
-			t.Fatal(err)
-		}
-		size += info.Size()
 	}
 	if size == 0 || size != nt.coldBytes {
 		t.Fatalf("index size %d != %d", size, nt.coldBytes)
@@ -128,7 +133,12 @@ func TestColdStoreLifecycle(t *testing.T) {
 	}
 	cold := nt.coldRoot
 	closeLogged(t, nt)
+	if _, err := os.Stat(cold); err != nil {
+		t.Fatal("planned close touched store", err)
+	}
+	nt = openLogged(t, name, ns)
+	defer closeLogged(t, nt)
 	if _, err := os.Stat(cold); !os.IsNotExist(err) {
-		t.Fatal("planned close retained store", err)
+		t.Fatal("reopen retained previous store", err)
 	}
 }

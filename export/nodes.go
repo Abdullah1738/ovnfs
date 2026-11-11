@@ -63,6 +63,8 @@ type nodeTable struct {
 	coldInit     bool
 	coldRoot     string
 	coldParent   string
+	coldStop     chan struct{}
+	reclaimIO    func() // optional reclamation barrier
 	coldBytes    int64
 	coldGarbage  []coldGarbage
 	recoveryKey  uint64 // recent consecutive cold-handle misses
