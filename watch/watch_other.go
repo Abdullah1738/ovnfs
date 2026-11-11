@@ -8,7 +8,7 @@ import "errors"
 type Watcher struct{}
 
 // New reports errors.ErrUnsupported: no change-notification backend exists here.
-func New(fn func(paths []string)) (*Watcher, error) { return nil, errors.ErrUnsupported }
+func New(fn func(changes []Change)) (*Watcher, error) { return nil, errors.ErrUnsupported }
 
 // Add reports errors.ErrUnsupported.
 func (w *Watcher) Add(dir string) error { return errors.ErrUnsupported }

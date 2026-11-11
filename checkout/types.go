@@ -124,10 +124,11 @@ type Config struct {
 	// BlobCache bounds the bytes of small store blobs served from memory; 0 disables it.
 	BlobCache int64
 	// Invalidate reports checkout paths the daemon changed behind the file
-	// protocols (pull, reattach, edits in a source folder's live paths; nil
-	// paths: anything in the checkout), so the export recalls clients' caches.
-	// It is called without registry locks held.
-	Invalidate func(checkout string, paths []string)
+	// protocols (pull, reattach, edits in a source folder's live paths), and
+	// trees changed anywhere at or below them ("" for the whole checkout), so
+	// the export recalls clients' caches. It is called without registry locks
+	// held.
+	Invalidate func(checkout string, paths, trees []string)
 	// GitRemotes gives a source repository a git remote ovnfs/<name> for each
 	// live checkout of it (see Registry.syncRemotes); off, ovnfs removes them.
 	GitRemotes bool

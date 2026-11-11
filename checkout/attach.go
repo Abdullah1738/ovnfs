@@ -233,7 +233,7 @@ func (r *Registry) AttachRemote(ctx context.Context, o peer.Offer) (api.Checkout
 			r.mu.Unlock()
 			if err == nil {
 				// The new base changes whatever the upper does not shadow.
-				r.invalidate(name, nil)
+				r.invalidate(name, nil, []string{""})
 				r.mirror.want(o.Origins)
 			}
 			return reply, err

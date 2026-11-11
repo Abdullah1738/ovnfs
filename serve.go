@@ -216,9 +216,9 @@ func (cmd *serveCmd) Run(c *cli) error {
 				e.Retire(name)
 			}
 		},
-		Invalidate: func(name string, paths []string) {
+		Invalidate: func(name string, paths, trees []string) {
 			if x := exported.Load(); x != nil {
-				x.Invalidate(name, paths)
+				x.Invalidate(name, paths, trees)
 			}
 		},
 		Changed: func(name string, added bool) {

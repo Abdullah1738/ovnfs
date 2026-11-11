@@ -20,9 +20,11 @@ type recorder struct {
 	paths []string
 }
 
-func (r *recorder) fn(paths []string) {
+func (r *recorder) fn(changes []Change) {
 	r.mu.Lock()
-	r.paths = append(r.paths, paths...)
+	for _, c := range changes {
+		r.paths = append(r.paths, c.Path)
+	}
 	r.mu.Unlock()
 }
 
@@ -58,7 +60,7 @@ func soon(cond func() bool) bool {
 	return true
 }
 
-func start(t *testing.T, fn func([]string)) *Watcher {
+func start(t *testing.T, fn func([]Change)) *Watcher {
 	t.Helper()
 	w, err := New(fn)
 	if err != nil {
@@ -356,7 +358,7 @@ func TestCloseWaitsForCallback(t *testing.T) {
 	release := make(chan struct{})
 	var calls sync.Mutex
 	n := 0
-	w := start(t, func([]string) {
+	w := start(t, func([]Change) {
 		calls.Lock()
 		n++
 		calls.Unlock()

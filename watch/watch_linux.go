@@ -55,9 +55,9 @@ type node struct {
 	missed []string         // paths below it, relative, that changed while it was renamed away
 }
 
-// New starts a watcher that calls fn with batches of changed paths; fn runs on
+// New starts a watcher that calls fn with batches of changes; fn runs on
 // one goroutine at a time and must not block for long or call Close.
-func New(fn func(paths []string)) (*Watcher, error) {
+func New(fn func(changes []Change)) (*Watcher, error) {
 	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
 	if err != nil {
 		return nil, os.NewSyscallError("inotify_init1", err)

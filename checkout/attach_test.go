@@ -88,7 +88,7 @@ func TestReattachKeepsCacheAndHandles(t *testing.T) {
 			if second.Name != first.Name || second.Path != first.Path {
 				t.Fatalf("lane moved: %+v -> %+v", first, second)
 			}
-			if !slices.ContainsFunc(dst.invalidations(), func(i invalidation) bool { return i.checkout == second.Name && i.paths == nil }) {
+			if !slices.ContainsFunc(dst.invalidations(), func(i invalidation) bool { return i.checkout == second.Name && i.whole() }) {
 				t.Fatal("reattach swapped the base without invalidating the checkout")
 			}
 			s, err = dst.reg.Enter(second.Name)

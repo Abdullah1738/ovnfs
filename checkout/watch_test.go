@@ -2,8 +2,35 @@ package checkout
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/stencil-hq/ovnfs/watch"
 )
+
+// TestFolderRescanInvalidatesOnlyItsTree keeps a rescan deep in a cache
+// directory to that subtree: widening it to the whole checkout rechecks every
+// handle the checkout ever issued.
+func TestFolderRescanInvalidatesOnlyItsTree(t *testing.T) {
+	f := newFixture(t)
+	dir := folder(t, map[string]string{"src/main": "one", "target/debug/out": "one"})
+	f.newCheckout(dir, "app", "cache dir & target")
+	f.reg.mu.RLock()
+	root := f.reg.checkouts["app"].base.view.Meta().Dir
+	f.reg.mu.RUnlock()
+
+	n := len(f.invalidations())
+	f.reg.folderChanged([]watch.Change{{Path: filepath.Join(root, "target", "debug"), Tree: true}})
+	got := f.invalidations()[n:]
+	if len(got) != 1 || got[0].whole() || !slices.Equal(got[0].trees, []string{"target/debug"}) {
+		t.Fatalf("invalidations = %+v, want only the tree target/debug", got)
+	}
+
+	f.reg.folderChanged([]watch.Change{{Path: root, Tree: true}})
+	if got := f.invalidations()[n+1:]; len(got) != 1 || !got[0].whole() {
+		t.Fatalf("invalidations = %+v, want the folder root to invalidate the whole checkout", got)
+	}
+}
 
 // TestFolderEditsInvalidateLivePaths recalls clients' caches of cache paths
 // edited in the source folder, while captured source stays pinned and is

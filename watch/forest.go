@@ -44,7 +44,7 @@ type forest[T comparable] struct {
 	closed bool
 }
 
-func (f *forest[T]) init(be backend[T], fn func(paths []string)) {
+func (f *forest[T]) init(be backend[T], fn func(changes []Change)) {
 	f.be = be
 	f.dirs = map[string]string{}
 	f.tops = map[string]T{}

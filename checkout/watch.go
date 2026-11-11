@@ -3,6 +3,8 @@ package checkout
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/stencil-hq/ovnfs/watch"
 )
 
 // Tracked reports whether every change to path p of checkout name reaches the
@@ -22,12 +24,13 @@ func (r *Registry) Tracked(name, p string) bool {
 	return r.watcher != nil && r.watcher.Covers(h.base.view.Meta().Dir)
 }
 
-// invalidate reports daemon-side changes to checkout paths (nil: anything in
-// it) so the export can recall clients' cached copies. Callers hold no
-// registry locks: the export reads the checkout to retire vanished paths.
-func (r *Registry) invalidate(name string, paths []string) {
+// invalidate reports daemon-side changes to checkout paths, and anywhere in
+// trees ("" for the whole checkout), so the export can recall clients' cached
+// copies. Callers hold no registry locks: the export reads the checkout to
+// retire vanished paths.
+func (r *Registry) invalidate(name string, paths, trees []string) {
 	if r.config.Invalidate != nil {
-		r.config.Invalidate(name, paths)
+		r.config.Invalidate(name, paths, trees)
 	}
 }
 
@@ -103,11 +106,17 @@ func (r *Registry) addWatchLocked(dir string) {
 
 // folderChanged records folder edits that can change a capture (see reuseFolder), and
 // maps them to the checkouts whose live paths show them and invalidates those
-// paths. A reported folder root means individual events
-// were lost, so every checkout on that folder is invalidated whole.
-func (r *Registry) folderChanged(paths []string) {
-	changed := make(map[string][]string) // checkout -> changed paths, nil for all
+// paths. A tree change invalidates that subtree of every checkout on the folder
+// (it may hold live paths below captured ones); a reported folder root means
+// the folder's events were lost, so those checkouts are invalidated whole.
+func (r *Registry) folderChanged(changes []watch.Change) {
+	changed := make(map[string][]string) // checkout -> changed paths
+	trees := make(map[string][]string)   // checkout -> changed subtrees
 	whole := make(map[string]bool)
+	paths := make([]string, len(changes))
+	for i, c := range changes {
+		paths[i] = c.Path
+	}
 	r.mu.RLock()
 	r.foldersChangedLocked(paths)
 	users := make(map[*baseRecord][]string)
@@ -121,8 +130,8 @@ func (r *Registry) folderChanged(paths []string) {
 		if m.Remote != nil || m.Dir == "" {
 			continue
 		}
-		for _, p := range paths {
-			rel, ok := below(m.Dir, p)
+		for _, c := range changes {
+			rel, ok := below(m.Dir, c.Path)
 			if !ok {
 				continue
 			}
@@ -130,6 +139,8 @@ func (r *Registry) folderChanged(paths []string) {
 				switch {
 				case rel == "":
 					whole[name] = true
+				case c.Tree:
+					trees[name] = append(trees[name], rel)
 				case b.view.Live(rel):
 					changed[name] = append(changed[name], rel)
 				}
@@ -139,10 +150,15 @@ func (r *Registry) folderChanged(paths []string) {
 	r.mu.RUnlock()
 	for name := range whole {
 		delete(changed, name)
-		r.invalidate(name, nil)
+		delete(trees, name)
+		r.invalidate(name, nil, []string{""})
 	}
 	for name, rels := range changed {
-		r.invalidate(name, rels)
+		r.invalidate(name, rels, trees[name])
+		delete(trees, name)
+	}
+	for name, rels := range trees {
+		r.invalidate(name, nil, rels)
 	}
 }
 

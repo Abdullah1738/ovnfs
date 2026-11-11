@@ -77,23 +77,28 @@ func (n *nodeFS) Chtimes(name string, atime, mtime time.Time) error {
 func (e *Export) OnRecall(fn func(id uint64)) { e.fs.onRecall.Store(&fn) }
 
 // Invalidate recalls clients' cached copies of checkout paths the daemon
-// changed behind the file protocols (pull, reattach, folder edits; nil paths
-// cover the whole checkout). A path that no longer exists retires its node,
-// so old handles report stale instead of reaching a later file of that name.
-func (e *Export) Invalidate(checkout string, paths []string) {
+// changed behind the file protocols (pull, reattach, folder edits), and of
+// every handle issued at or below trees ("" covers the whole checkout). A path
+// that no longer exists retires its node, so old handles report stale instead
+// of reaching a later file of that name.
+func (e *Export) Invalidate(checkout string, paths, trees []string) {
 	var targets []nodeRef
-	if paths == nil {
-		e.fs.nodes.unlist(checkout, true)
-		targets = e.fs.nodes.subtree(checkout)
-	} else {
-		for _, p := range paths {
-			full := path.Join(checkout, p)
+	for _, t := range trees {
+		full := path.Join(checkout, t)
+		e.fs.nodes.unlist(full, true)
+		if t != "" {
 			dir, _ := split(full)
-			e.fs.nodes.unlist(full, false)
 			e.fs.nodes.unlist(dir, false)
-			if id, ok := e.fs.nodes.lookup(full); ok {
-				targets = append(targets, nodeRef{id: id, path: full})
-			}
+		}
+		targets = append(targets, e.fs.nodes.subtree(full)...)
+	}
+	for _, p := range paths {
+		full := path.Join(checkout, p)
+		dir, _ := split(full)
+		e.fs.nodes.unlist(full, false)
+		e.fs.nodes.unlist(dir, false)
+		if id, ok := e.fs.nodes.lookup(full); ok {
+			targets = append(targets, nodeRef{id: id, path: full})
 		}
 	}
 	if fn := e.fs.onRecall.Load(); fn != nil {

@@ -40,6 +40,33 @@ func (r *recorder) has(fh []byte) bool {
 	return found
 }
 
+// TestInvalidateTreeRecallsOnlyThatSubtree recalls every handle below a changed
+// tree and none beside it: a rescan deep in a build directory must not recheck
+// every handle the checkout ever issued.
+func TestInvalidateTreeRecallsOnlyThatSubtree(t *testing.T) {
+	f := newStack(t, map[string]string{"t/d/x": "1", "s": "2"})
+	f.create(t, "app")
+	var rec recorder
+	f.export.OnRecall(rec.add)
+	c := nfstest.Start(t, f.export.NFS())
+	x := lookup(t, c, "app/t/d/x")
+	s := lookup(t, c, "app/s")
+	rec.has(nil)
+
+	f.export.Invalidate("app", nil, []string{"t"})
+	if !rec.has(x) {
+		t.Fatal("a tree invalidation did not recall a handle below it")
+	}
+	f.export.Invalidate("app", nil, []string{"t"})
+	if rec.has(s) {
+		t.Fatal("a tree invalidation recalled a handle outside it")
+	}
+	f.export.Invalidate("app", nil, []string{""})
+	if !rec.has(s) {
+		t.Fatal("invalidating the whole checkout missed a handle")
+	}
+}
+
 // TestRecallsChangesBehindNFSClients covers every way a file changes without
 // an NFS request: another protocol, the daemon (Invalidate), and checkout
 // removal, while NFS requests leave recalls to the NFS server. Vanished paths retire
@@ -77,7 +104,7 @@ func TestRecallsChangesBehindNFSClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.export.Invalidate("app", []string{"gone", "never-handed-out"})
+	f.export.Invalidate("app", []string{"gone", "never-handed-out"}, nil)
 	if !rec.has(gone) {
 		t.Fatal("Invalidate did not recall the changed path")
 	}

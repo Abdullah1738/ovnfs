@@ -56,9 +56,9 @@ type top struct {
 	stop bool   // dropped: release once the request completes
 }
 
-// New starts a watcher that calls fn with batches of changed paths; fn runs on
+// New starts a watcher that calls fn with batches of changes; fn runs on
 // one goroutine at a time and must not block for long or call Close.
-func New(fn func(paths []string)) (*Watcher, error) {
+func New(fn func(changes []Change)) (*Watcher, error) {
 	port, err := windows.CreateIoCompletionPort(windows.InvalidHandle, 0, 0, 1)
 	if err != nil {
 		return nil, os.NewSyscallError("CreateIoCompletionPort", err)
@@ -334,32 +334,41 @@ func parse(dir string, buf []byte) []event {
 // expand returns the event for name, changed below dir. The system reports
 // names as the changing call spelled them, which may use 8.3 short names;
 // those are replaced by long ones, or, for entries gone meanwhile, stand for
-// unknown changes.
+// unknown changes in the directory holding the first short name.
 func expand(dir, name string) event {
 	p := filepath.Join(dir, name)
-	if !short(name) {
+	known, ok := longPrefix(name)
+	if ok {
 		return event{p, changed}
 	}
 	if long, err := longPath(p); err == nil {
 		return event{long, changed}
 	}
-	return event{p, rescan}
+	return event{filepath.Join(dir, known), rescan}
 }
 
-// short reports whether a component of name looks like an 8.3 short name
-// (PROGRA~1, GITIGN~1.TXT), which long names hardly ever do.
-func short(name string) bool {
+// longPrefix returns the components of name before the first that looks like
+// an 8.3 short name (PROGRA~1, GITIGN~1.TXT), which long names hardly ever do,
+// and whether name has none.
+func longPrefix(name string) (string, bool) {
+	var known []string
 	for c := range strings.SplitSeq(name, `\`) {
-		base, ext, _ := strings.Cut(c, ".")
-		i := strings.LastIndexByte(base, '~')
-		if i < 1 || i == len(base)-1 || len(base) > 8 || len(ext) > 3 || strings.Contains(ext, ".") || c != strings.ToUpper(c) {
-			continue
+		if short(c) {
+			return filepath.Join(known...), false
 		}
-		if strings.Trim(base[i+1:], "0123456789") == "" {
-			return true
-		}
+		known = append(known, c)
 	}
-	return false
+	return name, true
+}
+
+// short reports whether path component c looks like an 8.3 short name.
+func short(c string) bool {
+	base, ext, _ := strings.Cut(c, ".")
+	i := strings.LastIndexByte(base, '~')
+	if i < 1 || i == len(base)-1 || len(base) > 8 || len(ext) > 3 || strings.Contains(ext, ".") || c != strings.ToUpper(c) {
+		return false
+	}
+	return strings.Trim(base[i+1:], "0123456789") == ""
 }
 
 // longPath returns p with short names replaced by long ones.

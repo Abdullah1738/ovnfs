@@ -100,7 +100,7 @@ func (r *Registry) MergePull(ctx context.Context, args api.PullArgs, from store.
 	}
 	reply, placed, err := r.mergePull(ctx, h, args, pulled, bases)
 	if len(placed) != 0 {
-		r.invalidate(args.Checkout, placed)
+		r.invalidate(args.Checkout, placed, nil)
 	}
 	if err != nil || args.DryRun {
 		return reply, err

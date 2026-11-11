@@ -47,9 +47,9 @@ var (
 	watcherSeq uintptr
 )
 
-// New starts a watcher that calls fn with batches of changed paths; fn runs on
+// New starts a watcher that calls fn with batches of changes; fn runs on
 // one goroutine at a time and must not block for long or call Close.
-func New(fn func(paths []string)) (*Watcher, error) {
+func New(fn func(changes []Change)) (*Watcher, error) {
 	dir, err := os.MkdirTemp("", "ovnfs-watch-")
 	if err != nil {
 		return nil, err

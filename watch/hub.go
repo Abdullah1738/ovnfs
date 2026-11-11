@@ -18,15 +18,27 @@ type root struct {
 	covered   bool // the backend currently sees every change below real
 }
 
-// item is a changed path, spelled under the watched dir it was found below.
-type item struct{ dir, path string }
+// Change is a changed path, spelled under the directory given to Add.
+type Change struct {
+	Path string
+	// Tree marks a change anywhere at or below Path whose individual paths are
+	// unknown (lost or coalesced events); a watched directory itself as Path
+	// means everything in it may have changed.
+	Tree bool
+}
+
+// item is a Change, kept with the watched dir it was found below.
+type item struct {
+	dir, path string
+	tree      bool
+}
 
 // kind is what a backend event tells about its path.
 type kind uint8
 
 const (
 	changed kind = iota // the path itself changed
-	rescan              // anything at, below or above the path may have changed
+	rescan              // anything at or below the path may have changed
 	dropped             // anything anywhere may have changed; the path is unused
 )
 
@@ -39,7 +51,7 @@ type event struct {
 // hub maps backend events to the watched dirs they concern and calls fn with
 // them, in order, on one goroutine; every backend's Watcher embeds one.
 type hub struct {
-	fn    func(paths []string)
+	fn    func(changes []Change)
 	roots atomic.Pointer[[]root] // stored by the backend whenever dirs or coverage change
 
 	mu        sync.Mutex
@@ -55,7 +67,7 @@ type hub struct {
 }
 
 // start begins delivering to fn.
-func (h *hub) start(fn func(paths []string)) {
+func (h *hub) start(fn func(changes []Change)) {
 	h.fn = fn
 	h.drained.L = &h.mu
 	h.wake = make(chan struct{}, 1)
@@ -114,7 +126,9 @@ func (h *hub) stop() {
 	<-h.exited
 }
 
-// deliver calls fn with each pending batch, in order, until stop.
+// deliver calls fn with everything pending, merged into one batch, until stop:
+// batches queued while fn runs cost one more call, not one each, and a tree
+// change absorbs the changes below it.
 func (h *hub) deliver() {
 	defer close(h.exited)
 	for {
@@ -129,39 +143,69 @@ func (h *hub) deliver() {
 				h.mu.Unlock()
 				break
 			}
-			b := h.pending[0]
-			h.pending[0] = nil
-			h.pending = h.pending[1:]
+			batches := h.pending
+			h.pending = nil
 			h.mu.Unlock()
-			if paths := h.live(b); len(paths) > 0 {
-				h.fn(paths)
+			if changes := h.live(slices.Concat(batches...)); len(changes) > 0 {
+				h.fn(changes)
 			}
 			h.mu.Lock()
-			h.delivered++
+			h.delivered += uint64(len(batches))
 			h.drained.Broadcast()
 			h.mu.Unlock()
 		}
 	}
 }
 
-// live returns b's paths below directories still watched, without duplicates.
-func (h *hub) live(b []item) []string {
+// live returns b's changes below directories still watched, without
+// duplicates or changes a tree change covers.
+func (h *hub) live(b []item) []Change {
 	roots := *h.roots.Load()
-	var paths []string
+	trees := map[string]bool{}
+	for _, it := range b {
+		if it.tree {
+			trees[it.path] = true
+		}
+	}
+	// covered reports whether a tree change at or above it.path (strictly
+	// above for a tree change itself) includes it.
+	covered := func(it item) bool {
+		p := it.path
+		if it.tree {
+			if p == it.dir {
+				return false
+			}
+			p = filepath.Dir(p)
+		}
+		for {
+			if trees[p] {
+				return true
+			}
+			if p == it.dir {
+				return false
+			}
+			parent := filepath.Dir(p)
+			if parent == p {
+				return false
+			}
+			p = parent
+		}
+	}
+	var changes []Change
 	seen := map[string]bool{}
 	for _, it := range b {
-		if seen[it.path] || !slices.ContainsFunc(roots, func(r root) bool { return r.dir == it.dir }) {
+		if seen[it.path] || covered(it) || !slices.ContainsFunc(roots, func(r root) bool { return r.dir == it.dir }) {
 			continue
 		}
 		seen[it.path] = true
-		paths = append(paths, it.path)
+		changes = append(changes, Change{Path: it.path, Tree: it.tree || trees[it.path]})
 	}
-	return paths
+	return changes
 }
 
 // batch maps events to changed paths spelled under the roots they lie below,
-// without duplicates. Events whose individual paths are unknown yield the
-// roots they concern.
+// without duplicates. A rescan below a root yields a tree change there; lost
+// events, and rescans at or above a root, yield the roots they concern.
 func batch(roots []root, evs []event) []item {
 	var out []item
 	seen := map[item]bool{}
@@ -173,7 +217,7 @@ func batch(roots []root, evs []event) []item {
 	}
 	all := func() {
 		for _, r := range roots {
-			add(item{r.dir, r.dir})
+			add(item{r.dir, r.dir, true})
 		}
 	}
 	for _, ev := range evs {
@@ -183,8 +227,11 @@ func batch(roots []root, evs []event) []item {
 		case rescan:
 			hit := false
 			for _, r := range roots {
-				if below(r.real, ev.path) || below(ev.path, r.real) {
-					add(item{r.dir, r.dir})
+				if rp, ok := rel(r.real, ev.path); ok {
+					add(item{r.dir, filepath.Join(r.dir, rp), true})
+					hit = true
+				} else if below(ev.path, r.real) {
+					add(item{r.dir, r.dir, true})
 					hit = true
 				}
 			}
@@ -194,7 +241,7 @@ func batch(roots []root, evs []event) []item {
 		default:
 			for _, r := range roots {
 				if rp, ok := rel(r.real, ev.path); ok {
-					add(item{r.dir, filepath.Join(r.dir, rp)})
+					add(item{r.dir, filepath.Join(r.dir, rp), false})
 				}
 			}
 		}

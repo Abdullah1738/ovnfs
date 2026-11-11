@@ -30,11 +30,14 @@ type fixture struct {
 	gitRemotes   bool           // Config.GitRemotes at the next open
 }
 
-// invalidation is one Config.Invalidate call; nil paths cover the whole checkout.
+// invalidation is one Config.Invalidate call; a "" tree covers the whole checkout.
 type invalidation struct {
-	checkout string
-	paths    []string
+	checkout     string
+	paths, trees []string
 }
+
+// whole reports whether i covers the whole checkout.
+func (i invalidation) whole() bool { return slices.Contains(i.trees, "") }
 
 // invalidations returns the Config.Invalidate calls recorded so far.
 func (f *fixture) invalidations() []invalidation {
@@ -43,10 +46,13 @@ func (f *fixture) invalidations() []invalidation {
 	return slices.Clone(f.invalidated)
 }
 
-// invalidatedPath reports whether p of checkout was invalidated, alone or with the whole checkout.
+// invalidatedPath reports whether p of checkout was invalidated, alone or in a tree.
 func (f *fixture) invalidatedPath(checkout, p string) bool {
 	for _, i := range f.invalidations() {
-		if i.checkout == checkout && (i.paths == nil || slices.Contains(i.paths, p)) {
+		if i.checkout == checkout && (slices.Contains(i.paths, p) || slices.ContainsFunc(i.trees, func(t string) bool {
+			_, ok := below(t, p)
+			return ok
+		})) {
 			return true
 		}
 	}
@@ -76,9 +82,9 @@ func newFixture(t *testing.T) *fixture {
 func (f *fixture) open() {
 	f.t.Helper()
 	reg, err := Open(Config{State: f.state, Mount: f.mount, Node: "n_" + filepath.Base(filepath.Dir(f.state)), Memory: overlay.NewMemory(64<<20, 1<<20, 0), BlobCache: 64 << 20, GitRemotes: f.gitRemotes,
-		Invalidate: func(checkout string, paths []string) {
+		Invalidate: func(checkout string, paths, trees []string) {
 			f.mu.Lock()
-			f.invalidated = append(f.invalidated, invalidation{checkout: checkout, paths: slices.Clone(paths)})
+			f.invalidated = append(f.invalidated, invalidation{checkout: checkout, paths: slices.Clone(paths), trees: slices.Clone(trees)})
 			f.mu.Unlock()
 		}})
 	if err != nil {
