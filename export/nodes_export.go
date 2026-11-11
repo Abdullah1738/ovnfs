@@ -21,11 +21,7 @@ func New(rt *Router, nodesLog, upperVolume string) (*Export, error) {
 // Retire invalidates a checkout's directory and every descendant handle,
 // recalling clients' cached copies first while the handles still resolve.
 func (e *Export) Retire(name string) {
-	if fn := e.fs.onRecall.Load(); fn != nil {
-		for _, t := range e.fs.nodes.subtree(name) {
-			(*fn)(t.id)
-		}
-	}
+	e.fs.recallTree(name)
 	if e.rt != nil {
 		e.rt.retire(name)
 	}

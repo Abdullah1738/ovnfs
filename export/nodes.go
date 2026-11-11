@@ -2,7 +2,6 @@ package export
 
 import (
 	"os"
-	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -160,37 +159,31 @@ func (t *nodeTable) leafID(p string) (uint64, bool) {
 	return derivedID(d.key, nameHash(name)), true
 }
 
-// nodeRef is one issued id with its current path.
-type nodeRef struct {
-	id   uint64
-	path string
-}
-
-// subtree lists p and every issued descendant, parents before children.
-func (t *nodeTable) subtree(p string) []nodeRef {
+// subtree lists the ids issued for p and everything below it.
+func (t *nodeTable) subtree(p string) []uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := t.find(p)
 	if n == nil {
 		if id, ok := t.leafID(p); ok {
-			return []nodeRef{{id: id, path: p}}
+			return []uint64{id}
 		}
 		return nil
 	}
-	var out []nodeRef
-	var walk func(*node, string)
-	walk = func(n *node, p string) {
-		out = append(out, nodeRef{id: n.id, path: p})
-		for name, k := range n.kids {
-			walk(k, path.Join(p, name))
+	var out []uint64
+	var walk func(*node)
+	walk = func(n *node) {
+		out = append(out, n.id)
+		for _, k := range n.kids {
+			walk(k)
 		}
 		if s := n.dir; s != nil {
-			for h, name := range s.leaves {
-				out = append(out, nodeRef{id: derivedID(n.key, h), path: path.Join(p, name)})
+			for h := range s.leaves {
+				out = append(out, derivedID(n.key, h))
 			}
 		}
 	}
-	walk(n, p)
+	walk(n)
 	return out
 }
 

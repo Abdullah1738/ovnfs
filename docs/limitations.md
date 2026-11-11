@@ -29,9 +29,12 @@
   held in the daemon's memory, lost when it restarts. SMB has no hard links
   and no durable handles.
 - A file's id derives from its directory and name. Within one daemon run a
-  removed file's id is never reissued, but after a restart a file recreated
-  under the same name can take the id an NFS client still holds for the
-  removed one; a hash collision with a name created behind the export while
+  removed file's id is never reissued, unless the daemon could not tell which
+  paths changed (a reattach, or folder change events the watcher lost): it
+  then recalls every handle below the affected directory without checking
+  that its file still exists. In that case, and after a restart, a file
+  recreated under the same name can take the id an NFS client still holds for
+  the removed one; a hash collision with a name created behind the export while
   the daemon was down makes an earlier handle stale (`ESTALE`), never another
   file's.
 - NFSv3 cannot push cache invalidations: folder edits in cache and local

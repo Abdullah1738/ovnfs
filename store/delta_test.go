@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -120,6 +121,34 @@ func TestPutFileLikeFallsBack(t *testing.T) {
 	if got, ok := s.Cached(id); !ok || !bytes.Equal(got, other) {
 		t.Fatal("Cached of a plain object")
 	}
+}
+
+// TestEncodeDeltaReleasesLargeBase holds the pooled encoder across the
+// collections, so that the pool dropping it cannot pass for the encoder
+// letting go of the base's content.
+func TestEncodeDeltaReleasesLargeBase(t *testing.T) {
+	base := bytes.Clone(prose(5, deltaDefaultSpan+1))
+	data := edit(base, 1)
+	freed := make(chan struct{})
+	runtime.AddCleanup(&base[0], func(struct{}) { close(freed) }, struct{}{})
+	if _, err := encodeDelta(rawID{1}, data, rawID{2}, base, 0); err != nil {
+		t.Fatal(err)
+	}
+	enc, pool, err := deltaEncoder(len(base) + len(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Put(enc)
+	base = nil
+	for range 10 {
+		runtime.GC()
+		select {
+		case <-freed:
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	t.Fatal("a pooled delta encoder kept its base's content alive")
 }
 
 // TestSweepKeepsDeltaBases keeps the (old, unreachable) bases of a kept delta

@@ -26,6 +26,16 @@ func (n *nodeFS) recall(paths ...string) {
 	}
 }
 
+// recallTree recalls every id issued at or below export path p, without
+// checking that the paths still exist.
+func (n *nodeFS) recallTree(p string) {
+	if fn := n.onRecall.Load(); fn != nil {
+		for _, id := range n.nodes.subtree(p) {
+			(*fn)(id)
+		}
+	}
+}
+
 // OpenFile recalls cached copies before any open that may change the file.
 func (n *nodeFS) OpenFile(name string, flag int, perm os.FileMode) (billy.File, error) {
 	if flag&routerWriteFlags != 0 {
@@ -78,11 +88,14 @@ func (e *Export) OnRecall(fn func(id uint64)) { e.fs.onRecall.Store(&fn) }
 
 // Invalidate recalls clients' cached copies of checkout paths the daemon
 // changed behind the file protocols (pull, reattach, folder edits), and of
-// every handle issued at or below trees ("" covers the whole checkout). A path
-// that no longer exists retires its node, so old handles report stale instead
-// of reaching a later file of that name.
+// every handle issued at or below trees ("" covers the whole checkout).
+//
+// One of paths that no longer exists retires its node, so old handles report
+// stale instead of reaching a later file of that name. Handles below trees are
+// recalled unchecked, since checking costs a stat for every handle ever issued
+// there: one whose path is gone keeps its id, and fails with the backend's
+// error when a client next uses it.
 func (e *Export) Invalidate(checkout string, paths, trees []string) {
-	var targets []nodeRef
 	for _, t := range trees {
 		full := path.Join(checkout, t)
 		e.fs.nodes.unlist(full, true)
@@ -90,30 +103,30 @@ func (e *Export) Invalidate(checkout string, paths, trees []string) {
 			dir, _ := split(full)
 			e.fs.nodes.unlist(dir, false)
 		}
-		targets = append(targets, e.fs.nodes.subtree(full)...)
+		e.fs.recallTree(full)
 	}
+	fn := e.fs.onRecall.Load()
+	var issued []string
 	for _, p := range paths {
 		full := path.Join(checkout, p)
 		dir, _ := split(full)
 		e.fs.nodes.unlist(full, false)
 		e.fs.nodes.unlist(dir, false)
 		if id, ok := e.fs.nodes.lookup(full); ok {
-			targets = append(targets, nodeRef{id: id, path: full})
-		}
-	}
-	if fn := e.fs.onRecall.Load(); fn != nil {
-		for _, t := range targets {
-			(*fn)(t.id)
+			issued = append(issued, full)
+			if fn != nil {
+				(*fn)(id)
+			}
 		}
 	}
 	var gone []string
-	for _, t := range targets {
-		if under(t.path, gone) {
+	for _, p := range issued {
+		if under(p, gone) {
 			continue
 		}
-		if _, err := e.fs.Filesystem.Lstat(t.path); errors.Is(err, fs.ErrNotExist) {
-			e.fs.nodes.remove(t.path)
-			gone = append(gone, t.path)
+		if _, err := e.fs.Filesystem.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+			e.fs.nodes.remove(p)
+			gone = append(gone, p)
 		}
 	}
 }

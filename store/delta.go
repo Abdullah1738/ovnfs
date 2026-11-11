@@ -27,7 +27,8 @@ const deltaClasses = 8
 // deltaEncoders recycles single-goroutine encoders, which keep their match
 // tables between uses, per window class: an encoder's memory grows with its
 // window (a 32 MiB one holds over 100 MB), and the window cannot change on
-// reset. Each use installs its own dictionary.
+// reset. Each use installs its own dictionary, and releases a large one
+// afterwards (see releaseDict).
 var deltaEncoders [deltaClasses]sync.Pool
 
 // deltaEncoder returns a pooled encoder whose window covers span bytes and the
@@ -78,9 +79,31 @@ func encodeDelta(id rawID, data []byte, base rawID, dict []byte, at int64) ([]by
 	buf := make([]byte, frameHeader+len(base))
 	copy(buf[frameHeader:], base[:])
 	buf = enc.EncodeAll(data, buf)
+	if len(dict) > deltaDefaultSpan {
+		releaseDict(enc)
+	}
 	sealFrame(buf, id, frameZstd|frameDelta, len(data), at)
 	return buf, nil
 }
+
+// releaseDict makes enc let go of its dictionary's content, the whole of a
+// base, which a pooled encoder would otherwise keep alive until its next use.
+// encodeDelta leaves bases up to deltaDefaultSpan in place: they are smaller
+// than the encoder's own tables, and releasing one costs two table resets,
+// over half the time a small delta takes to encode.
+//
+// zstd.WithEncoderDictDelete does not release the content: it discards the
+// tables and history the pool exists to keep, while the encoder EncodeAll ran
+// on still references the dictionary. Both encoders inside enc drop one only
+// when reset with another, which EncodeAll does for its own given any input.
+func releaseDict(enc *zstd.Encoder) {
+	enc.ResetWithOptions(nil, zstd.WithEncoderDictRaw(0, nil)) // fails only for oversized content
+	var frame [32]byte
+	enc.EncodeAll(noDict, frame[:0])
+}
+
+// noDict is the input releaseDict encodes against the empty dictionary.
+var noDict = []byte{0}
 
 // decodeDelta rebuilds the content of object id from its checked delta frame
 // and the content of its base, verifying it hashes to id.
