@@ -18,15 +18,6 @@ type root struct {
 	covered   bool // the backend currently sees every change below real
 }
 
-// Change is a changed path, spelled under the directory given to Add.
-type Change struct {
-	Path string
-	// Tree marks a change anywhere at or below Path whose individual paths are
-	// unknown (lost or coalesced events); a watched directory itself as Path
-	// means everything in it may have changed.
-	Tree bool
-}
-
 // item is a Change, kept with the watched dir it was found below.
 type item struct {
 	dir, path string
