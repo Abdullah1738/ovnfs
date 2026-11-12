@@ -171,10 +171,16 @@ state lock is released, and `restart` holds the start lock throughout, so
 auto-starting clients wait for the new daemon rather than failing on the state
 lock. A starting daemon opens its admin socket before it loads its state, which
 takes minutes on a large state, and holds each hello until it has mounted: a
-client that arrives during the load waits for it, up to five minutes, rather
-than starting a second daemon. Shell completion gives up after a second.
+client that arrives during the load waits up to five minutes without loading progress (configurable with
+`--daemon-timeout`) rather than starting a second daemon. The additive `probe`
+handshake reports loading progress without exposing a partial registry; older
+hello clients still wait for full readiness. A timeout reports the holder and
+leaves it running. Increasing restored-record counts reset the idle budget,
+including for clients waiting on another starter's lock. Shell completion gives up after a second.
 Daemons starting together take turns replacing a stale socket, so only one
 listens, and a client whose daemon fails its load quotes the daemon's log.
+
+SIGTERM keeps NFS and SMB mounted for a replacement daemon, including when recovery escalates to KILL. Explicit `stop` and SIGINT unmount. On macOS, shutdown and recovery unmount helpers leave a durable receipt; every serving entry checks it before loading or mounting, so a blocked old helper cannot remove a replacement mount later.
 Metadata uses `fsync(2)`, not `F_FULLFSYNC`: it survives server crashes, not
 power loss. `state.json` is synced after its rename, so a kernel crash during
 that sync can leave it empty on filesystems that do not order data before

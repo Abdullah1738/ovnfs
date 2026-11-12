@@ -121,11 +121,13 @@ func Serve(l net.Listener, w Welcome, h Handler, events func(context.Context) <-
 // answer. Serve accepts each connection at once, so the socket shows a
 // starting daemon, and holds its hello until Ready supplies the welcome.
 type Server struct {
-	ready  chan struct{}
-	closed chan struct{}
-	w      Welcome
-	h      Handler
-	events func(context.Context) <-chan Event
+	progressMu sync.Mutex
+	progress   Loading
+	ready      chan struct{}
+	closed     chan struct{}
+	w          Welcome
+	h          Handler
+	events     func(context.Context) <-chan Event
 }
 
 // NewServer returns a server that holds every hello until Ready.
@@ -158,6 +160,23 @@ func (s *Server) serveConn(conn net.Conn) {
 	if err := CheckPeer(conn); err != nil {
 		return
 	}
+	first, err := readFrame(conn)
+	if err != nil || len(first) != 1 {
+		return
+	}
+	if _, ok := first["probe"]; ok {
+		s.progressMu.Lock()
+		p := s.progress
+		s.progressMu.Unlock()
+		ready := false
+		select {
+		case <-s.ready:
+			ready = true
+		default:
+		}
+		_ = writeFrame(conn, map[string]any{"loading": p, "ready": ready})
+		return
+	}
 	select {
 	case <-s.ready:
 	case <-s.closed:
@@ -176,10 +195,6 @@ func (s *Server) serveConn(conn net.Conn) {
 			conn.Close()
 		}
 		return err
-	}
-	first, err := readFrame(conn)
-	if err != nil || len(first) != 1 {
-		return
 	}
 	hello, ok := first["hello"]
 	if !ok || !isObject(hello) {
@@ -348,10 +363,18 @@ type Client struct {
 
 // Dial connects and completes hello/welcome negotiation.
 func Dial(path, client string) (*Client, error) {
-	conn, err := net.Dial("unix", path)
+	return DialContext(context.Background(), path, client)
+}
+
+// DialContext bounds both connecting and hello/welcome negotiation, including
+// a listener whose process is stopped or has stopped reading requests.
+func DialContext(ctx context.Context, path, client string) (*Client, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
 		return nil, err
 	}
+	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancel()
 	if err = writeFrame(conn, map[string]any{"hello": map[string]string{"client": client}}); err != nil {
 		conn.Close()
 		return nil, err
@@ -367,6 +390,10 @@ func Dial(path, client string) (*Client, error) {
 		}
 	}
 	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		conn.Close()
 		return nil, err
 	}

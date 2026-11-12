@@ -9,8 +9,14 @@ type Export struct {
 
 // New opens the persistent node log and wraps the checkout router.
 func New(rt *Router, nodesLog, upperVolume string) (*Export, error) {
+	return NewWithLoading(rt, nodesLog, upperVolume, nil)
+}
+
+// NewWithLoading reports bytes replayed from the identity log independently of
+// registry restoration; loading clients can distinguish progress from a wedge.
+func NewWithLoading(rt *Router, nodesLog, upperVolume string, loading func(int, int)) (*Export, error) {
 	fs := &nodeFS{Filesystem: rt, Change: rt}
-	nodes, err := openNodeTable(nodesLog, rt.ReadDir)
+	nodes, err := openNodeTableWithLoading(nodesLog, rt.ReadDir, loading)
 	if err != nil {
 		return nil, err
 	}

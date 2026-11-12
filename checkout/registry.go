@@ -103,6 +103,15 @@ func Open(c Config) (*Registry, error) {
 	r.node = c.Node
 	r.mounts = mountPaths(c.Mount)
 	r.mirror = newMirror(filepath.Join(c.State, "mirror.git"), func(message string) { r.enqueueNotice(baseNotice{fault: message}) })
+	total := len(d.Bases) + len(d.Layers) + len(d.Checkouts) + len(d.Snapshots)
+	completed := 0
+	progress := func() {
+		if c.Loading != nil {
+			c.Loading(completed, total)
+		}
+		completed++
+	}
+	progress()
 	cleanup := func() {
 		for _, b := range r.bases {
 			b.view.Close()
@@ -126,6 +135,7 @@ func Open(c Config) (*Registry, error) {
 			return nil, coded(openErr)
 		}
 		r.bases[meta.ID] = b
+		progress()
 		if meta.Remote != nil {
 			r.mirror.want(meta.Remote.Origins)
 		}
@@ -150,6 +160,7 @@ func Open(c Config) (*Registry, error) {
 		// A small manifest file left by a crash or an older build moves into state below.
 		embedded := len(disk.Metadata) != 0 || embeddable(layer)
 		r.layers[disk.ID] = &layerRecord{id: disk.ID, base: disk.Base, layer: layer, portable: disk.Portable, embedded: embedded}
+		progress()
 	}
 	for _, disk := range d.Checkouts {
 		b := r.bases[disk.Base]
@@ -180,6 +191,7 @@ func Open(c Config) (*Registry, error) {
 			h.wrote.Store(disk.Wrote.UnixNano())
 		}
 		r.checkouts[disk.Name] = h
+		progress()
 		r.retainLocked(b, h.stack)
 	}
 	for _, disk := range d.Snapshots {
@@ -200,6 +212,7 @@ func Open(c Config) (*Registry, error) {
 			r.hashes.Add(1)
 		}
 		r.lineage[disk.ID] = s
+		progress()
 		if !disk.Dropped {
 			r.snapshots[disk.ID] = s
 			r.retainLocked(b, s.stack)

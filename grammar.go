@@ -14,6 +14,7 @@ import (
 	kongcompletion "github.com/jotaen/kong-completion"
 	"github.com/posener/complete"
 
+	"github.com/stencil-hq/ovnfs/admin"
 	"github.com/stencil-hq/ovnfs/api"
 	"github.com/stencil-hq/ovnfs/manifest"
 )
@@ -30,6 +31,7 @@ var globalFlags = []struct {
 	{"state", "DIR", "daemon state, env OVNFS_STATE, state in ~/.o2/ovnfs.yml (default " + defaultState + ")"},
 	{"mount", "DIR", "checkout mount (a free drive letter on Windows), env OVNFS_MOUNT, mount in ~/.o2/ovnfs.yml (default " + defaultMount + ")"},
 	{"json", "", "print the raw reply JSON"},
+	{"daemon-timeout", "DURATION", "maximum wait without loading progress (default 5m); never replaces a live holder on timeout"},
 	{"color", "WHEN", "colour the output: auto on a terminal, always or never (NO_COLOR is honored)"},
 }
 
@@ -69,9 +71,13 @@ func splitGlobals(c *cli, args []string) ([]string, error) {
 	fs.StringVar(&c.state, "state", c.state, "")
 	fs.StringVar(&c.mount, "mount", c.mount, "")
 	fs.BoolVar(&c.json, "json", c.json, "")
+	fs.DurationVar(&c.daemonTimeout, "daemon-timeout", serveLoadWait, "")
 	fs.StringVar(&c.color, "color", "auto", "")
 	if err := fs.Parse(globals); err != nil {
 		return nil, err
+	}
+	if c.daemonTimeout <= 0 {
+		return nil, fmt.Errorf("daemon-timeout must be positive")
 	}
 	return rest, nil
 }
@@ -242,7 +248,7 @@ func (c *cli) completeCall(op string, args any) (json.RawMessage, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), completeWait)
 	defer cancel()
-	client, err := awaitDaemon(ctx, c.state, 0, nil)
+	client, err := admin.DialContext(ctx, socketPath(c.state), adminProtocol)
 	if err != nil {
 		return nil, false
 	}

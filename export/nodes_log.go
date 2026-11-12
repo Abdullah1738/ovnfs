@@ -35,6 +35,10 @@ var errNodeLog = errors.New("invalid node identity log")
 // identities. A log of the earlier JSON format contributes only its counter
 // watermark: its ids go stale rather than ever naming another file.
 func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*nodeTable, error) {
+	return openNodeTableWithLoading(name, list, nil)
+}
+
+func openNodeTableWithLoading(name string, list func(string) ([]os.FileInfo, error), loading func(int, int)) (*nodeTable, error) {
 	t := newNodeTable(list)
 	if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 		return nil, err
@@ -45,7 +49,7 @@ func openNodeTable(name string, list func(dir string) ([]os.FileInfo, error)) (*
 	case err != nil:
 		return nil, err
 	case bytes.HasPrefix(data, nodeLogMagic):
-		if err := t.replay(data[len(nodeLogMagic):]); err != nil {
+		if err := t.replayWithLoading(data[len(nodeLogMagic):], loading); err != nil {
 			return nil, err
 		}
 	case data[0] == '{':
@@ -97,6 +101,15 @@ func legacyWatermark(data []byte) uint64 {
 // replay applies records up to a torn tail: a record cut short by a crash,
 // or the zeros a filesystem may leave after one.
 func (t *nodeTable) replay(b []byte) error {
+	return t.replayWithLoading(b, nil)
+}
+
+func (t *nodeTable) replayWithLoading(b []byte, loading func(int, int)) error {
+	total := len(b)
+	reported := 0
+	if loading != nil {
+		loading(0, total)
+	}
 	r := logReader{b: b}
 	for len(r.b) > 0 {
 		if err := t.apply(&r); err != nil {
@@ -105,6 +118,15 @@ func (t *nodeTable) replay(b []byte) error {
 			}
 			return err
 		}
+		completed := total - len(r.b)
+		// Avoid a callback/lock for every identity in multi-hundred-MB logs.
+		if loading != nil && completed-reported >= 1<<20 {
+			loading(completed, total)
+			reported = completed
+		}
+	}
+	if loading != nil {
+		loading(total, total)
 	}
 	return nil
 }

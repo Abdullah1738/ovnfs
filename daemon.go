@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ const daemonWait = 15 * time.Second
 // serveLoadWait bounds how long a client waits for a daemon to answer its
 // hello: a daemon answers once its state is loaded and mounted, which takes
 // minutes on a large state after a reboot.
-const serveLoadWait = 5 * time.Minute
+const serveLoadWait = 300 * time.Second
 
 // loadNotice is how long a client waits before it says it is still waiting.
 const loadNotice = 5 * time.Second
@@ -56,10 +57,11 @@ func accepting(state string) bool {
 
 // client returns the daemon connection, auto-starting the daemon when the verb allows it.
 func (c *cli) client() (*admin.Client, error) {
+	c.startupContext()
 	if c.conn != nil {
 		return c.conn, nil
 	}
-	if c.autostart && !accepting(c.state) {
+	if c.autostart {
 		client, pid, err := startDaemon(c.ctx, c.state, c.mount)
 		if err != nil {
 			return nil, err
@@ -70,7 +72,7 @@ func (c *cli) client() (*admin.Client, error) {
 		c.conn = client
 		return client, nil
 	}
-	client, err := awaitDaemon(c.ctx, c.state, 0, nil)
+	client, err := awaitDaemon(c.ctx, c.state, c.mount, 0, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -82,30 +84,61 @@ func (c *cli) client() (*admin.Client, error) {
 // completes a handshake. Starts on one state directory take turns; the pid is 0
 // when an earlier start's daemon answers instead.
 func startDaemon(ctx context.Context, state, mount string) (*admin.Client, int, error) {
-	lock, err := lockDaemon(state)
+	ctx, cancel := watchStartupProgress(ctx, state)
+	defer cancel()
+	state, mount, err := daemonPaths(state, mount)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer lock.Close()
-	return spawnDaemon(ctx, state, mount)
+	if lease, err := fastStartLease(state); err == nil && lease != nil {
+		client, dialErr := dialDaemon(ctx, state)
+		lease.Close()
+		if dialErr == nil {
+			return client, 0, nil
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, 0, startupDeadline(state, ctx.Err())
+	}
+	lock, err := lockDaemon(ctx, state)
+	if err != nil {
+		return nil, 0, err
+	}
+	client, pid, spawnErr := spawnDaemon(ctx, state, mount, lock)
+	releaseStartupLease(lock, state, pid, spawnErr)
+	return client, pid, spawnErr
 }
 
 // lockDaemon creates the state directory and waits for its start lock, held
 // by startDaemon and restart while they change the daemon; closing the
 // returned file releases it.
-func lockDaemon(state string) (*os.File, error) {
+func lockDaemon(ctx context.Context, state string) (*os.File, error) {
+	ctx, cancel := watchStartupProgress(ctx, state)
+	defer cancel()
 	if err := os.MkdirAll(state, 0o700); err != nil {
-		return nil, fmt.Errorf("creating state %s: %w", state, err)
+		return nil, fmt.Errorf("can't read state: %s: %w", state, err)
 	}
-	lock, err := admin.Lock(filepath.Join(state, startLock))
+	lock, err := lockStart(ctx, state)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			pid, held, _ := daemonHolder(context.Background(), state)
+			if held {
+				return nil, fmt.Errorf("%w: %w", unresponsiveDaemon(state, pid), err)
+			}
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return nil, fmt.Errorf("can't read state: %s: %w", state, err)
+		}
 		return nil, fmt.Errorf("waiting for other starts of %s: %w", state, err)
 	}
 	return lock, nil
 }
 
 // spawnDaemon is startDaemon for a caller that holds the start lock.
-func spawnDaemon(ctx context.Context, state, mount string) (*admin.Client, int, error) {
+func spawnDaemon(ctx context.Context, state, mount string, lock *os.File) (*admin.Client, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	state, err := filepath.Abs(state)
 	if err != nil {
 		return nil, 0, fmt.Errorf("resolving state %s: %w", state, err)
@@ -113,9 +146,22 @@ func spawnDaemon(ctx context.Context, state, mount string) (*admin.Client, int, 
 	if mount, err = filepath.Abs(mount); err != nil {
 		return nil, 0, fmt.Errorf("resolving mount %s: %w", mount, err)
 	}
-	if accepting(state) {
-		client, err := awaitDaemon(ctx, state, 0, nil)
+	_, held, err := daemonHolder(ctx, state)
+	if err != nil {
+		return nil, 0, err
+	}
+	if accepting(state) || held {
+		client, err := awaitDaemonLocked(ctx, state, mount, 0, nil)
+		if errors.Is(err, errDaemonRecovered) {
+			return spawnDaemon(ctx, state, mount, lock)
+		}
 		return client, 0, err
+	}
+	if err := checkSavedPort(state); err != nil {
+		return nil, 0, err
+	}
+	if err := finishRecovery(ctx, state, mount); err != nil {
+		return nil, 0, err
 	}
 	log, err := os.OpenFile(logPath(state), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
@@ -126,17 +172,25 @@ func spawnDaemon(ctx context.Context, state, mount string) (*admin.Client, int, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("locating ovnfs binary: %w", err)
 	}
-	cmd := exec.Command(exe, "serve", "-state", state, "-mount", mount)
+	cmd := exec.Command(exe, "serve", "-state", state, "-mount", mount, "--starter-pid", strconv.Itoa(os.Getpid()))
+	fd := inheritStart(cmd, lock)
+	cmd.Args = append(cmd.Args, "--starter-fd", strconv.Itoa(fd))
 	cmd.Stdin = nil // exec connects a nil Stdin to the null device
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = detachedProcess()
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, 0, fmt.Errorf("starting ovnfs serve: %w", err)
 	}
 	pid := cmd.Process.Pid
 	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
-	client, err := awaitDaemon(ctx, state, pid, exited)
+	go func() { exited <- cmd.Wait(); close(exited) }()
+	client, err := awaitDaemonLocked(ctx, state, mount, pid, exited)
+	if errors.Is(err, errDaemonRecovered) {
+		return spawnDaemon(ctx, state, mount, lock)
+	}
 	return client, pid, err
 }
 
@@ -145,7 +199,24 @@ func spawnDaemon(ctx context.Context, state, mount string) (*admin.Client, int, 
 // after loadNotice. With exited nil the daemon is already listening, and a
 // failed dial ends the wait. Otherwise the daemon is the serve this client
 // started (pid): dials retry until its socket appears, and its exit ends the wait.
-func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error) (*admin.Client, error) {
+func awaitDaemon(ctx context.Context, state, mount string, pid int, exited <-chan error) (*admin.Client, error) {
+	return awaitDaemonWait(ctx, state, mount, pid, exited)
+}
+
+func awaitDaemonLocked(ctx context.Context, state, mount string, pid int, exited <-chan error) (*admin.Client, error) {
+	return awaitDaemonWait(ctx, state, mount, pid, exited)
+}
+
+func awaitDaemonWait(ctx context.Context, state, mount string, pid int, exited <-chan error) (*admin.Client, error) {
+	ctx, stopWait := watchStartupProgress(ctx, state)
+	defer stopWait()
+	dialCtx, cancelDial := context.WithCancel(ctx)
+	defer cancelDial()
+	_, initiallyHeld, holderErr := daemonHolder(ctx, state)
+	if holderErr != nil {
+		return nil, holderErr
+	}
+	lastHealth := time.Time{}
 	name := "ovnfs"
 	if pid != 0 {
 		name = fmt.Sprintf("ovnfs serve (pid %d)", pid)
@@ -158,7 +229,7 @@ func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error
 	dial := func() {
 		result = make(chan dialed, 1)
 		go func(ch chan<- dialed) {
-			client, err := admin.Dial(socketPath(state), adminProtocol)
+			client, err := admin.DialContext(dialCtx, socketPath(state), adminProtocol)
 			ch <- dialed{client, err}
 		}(result)
 	}
@@ -172,8 +243,6 @@ func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error
 			}(result)
 		}
 	}
-	deadline := time.NewTimer(serveLoadWait)
-	defer deadline.Stop()
 	notice := time.NewTimer(loadNotice)
 	defer notice.Stop()
 	retry := time.NewTicker(100 * time.Millisecond)
@@ -185,7 +254,7 @@ func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error
 			if r.err == nil {
 				return r.client, nil
 			}
-			if exited == nil {
+			if exited == nil && !initiallyHeld {
 				err := fmt.Errorf("connecting to ovnfs at %s: %w", socketPath(state), r.err)
 				// Past the dial, the daemon accepted and then dropped the
 				// hello: it failed while loading, and its log says why.
@@ -197,6 +266,19 @@ func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error
 			}
 			result = nil
 		case <-retry.C:
+			if time.Since(lastHealth) >= time.Second {
+				lastHealth = time.Now()
+				_, held, err := daemonHolder(ctx, state)
+				if err != nil {
+					abandon()
+					return nil, err
+				}
+
+				if initiallyHeld && !held && !accepting(state) && exited == nil {
+					abandon()
+					return nil, fmt.Errorf("daemon exited while loading; %s", logTail(state))
+				}
+			}
 			if result == nil {
 				dial()
 			}
@@ -206,14 +288,24 @@ func awaitDaemon(ctx context.Context, state string, pid int, exited <-chan error
 				err = errors.New("exit status 0")
 			}
 			return nil, fmt.Errorf("%s exited before accepting connections (%v); %s", name, err, logTail(state))
-		case <-deadline.C:
-			abandon()
-			return nil, fmt.Errorf("%s did not answer within %s; %s", name, serveLoadWait, logTail(state))
+
 		case <-ctx.Done():
 			abandon()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, startupDeadline(state, ctx.Err())
+			}
 			return nil, fmt.Errorf("waiting for %s: %w", name, ctx.Err())
 		case <-notice.C:
-			fmt.Fprintf(stderr, "waiting for %s to load its state\n", name)
+			holder, _, _ := daemonHolder(ctx, state)
+			p, ready, probeErr := probeLoading(ctx, state)
+			if probeErr == nil && !ready {
+				holder = p.PID
+				fmt.Fprintf(stderr, "daemon %d starting, waiting (loading %d/%d)\n", holder, p.Completed, p.Total)
+			} else if holder > 0 {
+				fmt.Fprintf(stderr, "daemon %d starting, waiting\n", holder)
+			} else {
+				fmt.Fprintf(stderr, "daemon starting, waiting at %s\n", state)
+			}
 		}
 	}
 }
@@ -258,15 +350,14 @@ func tailLines(path string, n int) ([]string, error) {
 type startCmd struct{}
 
 func (cmd *startCmd) Run(c *cli) error {
+	c.startupContext()
 	c.autostart = false
-	started := false
-	if !accepting(c.state) {
-		client, _, err := startDaemon(c.ctx, c.state, c.mount)
-		if err != nil {
-			return err
-		}
-		c.conn, started = client, true
+	client, pid, err := startDaemon(c.ctx, c.state, c.mount)
+	if err != nil {
+		return err
 	}
+	c.conn = client
+	started := pid != 0
 	st, err := call[api.Status](c, "status", struct{}{})
 	if err != nil || c.json {
 		return err
@@ -303,7 +394,11 @@ func stopDaemon(c *cli, args api.StopArgs) (json.RawMessage, error) {
 	noticed := false
 	for {
 		up := accepting(c.state)
-		if !up && (st.PID == 0 || !processAlive(st.PID)) {
+		_, held, holderErr := daemonHolder(c.ctx, c.state)
+		if holderErr != nil {
+			return nil, holderErr
+		}
+		if !up && !held {
 			return raw, nil
 		}
 		if time.Now().After(deadline) {
@@ -353,24 +448,44 @@ func (cmd *stopCmd) Run(c *cli) error {
 type restartCmd struct{}
 
 func (cmd *restartCmd) Run(c *cli) error {
-	c.autostart = false
-	lock, err := lockDaemon(c.state)
+	c.startupContext()
+	ctx, cancel := watchStartupProgress(c.ctx, c.state)
+	defer cancel()
+	c.ctx = ctx
+	state, mount, err := daemonPaths(c.state, c.mount)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if accepting(c.state) {
-		client, err := c.client()
-		if err != nil {
+	c.state, c.mount = state, mount
+	c.autostart = false
+	lock, err := lockDaemon(c.ctx, c.state)
+	if err != nil {
+		return err
+	}
+	startedPID := 0
+	var startupErr error
+	defer func() { releaseStartupLease(lock, c.state, startedPID, startupErr) }()
+	_, held, err := daemonHolder(c.ctx, c.state)
+	if err != nil {
+		return err
+	}
+	if accepting(c.state) || held {
+		client, err := awaitDaemonLocked(c.ctx, c.state, c.mount, 0, nil)
+		if err != nil && !errors.Is(err, errDaemonRecovered) {
 			return err
 		}
-		// Daemons that predate the feature reject unknown fields.
-		keep := slices.Contains(client.Welcome().Features, "stop.keep_mount")
-		if _, err := stopDaemon(c, api.StopArgs{KeepMount: keep}); err != nil {
-			return err
+		if client != nil {
+			c.conn = client
+			appendDaemonLog(c.state, fmt.Sprintf("restart requested by cli pid %d", os.Getpid()))
+			// Daemons that predate the feature reject unknown fields.
+			keep := slices.Contains(client.Welcome().Features, "stop.keep_mount")
+			if err := stopForRestart(c, keep); err != nil {
+				return err
+			}
 		}
 	}
-	client, pid, err := spawnDaemon(c.ctx, c.state, c.mount)
+	client, pid, err := spawnDaemon(c.ctx, c.state, c.mount, lock)
+	startedPID, startupErr = pid, err
 	if err != nil {
 		return err
 	}
@@ -379,7 +494,15 @@ func (cmd *restartCmd) Run(c *cli) error {
 		_, err := call[api.Status](c, "status", struct{}{})
 		return err
 	}
-	fmt.Fprintf(stderr, "%s ovnfs (pid %d, log %s)\n", paint(stderr, styleGreen, "restarted"), pid, paint(stderr, styleDim, logPath(c.state)))
+	if pid == 0 {
+		st, err := call[api.Status](c, "status", struct{}{})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stderr, "already running (pid %d)\n", st.PID)
+	} else {
+		fmt.Fprintf(stderr, "%s ovnfs (pid %d, log %s)\n", paint(stderr, styleGreen, "restarted"), pid, paint(stderr, styleDim, logPath(c.state)))
+	}
 	return nil
 }
 
@@ -396,7 +519,38 @@ type statusCmd struct{}
 
 func (cmd *statusCmd) Run(c *cli) error {
 	c.autostart = false
-	if !accepting(c.state) {
+	p, ready, probeErr := probeLoading(c.ctx, c.state)
+	if probeErr == nil && !ready {
+		if c.json {
+			if err := json.NewEncoder(stdout).Encode(map[string]any{"pid": p.PID, "state": c.state, "status": "loading", "completed": p.Completed, "total": p.Total}); err != nil {
+				return err
+			}
+			return exitCode(1)
+		}
+		fmt.Fprintf(stdout, "starting/restarting (pid %d), loading %d/%d\n", p.PID, p.Completed, p.Total)
+		return exitCode(1)
+	}
+	client, dialErr := dialDaemon(c.ctx, c.state)
+	if dialErr != nil {
+		pid, held, err := daemonHolder(c.ctx, c.state)
+		if err != nil {
+			return err
+		}
+		if held || accepting(c.state) {
+			if pid > 0 {
+				fmt.Fprintf(stderr, "ovnfs starting or unresponsive (pid %d, state lock or saved port held at %s)\n", pid, c.state)
+			} else {
+				fmt.Fprintf(stderr, "ovnfs starting or unresponsive at %s; owner PID unavailable\n", c.state)
+			}
+			return exitCode(1)
+		}
+		if err := checkSavedPort(c.state); err != nil {
+			return err
+		}
+		var op *net.OpError
+		if errors.As(dialErr, &op) && errors.Is(dialErr, os.ErrPermission) {
+			return fmt.Errorf("can't read state: %s: %w", c.state, dialErr)
+		}
 		// Under --json stdout carries only JSON; the exit status says it all.
 		out := io.Writer(stdout)
 		if c.json {
@@ -405,6 +559,7 @@ func (cmd *statusCmd) Run(c *cli) error {
 		fmt.Fprintln(out, paint(out, styleRed, "not running"))
 		return exitCode(1)
 	}
+	c.conn = client
 	st, err := call[api.Status](c, "status", struct{}{})
 	if err != nil || c.json {
 		return err
@@ -436,4 +591,40 @@ func (cmd *statusCmd) Run(c *cli) error {
 		fmt.Fprintf(stdout, "%s%s%s\n", paint(stdout, styleDim, row[0]), strings.Repeat(" ", max(2, 12-len(row[0]))), row[1])
 	}
 	return nil
+}
+
+var errDaemonRecovered = errors.New("daemon holder recovered")
+
+func dialDaemon(ctx context.Context, state string) (*admin.Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	return admin.DialContext(ctx, socketPath(state), adminProtocol)
+}
+
+func daemonPaths(state, mount string) (string, string, error) {
+	state, err := filepath.Abs(state)
+	if err != nil {
+		return "", "", fmt.Errorf("state path: %w", err)
+	}
+	mount, err = filepath.Abs(mount)
+	if err != nil {
+		return "", "", fmt.Errorf("mount path: %w", err)
+	}
+	return state, mount, nil
+}
+
+func stopForRestart(c *cli, keep bool) error {
+	if keep && !slices.Contains(c.conn.Welcome().Features, "stop.keep_mount_receipts") {
+		// Older daemons cannot reconcile at their own cut. Exclude competing
+		// stop helpers until that holder has left the mount for its successor.
+		lease, err := lockLegacyHandoff(c.ctx, c.state, c.mount)
+		if err != nil {
+			return err
+		}
+		if lease != nil {
+			defer lease.Close()
+		}
+	}
+	_, err := stopDaemon(c, api.StopArgs{KeepMount: keep})
+	return err
 }
